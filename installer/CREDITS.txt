@@ -15,18 +15,7 @@ https://discord.com/invite/renodx
 nvngx_dlssnr.dll: NVIDIA DLSSNR
 Copyright 2026 NVIDIA Corporation.
 
-Depth estimation optional add-on
-depth-anything-v2-small.onnx: Depth Anything V2 Small, by Lihe Yang and others. Apache-2.0 license.
-https://github.com/DepthAnything/Depth-Anything-V2
-https://huggingface.co/onnx-community/depth-anything-v2-small
-
-onnxruntime.dll: ONNX Runtime, Microsoft Corporation. MIT license.
-https://onnxruntime.ai/
-
-DirectML.dll: DirectML, Microsoft Corporation. Microsoft Software License Terms.
-https://github.com/microsoft/DirectML
-
-The DLSS5 and depth estimation files are downloaded separately and are not bundled in this installer.
+The DLSS5 files are downloaded separately and are not bundled in this installer.
 Third-party files are not covered by RobloxShadeHost's MIT license.
 Their inclusion does not imply endorsement by their authors.
 
