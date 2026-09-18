@@ -3,8 +3,7 @@
 Use ReShade with Roblox. Install ReShade on RobloxShadeHost, run the host next to Roblox, and the effects draw over your game.
 
 > [!NOTE]
-> Join our discord for support & community presets
-> https://discord.gg/wVbVUdENas
+> Join our [discord](https://discord.gg/wVbVUdENas) for support & community presets
 
 ## Read this first
 
@@ -42,6 +41,9 @@ The installer downloads every effect package from ReShade's official list. The p
 Keep the files ReShade installs beside RobloxShadeHost.exe, including `dxgi.dll`, `ReShade.ini`, and the shader folders. ReShade is downloaded separately and is not bundled with the EXE.
 
 ## Depth-based effects
+
+> [!WARNING]
+> The DLSS5 add-on does not work with Depth Anything V2!
 
 Roblox's depth buffer is not available outside its process, so the host estimates depth from the captured image with Depth Anything V2. Ambient occlusion, depth of field, fog and other effects that read depth then work from that estimate. Objects that look close in the image are close in the estimate, but distances are relative and edges are softer than a real depth buffer.
 
