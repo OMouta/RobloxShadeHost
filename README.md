@@ -2,9 +2,9 @@
 
 Use ReShade with Roblox. Install ReShade on RobloxShadeHost, run the host next to Roblox, and the effects draw over your game.
 
-> [!WARNING]
-> DLSS5 can break with NVIDEA Driver updates, you will need to wait for a new version for it to start working again.
-> Last DLSS5 update: 13/09/2026
+> [!NOTE]
+> Join our discord for support & community presets
+> https://discord.gg/wVbVUdENas
 
 ## Read this first
 
