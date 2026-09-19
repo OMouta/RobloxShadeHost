@@ -14,6 +14,10 @@
   <a href="https://discord.gg/wVbVUdENas">Discord &amp; community presets</a>
 </p>
 
+## Showcase
+
+![Example 1](assets/ReadmeShowcase1.jpg)
+
 ## Read this first
 
 > [!NOTE]
