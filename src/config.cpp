@@ -13,7 +13,7 @@ InputHotkeys LoadInputHotkeys()
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
         winrt::check_bool(WritePrivateProfileStringW(L"Input", L"ToggleKey", g.inputHotkey.c_str(), path.c_str()));
-        winrt::check_bool(WritePrivateProfileStringW(L"Input", L"OverlayToggleKey", L"", path.c_str()));
+        winrt::check_bool(WritePrivateProfileStringW(L"Input", L"OverlayToggleKey", L"Ctrl+F8", path.c_str()));
     }
 
     wchar_t value[128]{};
@@ -27,7 +27,7 @@ InputHotkeys LoadInputHotkeys()
     }
     g.inputHotkey = value;
     g.indicatorText = L"Input captured | " + g.inputHotkey + L" to return to Roblox";
-    const DWORD overlayCount = GetPrivateProfileStringW(L"Input", L"OverlayToggleKey", L"", value,
+    const DWORD overlayCount = GetPrivateProfileStringW(L"Input", L"OverlayToggleKey", L"Ctrl+F8", value,
                                                        static_cast<DWORD>(std::size(value)), path.c_str());
     Hotkey overlayHotkey;
     if (overlayCount == std::size(value) - 1 || (overlayCount && !ParseHotkey(value, overlayHotkey)))

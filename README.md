@@ -90,7 +90,7 @@ The first launch creates **RobloxShadeHost.ini** beside the EXE:
 ```ini
 [Input]
 ToggleKey=Ctrl+Home
-OverlayToggleKey=
+OverlayToggleKey=Ctrl+F8
 ```
 
 Close the host, edit `ToggleKey` in a text editor, save, and start the host again. For example:
@@ -113,7 +113,7 @@ Names are case-insensitive. Use a shortcut different from ReShade's menu and eff
 
 The shortcut is reserved while the host is running. Exit the host to free it for other applications.
 
-To switch between the overlay and original Roblox footage, set `OverlayToggleKey` under `[Input]`, for example `OverlayToggleKey=Ctrl+F8`, and restart the host. It has no default binding. Leave it blank to keep it unassigned. Use a different shortcut from `ToggleKey`.
+Press **Ctrl+F8** to switch between the overlay and original Roblox footage. To change the shortcut, edit `OverlayToggleKey` under `[Input]` and restart the host. Leave it blank to keep it unassigned. Use a different shortcut from `ToggleKey`.
 
 Turning the overlay off stops frame capture and returns input to Roblox. Press the shortcut again to resume capture and show the overlay.
 
