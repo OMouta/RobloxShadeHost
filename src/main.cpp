@@ -17,7 +17,7 @@ namespace
 {
 int Run()
 {
-    const Hotkey inputHotkey = LoadInputHotkey();
+    const auto hotkeys = LoadInputHotkeys();
     if (!GraphicsCaptureSession::IsSupported())
     {
         std::puts("Windows Graphics Capture is not supported on this system.");
@@ -26,10 +26,18 @@ int Run()
 
     CreateOverlayWindows();
 
-    if (!RegisterHotKey(g.overlay, kEditModeHotkey, inputHotkey.modifiers, inputHotkey.key))
+    if (!RegisterHotKey(g.overlay, kEditModeHotkey, hotkeys.input.modifiers, hotkeys.input.key))
     {
         const std::wstring error = L"Could not register " + g.inputHotkey + L". It may be reserved by Windows or in use by another program. "
                                    L"Choose another ToggleKey in RobloxShadeHost.ini and restart.";
+        MessageBoxW(nullptr, error.c_str(), L"RobloxShadeHost", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    if (hotkeys.overlay.key && !RegisterHotKey(g.overlay, kOverlayToggleHotkey, hotkeys.overlay.modifiers, hotkeys.overlay.key))
+    {
+        const std::wstring error = L"Could not register " + g.overlayHotkey + L". It may be reserved by Windows or in use by another program. "
+                                   L"Choose another OverlayToggleKey in RobloxShadeHost.ini and restart.";
         MessageBoxW(nullptr, error.c_str(), L"RobloxShadeHost", MB_OK | MB_ICONERROR);
         return 1;
     }
@@ -41,6 +49,8 @@ int Run()
     std::puts("Install ReShade on this exe (DirectX 10/11/12).\n"
               "Waiting for Roblox...");
     std::printf("%ls: toggle input capture. ReShade keeps its own menu and effect shortcuts.\n", g.inputHotkey.c_str());
+    if (hotkeys.overlay.key)
+        std::printf("%ls: toggle overlay and frame capture.\n", g.overlayHotkey.c_str());
 
     ULONGLONG nextSearch = 0;
     for (;;)
@@ -57,13 +67,16 @@ int Run()
             DispatchMessageW(&msg);
         }
 
+        if (!g.captureEnabled && g.target)
+            StopCapture();
+
         if (g.target && !IsWindow(g.target))
         {
             StopCapture();
             std::puts("Roblox closed. Waiting for Roblox...");
         }
 
-        if (!g.target && GetTickCount64() >= nextSearch)
+        if (g.captureEnabled && !g.target && GetTickCount64() >= nextSearch)
         {
             nextSearch = GetTickCount64() + 500;
             if (HWND roblox = FindRobloxWindow())

@@ -44,6 +44,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     switch (message)
     {
     case WM_HOTKEY:
+        if (wParam == kOverlayToggleHotkey)
+        {
+            g.captureEnabled = !g.captureEnabled;
+            if (!g.captureEnabled && g.editMode)
+            {
+                SetEditMode(false);
+                SetForegroundWindow(g.target);
+            }
+            UpdateOverlay();
+            std::puts(g.captureEnabled ? "Overlay enabled." : "Overlay disabled. Frame capture stopped.");
+            return 0;
+        }
         if (wParam != kEditModeHotkey)
             break;
         if (g.editMode)
@@ -51,7 +63,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             SetEditMode(false);
             SetForegroundWindow(g.target);
         }
-        else if (g.target && !IsIconic(g.target))
+        else if (g.captureEnabled && g.target && !IsIconic(g.target))
         {
             SetEditMode(true);
             UpdateOverlay();
@@ -113,7 +125,7 @@ void SetEditMode(bool enabled)
 void UpdateOverlay()
 {
     RECT bounds{};
-    bool visible = g.target && IsWindowVisible(g.target) && !IsIconic(g.target) &&
+    bool visible = g.captureEnabled && g.target && IsWindowVisible(g.target) && !IsIconic(g.target) &&
                    (g.editMode || GetForegroundWindow() == g.target) &&
                    SUCCEEDED(DwmGetWindowAttribute(g.target, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)));
 

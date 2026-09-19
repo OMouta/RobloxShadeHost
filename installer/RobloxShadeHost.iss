@@ -8,7 +8,7 @@
   #define PresetsBaseUrl "https://raw.githubusercontent.com/OMouta/RobloxShadeHost/main/presets"
 #endif
 #ifndef AppVersion
-  #define AppVersion "0.3.2"
+  #define AppVersion "0.3.3"
 #endif
 #ifndef DownloadManifestUrl
   #define DownloadManifestUrl "https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/downloads.ini"

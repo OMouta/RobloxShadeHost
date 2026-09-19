@@ -18,6 +18,7 @@ using winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 
 constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 constexpr int kEditModeHotkey = 1;
+constexpr int kOverlayToggleHotkey = 2;
 
 struct State
 {
@@ -25,9 +26,11 @@ struct State
     HWND target = nullptr;
     HWND indicator = nullptr;
     std::wstring inputHotkey = L"Ctrl+Home";
+    std::wstring overlayHotkey;
     std::wstring indicatorText;
     bool editMode = false;
     bool overlayVisible = false;
+    bool captureEnabled = true;
     RECT overlayRect{};
 
     winrt::com_ptr<ID3D11Device> device;
