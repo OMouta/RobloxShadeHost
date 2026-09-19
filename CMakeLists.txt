@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(RobloxShadeHost VERSION 0.3.2 LANGUAGES CXX)
+project(RobloxShadeHost VERSION 0.3.2 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,6 +36,7 @@ fetch_header("${ONNXRUNTIME_HEADERS_URL}/onnxruntime_ep_c_api.h" e94ac3490697bdb
 fetch_header("https://raw.githubusercontent.com/microsoft/onnxruntime/v1.24.4/include/onnxruntime/core/providers/dml/dml_provider_factory.h" 893ddb645545bddad8c3f24bb768e97651c9ce45ec22076b435439889e4228c8 "${ONNXRUNTIME_INCLUDE}/dml_provider_factory.h")
 
 add_executable(RobloxShadeHost
+    src/RobloxShadeHost.rc
     src/main.cpp
     src/capture.cpp
     src/config.cpp

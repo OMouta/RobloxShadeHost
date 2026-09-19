@@ -32,6 +32,7 @@ DisableProgramGroupPage=yes
 InfoBeforeFile=CREDITS.txt
 OutputDir=..\build\installer
 OutputBaseFilename=RobloxShadeHost-Setup
+SetupIconFile=..\assets\RobloxShadeHost.ico
 Compression=lzma2
 SolidCompression=yes
 ArchiveExtraction=full

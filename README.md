@@ -1,15 +1,27 @@
-# RobloxShadeHost
+<p align="center">
+  <img src="assets/RobloxShadeHost.png" alt="RobloxShadeHost logo" width="256" height="256">
+</p>
 
-Use ReShade with Roblox. Install ReShade on RobloxShadeHost, run the host next to Roblox, and the effects draw over your game.
+<h1 align="center">RobloxShadeHost</h1>
 
-> [!NOTE]
-> Join our [discord](https://discord.gg/wVbVUdENas) for support & community presets
+<p align="center">Use ReShade with Roblox.</p>
+
+<p align="center">
+  <a href="https://github.com/OMouta/RobloxShadeHost/releases/latest/download/RobloxShadeHost-Setup.exe">Download for Windows</a>
+  &nbsp;·&nbsp;
+  <a href="#download-and-set-up">Setup guide</a>
+  &nbsp;·&nbsp;
+  <a href="https://discord.gg/wVbVUdENas">Discord &amp; community presets</a>
+</p>
+
+Install ReShade on RobloxShadeHost, run the host next to Roblox, and the effects draw over your game.
 
 ## Read this first
 
 **How do I get it?** Download [RobloxShadeHost-Setup.exe](https://github.com/OMouta/RobloxShadeHost/releases/latest/download/RobloxShadeHost-Setup.exe) and run it like any other installer. It downloads ReShade and its effects for you. Keep the folder it suggests, or pick any folder of your own. Do not install it inside the Roblox folder, and do not install ReShade onto Roblox itself. The host is a separate program that runs beside Roblox and never touches Roblox's files.
 
 **Will it slow my game down?** Yes. This is experimental and lowers your FPS, because the host copies Roblox's picture every frame and draws the effects on top.
+
 **How do I open the ReShade menu?** While you play, your keyboard and mouse go to Roblox. Press **Ctrl+Home** to hand them to RobloxShadeHost instead. A small badge at the bottom of the screen confirms it. Now press **Home** to open ReShade, pick a preset or change effects, and press **Home** again to close it. Press **Ctrl+Home** once more to go back to playing. Your effects stay on.
 
 ## Download and set up
