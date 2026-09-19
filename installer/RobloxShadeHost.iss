@@ -204,8 +204,8 @@ end;
 
 // The ReShade installer writes .\reshade-shaders\Shaders\**\** as the search paths. ReShade treats a
 // trailing ** as "search recursively" and then looks for a folder literally named **, so no effect
-// or texture is found. Drop the extra suffix and leave every other line, including the BOM, alone.
-procedure FixSearchPaths(const FileName: String);
+// or texture is found. Drop the extra suffix, preserving the BOM.
+procedure FixSearchPaths(const FileName: String; InitializePresets: Boolean);
 var
   Lines: TArrayOfString;
   Index: Integer;
@@ -217,6 +217,10 @@ begin
   Changed := False;
   for Index := 0 to GetArrayLength(Lines) - 1 do begin
     Line := Lines[Index];
+    if InitializePresets and (Pos('[GENERAL]', Line) > 0) then begin
+      Lines[Index] := Line + #13#10 + 'PresetPath=.\presets\ReShadePreset.ini';
+      Changed := True;
+    end;
     if ((Pos('EffectSearchPaths=', Line) = 1) or (Pos('TextureSearchPaths=', Line) = 1)) and
       (Copy(Line, Length(Line) - 5, 6) = '\**\**') then begin
       Lines[Index] := Copy(Line, 1, Length(Line) - 3);
@@ -253,7 +257,7 @@ begin
   if (ExitCode <> 0) or not FileExists(Stage + '\dxgi.dll') or
     not FileExists(Stage + '\ReShade.ini') then
     RaiseException('ReShade installation failed. Go back to retry or deselect ReShade.');
-  FixSearchPaths(Stage + '\ReShade.ini');
+  FixSearchPaths(Stage + '\ReShade.ini', WizardIsComponentSelected('reshade\presets'));
   ReShadeInstalled := True;
 end;
 
@@ -332,7 +336,7 @@ begin
   // An existing ReShade.ini is kept as is, so repair one written by an earlier installer.
   if (CurStep = ssInstall) and WizardIsComponentSelected('reshade') and
     FileExists(ExpandConstant('{app}\ReShade.ini')) then
-    FixSearchPaths(ExpandConstant('{app}\ReShade.ini'));
+    FixSearchPaths(ExpandConstant('{app}\ReShade.ini'), False);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);

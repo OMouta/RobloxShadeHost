@@ -70,6 +70,9 @@ function Assert-SearchPaths([string]$Ini) {
 
 $reshadeIni = Get-Content "$reshade/ReShade.ini" -Raw
 Assert-SearchPaths $reshadeIni
+if ($reshadeIni -notmatch '(?m)^PresetPath=\.\\presets\\ReShadePreset\.ini\r?$') {
+    throw 'The initial preset browser path is not in the presets folder.'
+}
 if (-not (Compare-Object ([IO.File]::ReadAllBytes("$reshade/ReShade.ini")[0..2]) @(0xEF, 0xBB, 0xBF)) -eq $null) {
     throw 'ReShade.ini lost its byte order mark.'
 }
