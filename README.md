@@ -16,6 +16,9 @@
 
 ## Read this first
 
+> [!NOTE]
+> If DLSS5 is stuck on "waiting", follow the [DLSS5 troubleshooting guide](DLSS5-README.md).
+
 **How do I get it?** Download [RobloxShadeHost-Setup.exe](https://github.com/OMouta/RobloxShadeHost/releases/latest/download/RobloxShadeHost-Setup.exe) and run it like any other installer. It downloads ReShade and its effects for you. Keep the folder it suggests, or pick any folder of your own. Do not install it inside the Roblox folder, and do not install ReShade onto Roblox itself. The host is a separate program that runs beside Roblox and never touches Roblox's files.
 
 **Will it slow my game down?** Yes. This is experimental and lowers your FPS, because the host copies Roblox's picture every frame and draws the effects on top.
