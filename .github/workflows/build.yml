@@ -39,6 +39,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: RobloxShadeHost-windows-x64
@@ -48,4 +51,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" release/build/Release/RobloxShadeHost.exe release/build/installer/RobloxShadeHost-Setup.exe release/LICENSE --verify-tag --title "$RELEASE_TAG" --generate-notes
+        run: |
+          previous_tag=$(git describe --tags --match 'v*' --abbrev=0 "$RELEASE_TAG^" 2>/dev/null || true)
+          range="$RELEASE_TAG"
+          if [ -n "$previous_tag" ]; then
+            range="$previous_tag..$RELEASE_TAG"
+          fi
+          git log --format='- %s (%h)' "$range" > release-notes.md
+          gh release create "$RELEASE_TAG" release/build/Release/RobloxShadeHost.exe release/build/installer/RobloxShadeHost-Setup.exe release/LICENSE --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
