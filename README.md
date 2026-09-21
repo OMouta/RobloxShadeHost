@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/RobloxShadeHost.png" alt="RobloxShadeHost logo" width="256" height="256">
+  <img src="assets/RobloxShadeHost.png" alt="RobloxShadeHost logo" width="230" height="230">
 </p>
 
 <h1 align="center">RobloxShadeHost</h1>
@@ -14,9 +14,17 @@
   <a href="https://discord.gg/wVbVUdENas">Discord &amp; community presets</a>
 </p>
 
-## Showcase
-
 ![Example 1](assets/ReadmeShowcase1.jpg)
+
+#### *If you like this project, please consider starring to support development and help others find it.*
+
+<a href="https://www.star-history.com/?repos=omouta%2Frobloxshadehost&type=date&releases=&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=omouta/robloxshadehost&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=omouta/robloxshadehost&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=omouta/robloxshadehost&type=date&legend=bottom-right" />
+ </picture>
+</a>
 
 ## Read this first
 
