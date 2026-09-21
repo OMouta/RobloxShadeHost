@@ -21,6 +21,8 @@ The DLSS5 component reads `downloads.ini` from the `dlss5-assets` release. Both 
 
 The depth estimation component works the same way with `downloads.ini` from the `depth-assets` release, which lists `onnxruntime.dll` and `DirectML.dll` from that release and `depth-anything-v2-small.onnx` from Hugging Face. Manifest URLs must point at this repository's releases or at huggingface.co.
 
+DLSS5 and depth estimation do not work together, so the components page lets only one be selected. Installing either removes the other's files.
+
 Credits appear before component selection and are installed as `CREDITS.txt`. Removal requests go to **tiago@mouta.me**.
 
 ## Maintaining the downloads
@@ -37,7 +39,7 @@ Host only:
 .\RobloxShadeHost-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS="host"
 ```
 
-To install ReShade unattended, first read its license and explicitly pass `/ACCEPTRESHADELICENSE=1`. Select `host,reshade` with `/COMPONENTS`, adding `reshade\presets` for the presets, `reshade\dlss5` for DLSS5 and `reshade\depth` for depth estimation. Use `/LOG="setup.log"` to record download failures.
+To install ReShade unattended, first read its license and explicitly pass `/ACCEPTRESHADELICENSE=1`. Select `host,reshade` with `/COMPONENTS`, adding `reshade\presets` for the presets, `reshade\dlss5` for DLSS5 or `reshade\depth` for depth estimation. Setup stops if both are selected. Use `/LOG="setup.log"` to record download failures.
 
 Uninstall removes installed binaries and the shortcut. It retains ReShade settings and files created later by the user.
 

@@ -21,18 +21,19 @@ function Build-TestInstaller([string]$Name, [string]$ManifestUrl = '', [string]$
 }
 
 function Invoke-TestInstaller(
-    [string]$Setup, [string]$Name, [string]$Components, [bool]$AcceptLicense = $true
+    [string]$Setup, [string]$Name, [string]$Components, [bool]$AcceptLicense = $true,
+    [bool]$ExpectSuccess = $AcceptLicense
 ) {
     $destination = Join-Path $testRoot $Name
     $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS',
         "/COMPONENTS=$Components", "/DIR=`"$destination`"", "/LOG=`"$testRoot/$Name.log`"")
     if ($AcceptLicense) { $arguments += '/ACCEPTRESHADELICENSE=1' }
     $process = Start-Process $Setup -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
-    if ($AcceptLicense -and $process.ExitCode -ne 0) {
+    if ($ExpectSuccess -and $process.ExitCode -ne 0) {
         throw "$Name failed with exit code $($process.ExitCode). See $testRoot/$Name.log"
     }
-    if (-not $AcceptLicense -and ($process.ExitCode -eq 0 -or (Test-Path $destination))) {
-        throw 'ReShade installation proceeded without license acceptance.'
+    if (-not $ExpectSuccess -and ($process.ExitCode -eq 0 -or (Test-Path $destination))) {
+        throw "$Name installed although Setup should have stopped."
     }
     return $destination
 }
@@ -53,6 +54,10 @@ Assert-File $hostOnly 'depth-anything-v2-small.onnx' $false
 Assert-File $hostOnly 'unins000.exe' $false
 
 $null = Invoke-TestInstaller $setup 'no-license' 'host,reshade' $false
+$null = Invoke-TestInstaller $setup 'dlss5-and-depth' 'host,reshade,reshade\dlss5,reshade\depth' -ExpectSuccess $false
+if ((Get-Content "$testRoot/dlss5-and-depth.log" -Raw) -notmatch 'do not work together') {
+    throw 'Setup did not refuse DLSS5 and depth estimation together.'
+}
 $reshade = Invoke-TestInstaller $setup 'reshade' 'host,reshade,reshade\presets'
 Assert-File $reshade 'dxgi.dll'
 Assert-File $reshade 'ReShade-LICENSE.txt'
@@ -135,7 +140,11 @@ if ((Get-Content "$testRoot/missing-depth.log" -Raw) -notmatch 'Depth estimation
 }
 
 if ($DownloadDLSS) {
+    # Installing DLSS5 over depth estimation removes the depth files.
+    New-Item -ItemType Directory -Path "$testRoot/full" -Force | Out-Null
+    Set-Content "$testRoot/full/depth-anything-v2-small.onnx" 'stale'
     $full = Invoke-TestInstaller $setup 'full' 'host,reshade,reshade\dlss5'
+    Assert-File $full 'depth-anything-v2-small.onnx' $false
     Assert-File $full 'nvngx_dlssnr.dll'
     Assert-File $full 'renodx-dlss.addon64'
     $manifest = Get-Content "$repo/vendor/dlss5/downloads.ini" -Raw
@@ -149,7 +158,11 @@ if ($DownloadDLSS) {
 }
 
 if ($DownloadDepth) {
+    # Installing depth estimation over DLSS5 removes the DLSS5 files.
+    New-Item -ItemType Directory -Path "$testRoot/depth" -Force | Out-Null
+    Set-Content "$testRoot/depth/renodx-dlss.addon64" 'stale'
     $depth = Invoke-TestInstaller $setup 'depth' 'host,reshade,reshade\depth'
+    Assert-File $depth 'renodx-dlss.addon64' $false
     $manifest = Get-Content "$repo/vendor/depth/downloads.ini" -Raw
     foreach ($file in @('onnxruntime.dll', 'DirectML.dll', 'depth-anything-v2-small.onnx')) {
         Assert-File $depth $file

@@ -55,7 +55,7 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 Name: "host"; Description: "RobloxShadeHost (required)"; Types: recommended custom; Flags: fixed
 Name: "reshade"; Description: "ReShade with full add-on support"; Types: recommended
 Name: "reshade\dlss5"; Description: "DLSS5 add-on - RenoDX / clshortfuse and NVIDIA"; Flags: dontinheritcheck
-Name: "reshade\depth"; Description: "Depth estimation add-on, EXPERIMENTAL: lowers FPS - Depth Anything V2, ONNX Runtime and DirectML"; Flags: dontinheritcheck
+Name: "reshade\depth"; Description: "Depth estimation add-on, EXPERIMENTAL: lowers FPS, does not work with DLSS5 - Depth Anything V2, ONNX Runtime and DirectML"; Flags: dontinheritcheck
 Name: "reshade\presets"; Description: "RobloxShadeHost presets"; Types: recommended; Flags: dontinheritcheck
 
 [Files]
@@ -74,6 +74,14 @@ Source: "{tmp}\onnxruntime.dll"; DestDir: "{app}"; ExternalSize: 17328152; Compo
 Source: "{tmp}\DirectML.dll"; DestDir: "{app}"; ExternalSize: 18527776; Components: reshade\depth; Flags: external ignoreversion; Check: DepthReady
 Source: "{tmp}\depth-anything-v2-small.onnx"; DestDir: "{app}"; ExternalSize: 49642442; Components: reshade\depth; Flags: external ignoreversion; Check: DepthReady
 
+[InstallDelete]
+; DLSS5 and depth estimation break each other, so installing one removes the other.
+Type: files; Name: "{app}\depth-anything-v2-small.onnx"; Components: reshade\dlss5; Check: DLSSReady
+Type: files; Name: "{app}\onnxruntime.dll"; Components: reshade\dlss5; Check: DLSSReady
+Type: files; Name: "{app}\DirectML.dll"; Components: reshade\dlss5; Check: DLSSReady
+Type: files; Name: "{app}\nvngx_dlssnr.dll"; Components: reshade\depth; Check: DepthReady
+Type: files; Name: "{app}\renodx-dlss.addon64"; Components: reshade\depth; Check: DepthReady
+
 [Icons]
 #ifndef TestMode
 Name: "{userprograms}\RobloxShadeHost"; Filename: "{app}\RobloxShadeHost.exe"; WorkingDir: "{app}"
@@ -86,8 +94,9 @@ var
   LicenseMemo: TNewMemo;
   AcceptLicense: TNewCheckBox;
   ReShadeVersion, ReShadeUrl, SkippedComponents: String;
-  ReShadeInstalled, DLSSDownloaded, DepthDownloaded: Boolean;
+  ReShadeInstalled, DLSSDownloaded, DepthDownloaded, DLSSWasSelected: Boolean;
   EffectsDownloaded, PresetsDownloaded: Boolean;
+  PrevComponentsListClickCheck: TNotifyEvent;
 
 function ReShadeReady: Boolean;
 begin
@@ -159,8 +168,23 @@ begin
   LicensePage.Description := 'ReShade ' + Version + ' with full add-on support';
 end;
 
+// DLSS5 and depth estimation do not work together. Selecting one deselects the other.
+procedure ComponentsListClickCheck(Sender: TObject);
+begin
+  if WizardIsComponentSelected('reshade\dlss5') and WizardIsComponentSelected('reshade\depth') then
+    if DLSSWasSelected then
+      WizardSelectComponents('!reshade\dlss5')
+    else
+      WizardSelectComponents('!reshade\depth');
+  DLSSWasSelected := WizardIsComponentSelected('reshade\dlss5');
+  // Setup's own handler updates the required disk space and the setup type.
+  PrevComponentsListClickCheck(Sender);
+end;
+
 procedure InitializeWizard;
 begin
+  PrevComponentsListClickCheck := WizardForm.ComponentsList.OnClickCheck;
+  WizardForm.ComponentsList.OnClickCheck := @ComponentsListClickCheck;
   DownloadPage := CreateDownloadPage('Downloading components',
     'Please wait while Setup prepares your selected components.', nil);
   DownloadPage.ShowBaseNameInsteadOfUrl := True;
@@ -187,6 +211,13 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
+  if (CurPageID = wpSelectComponents) and WizardIsComponentSelected('reshade\dlss5') and
+    WizardIsComponentSelected('reshade\depth') then begin
+    SuppressibleMsgBox('DLSS5 and depth estimation do not work together. Select only one of them.',
+      mbInformation, MB_OK, IDOK);
+    Result := False;
+    exit;
+  end;
   if (CurPageID = wpSelectComponents) and WizardIsComponentSelected('reshade') then begin
     DownloadPage.Show;
     try
@@ -366,6 +397,8 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
+  if CurPageID = wpSelectComponents then
+    DLSSWasSelected := WizardIsComponentSelected('reshade\dlss5');
   if (CurPageID = wpFinished) and (SkippedComponents <> '') then
     WizardForm.FinishedLabel.Caption := SkippedComponents + ' RobloxShadeHost and ReShade were installed.';
 end;
