@@ -13,6 +13,9 @@
 #ifndef DownloadManifestUrl
   #define DownloadManifestUrl "https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/downloads.ini"
 #endif
+#ifndef DepthManifestUrl
+  #define DepthManifestUrl "https://github.com/OMouta/RobloxShadeHost/releases/download/depth-assets/downloads.ini"
+#endif
 
 [Setup]
 AppId={{77125AF5-DF0A-485A-A633-E64FBD50E90C}
@@ -52,6 +55,7 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 Name: "host"; Description: "RobloxShadeHost (required)"; Types: recommended custom; Flags: fixed
 Name: "reshade"; Description: "ReShade with full add-on support"; Types: recommended
 Name: "reshade\dlss5"; Description: "DLSS5 add-on - RenoDX / clshortfuse and NVIDIA"; Flags: dontinheritcheck
+Name: "reshade\depth"; Description: "Depth estimation add-on, EXPERIMENTAL: lowers FPS - Depth Anything V2, ONNX Runtime and DirectML"; Flags: dontinheritcheck
 Name: "reshade\presets"; Description: "RobloxShadeHost presets"; Types: recommended; Flags: dontinheritcheck
 
 [Files]
@@ -66,12 +70,9 @@ Source: "{tmp}\EffectPackages.ini"; DestDir: "{app}"; Components: reshade; Flags
 Source: "{tmp}\presets\*.ini"; DestDir: "{app}\presets"; Components: reshade\presets; Flags: external onlyifdoesntexist uninsneveruninstall; Check: PresetsReady
 Source: "{tmp}\nvngx_dlssnr.dll"; DestDir: "{app}"; ExternalSize: 165840496; Components: reshade\dlss5; Flags: external ignoreversion; Check: DLSSReady
 Source: "{tmp}\renodx-dlss.addon64"; DestDir: "{app}"; ExternalSize: 2624512; Components: reshade\dlss5; Flags: external ignoreversion; Check: DLSSReady
-
-[InstallDelete]
-; Earlier installers offered the depth estimation add-on. It is withdrawn until it works with ReShade.
-Type: files; Name: "{app}\depth-anything-v2-small.onnx"; Components: reshade
-Type: files; Name: "{app}\onnxruntime.dll"; Components: reshade
-Type: files; Name: "{app}\DirectML.dll"; Components: reshade
+Source: "{tmp}\onnxruntime.dll"; DestDir: "{app}"; ExternalSize: 17328152; Components: reshade\depth; Flags: external ignoreversion; Check: DepthReady
+Source: "{tmp}\DirectML.dll"; DestDir: "{app}"; ExternalSize: 18527776; Components: reshade\depth; Flags: external ignoreversion; Check: DepthReady
+Source: "{tmp}\depth-anything-v2-small.onnx"; DestDir: "{app}"; ExternalSize: 49642442; Components: reshade\depth; Flags: external ignoreversion; Check: DepthReady
 
 [Icons]
 #ifndef TestMode
@@ -85,7 +86,7 @@ var
   LicenseMemo: TNewMemo;
   AcceptLicense: TNewCheckBox;
   ReShadeVersion, ReShadeUrl, SkippedComponents: String;
-  ReShadeInstalled, DLSSDownloaded: Boolean;
+  ReShadeInstalled, DLSSDownloaded, DepthDownloaded: Boolean;
   EffectsDownloaded, PresetsDownloaded: Boolean;
 
 function ReShadeReady: Boolean;
@@ -96,6 +97,11 @@ end;
 function DLSSReady: Boolean;
 begin
   Result := ReShadeInstalled and DLSSDownloaded;
+end;
+
+function DepthReady: Boolean;
+begin
+  Result := ReShadeInstalled and DepthDownloaded;
 end;
 
 function EffectsReady: Boolean;
@@ -291,6 +297,7 @@ begin
   Result := '';
   SkippedComponents := '';
   DLSSDownloaded := False;
+  DepthDownloaded := False;
   if not WizardIsComponentSelected('reshade') then
     exit;
   if not AcceptLicense.Checked then begin
@@ -324,6 +331,24 @@ begin
           exit;
         end;
         SkipComponent('DLSS5');
+      end;
+    end;
+    if WizardIsComponentSelected('reshade\depth') then begin
+      try
+        DownloadPage.SetText('Downloading depth estimation', 'Downloading the optional depth estimation add-on.');
+        Download('{#DepthManifestUrl}', 'depth-downloads.ini', '');
+        if GetIniString('depth', 'enabled', '0', ExpandConstant('{tmp}\depth-downloads.ini')) <> '1' then
+          RaiseException('Depth estimation downloads are currently disabled.');
+        DownloadManifestFile(ExpandConstant('{tmp}\depth-downloads.ini'), 'onnxruntime.dll', 'Depth estimation');
+        DownloadManifestFile(ExpandConstant('{tmp}\depth-downloads.ini'), 'DirectML.dll', 'Depth estimation');
+        DownloadManifestFile(ExpandConstant('{tmp}\depth-downloads.ini'), 'depth-anything-v2-small.onnx', 'Depth estimation');
+        DepthDownloaded := True;
+      except
+        if DownloadPage.AbortedByUser then begin
+          Result := 'The download was cancelled.';
+          exit;
+        end;
+        SkipComponent('Depth estimation');
       end;
     end;
   finally

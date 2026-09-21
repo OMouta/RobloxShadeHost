@@ -1,6 +1,7 @@
 param(
     [string]$Compiler = "$env:LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe",
     [switch]$DownloadDLSS,
+    [switch]$DownloadDepth,
     [string]$PresetsBaseUrl
 )
 
@@ -9,9 +10,10 @@ $repo = Split-Path $PSScriptRoot -Parent
 $testRoot = Join-Path $repo ('build/installer-tests/' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
-function Build-TestInstaller([string]$Name, [string]$ManifestUrl = '') {
+function Build-TestInstaller([string]$Name, [string]$ManifestUrl = '', [string]$DepthManifestUrl = '') {
     $arguments = @('/Q', '/DTestMode', "/O$testRoot", "/F$Name")
     if ($ManifestUrl) { $arguments += "/DDownloadManifestUrl=$ManifestUrl" }
+    if ($DepthManifestUrl) { $arguments += "/DDepthManifestUrl=$DepthManifestUrl" }
     if ($PresetsBaseUrl) { $arguments += "/DPresetsBaseUrl=$PresetsBaseUrl" }
     & $Compiler @arguments "$repo/installer/RobloxShadeHost.iss"
     if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
@@ -47,6 +49,7 @@ Assert-File $hostOnly 'RobloxShadeHost.exe'
 Assert-File $hostOnly 'CREDITS.txt'
 Assert-File $hostOnly 'dxgi.dll' $false
 Assert-File $hostOnly 'nvngx_dlssnr.dll' $false
+Assert-File $hostOnly 'depth-anything-v2-small.onnx' $false
 Assert-File $hostOnly 'unins000.exe' $false
 
 $null = Invoke-TestInstaller $setup 'no-license' 'host,reshade' $false
@@ -91,13 +94,10 @@ if ((Get-Content "$reshade/CREDITS.txt" -Raw) -notmatch 'tiago@mouta.me') {
 Add-Content "$reshade/ReShade.ini" "`n[InstallerTest]`nPreserve=1"
 $originalHash = (Get-FileHash "$reshade/ReShade.ini").Hash
 Set-Content "$reshade/presets/GenericPreset1.ini" 'Techniques=Edited@Edited.fx'
-# Left behind by an earlier installer that offered the depth estimation add-on.
-Set-Content "$reshade/depth-anything-v2-small.onnx" 'stale'
 $null = Invoke-TestInstaller $setup 'reshade' 'host,reshade,reshade\presets'
 if ((Get-FileHash "$reshade/ReShade.ini").Hash -ne $originalHash) {
     throw 'Reinstall changed the existing ReShade configuration.'
 }
-Assert-File $reshade 'depth-anything-v2-small.onnx' $false
 
 # An install from the earlier installer kept ReShade's doubled search paths. Reinstalling repairs
 # those lines and nothing else.
@@ -115,15 +115,23 @@ if ((Get-Content "$reshade/presets/GenericPreset1.ini" -Raw) -notmatch 'Edited')
 }
 
 $missingSetup = Build-TestInstaller 'Setup-Missing' `
-    'https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/not-present.ini'
-$missing = Invoke-TestInstaller $missingSetup 'missing-addons' 'host,reshade,reshade\dlss5'
+    'https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/not-present.ini' `
+    'https://github.com/OMouta/RobloxShadeHost/releases/download/depth-assets/not-present.ini'
+$missing = Invoke-TestInstaller $missingSetup 'missing-dlss5' 'host,reshade,reshade\dlss5'
 Assert-File $missing 'RobloxShadeHost.exe'
 Assert-File $missing 'dxgi.dll'
 Assert-File $missing 'nvngx_dlssnr.dll' $false
 Assert-File $missing 'renodx-dlss.addon64' $false
-$missingLog = Get-Content "$testRoot/missing-addons.log" -Raw
-if ($missingLog -notmatch 'DLSS5 skipped:') {
-    throw 'Missing optional downloads were not reported.'
+if ((Get-Content "$testRoot/missing-dlss5.log" -Raw) -notmatch 'DLSS5 skipped:') {
+    throw 'Missing DLSS5 downloads were not reported.'
+}
+$missing = Invoke-TestInstaller $missingSetup 'missing-depth' 'host,reshade,reshade\depth'
+Assert-File $missing 'dxgi.dll'
+Assert-File $missing 'onnxruntime.dll' $false
+Assert-File $missing 'DirectML.dll' $false
+Assert-File $missing 'depth-anything-v2-small.onnx' $false
+if ((Get-Content "$testRoot/missing-depth.log" -Raw) -notmatch 'Depth estimation skipped:') {
+    throw 'Missing depth estimation downloads were not reported.'
 }
 
 if ($DownloadDLSS) {
@@ -135,6 +143,19 @@ if ($DownloadDLSS) {
         $pattern = '(?ms)^\[' + [regex]::Escape($file) + '\]\r?\n.*?^sha256=([a-f0-9]{64})'
         $expectedHash = [regex]::Match($manifest, $pattern).Groups[1].Value
         if ((Get-FileHash "$full/$file").Hash -ne $expectedHash) {
+            throw "$file does not match the repository manifest."
+        }
+    }
+}
+
+if ($DownloadDepth) {
+    $depth = Invoke-TestInstaller $setup 'depth' 'host,reshade,reshade\depth'
+    $manifest = Get-Content "$repo/vendor/depth/downloads.ini" -Raw
+    foreach ($file in @('onnxruntime.dll', 'DirectML.dll', 'depth-anything-v2-small.onnx')) {
+        Assert-File $depth $file
+        $pattern = '(?ms)^\[' + [regex]::Escape($file) + '\]\r?\n.*?^sha256=([a-f0-9]{64})'
+        $expectedHash = [regex]::Match($manifest, $pattern).Groups[1].Value
+        if ((Get-FileHash "$depth/$file").Hash -ne $expectedHash) {
             throw "$file does not match the repository manifest."
         }
     }
