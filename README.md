@@ -7,7 +7,7 @@
 <p align="center">Use ReShade with Roblox.</p>
 
 <p align="center">
-  <a href="https://github.com/OMouta/RobloxShadeHost/releases/latest/download/RobloxShadeHost-Setup.exe">Download for Windows</a>
+  <a href="https://github.com/OMouta/RobloxShadeHost/releases/latest">Download for Windows</a>
   &nbsp;·&nbsp;
   <a href="#download-and-set-up">Setup guide</a>
   &nbsp;·&nbsp;
@@ -31,7 +31,7 @@
 > [!NOTE]
 > If DLSS5 is stuck on "waiting", follow the [DLSS5 troubleshooting guide](DLSS5-README.md).
 
-**How do I get it?** Download [RobloxShadeHost-Setup.exe](https://github.com/OMouta/RobloxShadeHost/releases/latest/download/RobloxShadeHost-Setup.exe) and run it like any other installer. It downloads ReShade and its effects for you. Keep the folder it suggests, or pick any folder of your own. Do not install it inside the Roblox folder, and do not install ReShade onto Roblox itself. The host is a separate program that runs beside Roblox and never touches Roblox's files.
+**How do I get it?** Download RobloxShadeHost-Setup from the [latest release](https://github.com/OMouta/RobloxShadeHost/releases/latest) and run it like any other installer. It downloads ReShade and its effects for you. Keep the folder it suggests, or pick any folder of your own. Do not install it inside the Roblox folder, and do not install ReShade onto Roblox itself. The host is a separate program that runs beside Roblox and never touches Roblox's files.
 
 **Will it slow my game down?** Yes. This is experimental and lowers your FPS, because the host copies Roblox's picture every frame and draws the effects on top.
 
@@ -43,7 +43,7 @@ Use 64-bit Windows 10 version 1903 or newer, or Windows 11. Windows Graphics Cap
 
 ### Installer (recommended)
 
-1. Download [**RobloxShadeHost-Setup.exe**](https://github.com/OMouta/RobloxShadeHost/releases/latest/download/RobloxShadeHost-Setup.exe).
+1. Download **RobloxShadeHost-Setup** from the [latest release](https://github.com/OMouta/RobloxShadeHost/releases/latest).
 2. Run the installer and choose an installation folder.
 3. Keep **ReShade with full add-on support** and **RobloxShadeHost presets** selected. Optionally select either the **DLSS5 add-on** or the **Depth estimation add-on**. Both require ReShade, and they do not work together.
 4. Accept the ReShade license and finish installation. If the optional downloads are unavailable, the installer skips them and installs the other components.

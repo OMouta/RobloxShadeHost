@@ -9,7 +9,7 @@ cmake -S . -B build -A x64 -DBUILD_TESTING=ON
 cmake --build build --config Release --target installer
 ```
 
-Output: `build/installer/RobloxShadeHost-Setup.exe`.
+Output: `build/installer/RobloxShadeHost-Setup-<version>.exe`.
 
 ReShade is downloaded from reshade.me at installation time. Setup displays the license from that version's source tag before running the official installer. A failed ReShade download or installation stops before copying files, so the user can retry or deselect it. Reinstalling preserves existing ReShade settings.
 
@@ -36,7 +36,7 @@ To withdraw an add-on, remove its binary assets or upload a manifest with `enabl
 Host only:
 
 ```powershell
-.\RobloxShadeHost-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS="host"
+.\RobloxShadeHost-Setup-0.3.6.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS="host"
 ```
 
 To install ReShade unattended, first read its license and explicitly pass `/ACCEPTRESHADELICENSE=1`. Select `host,reshade` with `/COMPONENTS`, adding `reshade\presets` for the presets, `reshade\dlss5` for DLSS5 or `reshade\depth` for depth estimation. Setup stops if both are selected. Use `/LOG="setup.log"` to record download failures.

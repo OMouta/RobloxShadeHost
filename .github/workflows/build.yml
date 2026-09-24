@@ -28,7 +28,7 @@ jobs:
           name: RobloxShadeHost-windows-x64
           path: |
             build/Release/RobloxShadeHost.exe
-            build/installer/RobloxShadeHost-Setup.exe
+            build/installer/RobloxShadeHost-Setup-*.exe
             LICENSE
           if-no-files-found: error
 
@@ -58,4 +58,4 @@ jobs:
             range="$previous_tag..$RELEASE_TAG"
           fi
           git log --format='- %s (%h)' "$range" > release-notes.md
-          gh release create "$RELEASE_TAG" release/build/Release/RobloxShadeHost.exe release/build/installer/RobloxShadeHost-Setup.exe release/LICENSE --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
+          gh release create "$RELEASE_TAG" release/build/Release/RobloxShadeHost.exe release/build/installer/RobloxShadeHost-Setup-*.exe release/LICENSE --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
