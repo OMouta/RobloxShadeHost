@@ -10,8 +10,8 @@ struct InputHotkeys
     Hotkey overlay;
 };
 
-// Reads shortcuts from RobloxShadeHost.ini beside the exe, creating the file on first run.
-// Shows an error and throws when the value cannot be parsed.
+// Reads shortcuts from RobloxShadeHost.ini beside the exe, creating the file on first run. Invalid values
+// are reported and replaced by the defaults.
 InputHotkeys LoadInputHotkeys();
 
 // Folder of RobloxShadeHost.exe, with a trailing backslash.

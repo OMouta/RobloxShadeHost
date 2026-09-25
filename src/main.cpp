@@ -29,20 +29,13 @@ int Run()
     CreateOverlayWindows();
 
     if (!RegisterHotKey(g.overlay, kEditModeHotkey, hotkeys.input.modifiers, hotkeys.input.key))
-    {
-        const std::wstring error = L"Could not register " + g.inputHotkey + L". It may be reserved by Windows or in use by another program. "
-                                   L"Choose another ToggleKey in RobloxShadeHost.ini and restart.";
-        MessageBoxW(nullptr, error.c_str(), L"RobloxShadeHost", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-
+        Log(LogLevel::Warning, L"%ls is in use by another program. Choose another shortcut in RobloxShadeHost Setup or in "
+                               L"RobloxShadeHost.ini, then restart RobloxShadeHost.",
+            g.inputHotkey.c_str());
     if (hotkeys.overlay.key && !RegisterHotKey(g.overlay, kOverlayToggleHotkey, hotkeys.overlay.modifiers, hotkeys.overlay.key))
-    {
-        const std::wstring error = L"Could not register " + g.overlayHotkey + L". It may be reserved by Windows or in use by another program. "
-                                   L"Choose another OverlayToggleKey in RobloxShadeHost.ini and restart.";
-        MessageBoxW(nullptr, error.c_str(), L"RobloxShadeHost", MB_OK | MB_ICONERROR);
-        return 1;
-    }
+        Log(LogLevel::Warning, L"%ls is in use by another program, so the overlay shortcut is off. Choose another shortcut in "
+                               L"RobloxShadeHost Setup or in RobloxShadeHost.ini, then restart RobloxShadeHost.",
+            g.overlayHotkey.c_str());
 
     g.frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     CreateDevice();

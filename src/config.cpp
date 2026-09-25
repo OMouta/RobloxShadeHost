@@ -1,7 +1,30 @@
 #include "config.h"
+#include "log.h"
 #include "state.h"
 
 #include <iterator>
+
+namespace
+{
+constexpr wchar_t kDefaultToggleKey[] = L"Ctrl+Home";
+constexpr wchar_t kDefaultOverlayToggleKey[] = L"Ctrl+F8";
+
+// A missing entry uses the default. An empty one leaves the shortcut unassigned when allowEmpty is set.
+Hotkey ReadHotkey(const std::wstring& path, const wchar_t* name, const wchar_t* fallback, bool allowEmpty)
+{
+    wchar_t value[128]{};
+    const DWORD count = GetPrivateProfileStringW(L"Input", name, fallback, value, static_cast<DWORD>(std::size(value)), path.c_str());
+    Hotkey hotkey;
+    if (allowEmpty && count == 0)
+        return hotkey;
+    if (count < std::size(value) - 1 && ParseHotkey(value, hotkey))
+        return hotkey;
+    Log(LogLevel::Warning, L"%ls=%ls in RobloxShadeHost.ini is not a supported shortcut. Using %ls. See the README for supported keys.",
+        name, value, fallback);
+    ParseHotkey(fallback, hotkey);
+    return hotkey;
+}
+} // namespace
 
 std::wstring ExeDirectory()
 {
@@ -14,38 +37,21 @@ std::wstring ExeDirectory()
 InputHotkeys LoadInputHotkeys()
 {
     const std::wstring path = ExeDirectory() + L"RobloxShadeHost.ini";
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        winrt::check_bool(WritePrivateProfileStringW(L"Input", L"ToggleKey", g.inputHotkey.c_str(), path.c_str()));
-        winrt::check_bool(WritePrivateProfileStringW(L"Input", L"OverlayToggleKey", L"Ctrl+F8", path.c_str()));
-    }
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
+        !(WritePrivateProfileStringW(L"Input", L"ToggleKey", kDefaultToggleKey, path.c_str()) &&
+          WritePrivateProfileStringW(L"Input", L"OverlayToggleKey", kDefaultOverlayToggleKey, path.c_str())))
+        Log(LogLevel::Warning, L"Could not create %ls. Using the default shortcuts.", path.c_str());
 
-    wchar_t value[128]{};
-    const DWORD count = GetPrivateProfileStringW(L"Input", L"ToggleKey", L"Ctrl+Home", value, static_cast<DWORD>(std::size(value)), path.c_str());
-    Hotkey hotkey;
-    if (count == std::size(value) - 1 || !ParseHotkey(value, hotkey))
+    InputHotkeys hotkeys{ ReadHotkey(path, L"ToggleKey", kDefaultToggleKey, false),
+                          ReadHotkey(path, L"OverlayToggleKey", kDefaultOverlayToggleKey, true) };
+    if (hotkeys.overlay.key == hotkeys.input.key && hotkeys.overlay.modifiers == hotkeys.input.modifiers)
     {
-        MessageBoxW(nullptr, L"Invalid ToggleKey in RobloxShadeHost.ini. Use a key such as Ctrl+Home or F8. See the README for supported keys.",
-                    L"RobloxShadeHost", MB_OK | MB_ICONERROR);
-        winrt::throw_hresult(E_INVALIDARG);
+        Log(LogLevel::Warning, L"ToggleKey and OverlayToggleKey in RobloxShadeHost.ini are both %ls. The overlay shortcut is off until you change one.",
+            FormatHotkey(hotkeys.input).c_str());
+        hotkeys.overlay = {};
     }
-    g.inputHotkey = value;
+    g.inputHotkey = FormatHotkey(hotkeys.input);
+    g.overlayHotkey = FormatHotkey(hotkeys.overlay);
     g.indicatorText = L"Input captured | " + g.inputHotkey + L" to return to Roblox";
-    const DWORD overlayCount = GetPrivateProfileStringW(L"Input", L"OverlayToggleKey", L"Ctrl+F8", value,
-                                                       static_cast<DWORD>(std::size(value)), path.c_str());
-    Hotkey overlayHotkey;
-    if (overlayCount == std::size(value) - 1 || (overlayCount && !ParseHotkey(value, overlayHotkey)))
-    {
-        MessageBoxW(nullptr, L"Invalid OverlayToggleKey in RobloxShadeHost.ini. Leave it blank or use a key such as F8 or Ctrl+F8.",
-                    L"RobloxShadeHost", MB_OK | MB_ICONERROR);
-        winrt::throw_hresult(E_INVALIDARG);
-    }
-    if (overlayHotkey.key == hotkey.key && overlayHotkey.modifiers == hotkey.modifiers)
-    {
-        MessageBoxW(nullptr, L"ToggleKey and OverlayToggleKey in RobloxShadeHost.ini must use different shortcuts.",
-                    L"RobloxShadeHost", MB_OK | MB_ICONERROR);
-        winrt::throw_hresult(E_INVALIDARG);
-    }
-    g.overlayHotkey = value;
-    return { hotkey, overlayHotkey };
+    return hotkeys;
 }
