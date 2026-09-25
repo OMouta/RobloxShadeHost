@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(RobloxShadeHost VERSION 0.3.5 LANGUAGES C CXX RC)
+project(RobloxShadeHost VERSION 0.4.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
