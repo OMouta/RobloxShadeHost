@@ -3,13 +3,17 @@
 
 #include <iterator>
 
-InputHotkeys LoadInputHotkeys()
+std::wstring ExeDirectory()
 {
     wchar_t executable[32768]{};
     const DWORD length = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
-    winrt::check_bool(length && length < std::size(executable));
-    const std::wstring path = std::wstring(executable).substr(0, std::wstring(executable).find_last_of(L"\\/") + 1)
-                              + L"RobloxShadeHost.ini";
+    const std::wstring path(executable, length);
+    return path.substr(0, path.find_last_of(L"\\/") + 1);
+}
+
+InputHotkeys LoadInputHotkeys()
+{
+    const std::wstring path = ExeDirectory() + L"RobloxShadeHost.ini";
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
         winrt::check_bool(WritePrivateProfileStringW(L"Input", L"ToggleKey", g.inputHotkey.c_str(), path.c_str()));

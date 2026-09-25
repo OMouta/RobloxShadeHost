@@ -1,5 +1,6 @@
 #include "capture.h"
 #include "depth/depth.h"
+#include "log.h"
 #include "overlay.h"
 #include "state.h"
 
@@ -8,7 +9,6 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 
 #include <chrono>
-#include <cstdio>
 
 using winrt::Windows::Foundation::Metadata::ApiInformation;
 
@@ -52,7 +52,7 @@ void StartCapture(HWND target)
 
     g.session.StartCapture();
     g.target = target;
-    std::printf("Capturing Roblox (%dx%d)\n", g.poolSize.Width, g.poolSize.Height);
+    Log(LogLevel::Info, L"Capturing Roblox (%dx%d)", g.poolSize.Width, g.poolSize.Height);
 }
 
 void StopCapture()

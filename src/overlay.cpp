@@ -1,10 +1,10 @@
 #include "overlay.h"
+#include "log.h"
 #include "state.h"
 
 #include <dwmapi.h>
 
 #include <algorithm>
-#include <cstdio>
 
 namespace
 {
@@ -53,7 +53,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 SetForegroundWindow(g.target);
             }
             UpdateOverlay();
-            std::puts(g.captureEnabled ? "Overlay enabled." : "Overlay disabled. Frame capture stopped.");
+            Log(LogLevel::Info, g.captureEnabled ? L"Overlay on." : L"Overlay off. Frame capture stopped.");
             return 0;
         }
         if (wParam != kEditModeHotkey)
@@ -117,9 +117,9 @@ void SetEditMode(bool enabled)
     if (!enabled)
         ShowWindow(g.indicator, SW_HIDE);
     if (enabled)
-        std::printf("Input captured. Use your ReShade menu key to open its menu; %ls returns to Roblox.\n", g.inputHotkey.c_str());
+        Log(LogLevel::Info, L"Input captured. Use your ReShade menu key to open its menu; %ls returns to Roblox.", g.inputHotkey.c_str());
     else
-        std::puts("Input returned to Roblox.");
+        Log(LogLevel::Info, L"Input returned to Roblox.");
 }
 
 void UpdateOverlay()

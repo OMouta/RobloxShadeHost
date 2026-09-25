@@ -1,5 +1,7 @@
 #include "depth.h"
 #include "depth_model.h"
+#include "../config.h"
+#include "../log.h"
 #include "../state.h"
 
 #include <reshade.hpp>
@@ -9,7 +11,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -107,14 +108,6 @@ struct Depth
 };
 Depth d;
 
-std::wstring ExeDirectory()
-{
-    wchar_t path[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring directory = path;
-    return directory.substr(0, directory.find_last_of(L"\\/") + 1);
-}
-
 void Bind(reshade::api::effect_runtime* runtime)
 {
     const reshade::api::resource_view view{ reinterpret_cast<uint64_t>(d.view.get()) };
@@ -184,13 +177,13 @@ void Worker()
                 model->Load(d.directory, kModelFile, d.width, d.height, d.d3d12.get());
                 loadedWidth = d.width;
                 loadedHeight = d.height;
-                std::printf("Depth model ready (%dx%d). Depth-based effects use an estimate, not Roblox's depth buffer.\n", d.width, d.height);
+                Log(LogLevel::Ok, L"Depth model ready (%dx%d)", d.width, d.height);
             }
             model->Run(d.input, d.width, d.height, d.result);
         }
         catch (const std::exception& e)
         {
-            std::printf("Depth estimation failed: %s\n", e.what());
+            Log(LogLevel::Error, L"Depth estimation stopped: %hs", e.what());
             d.failed = true;
         }
         d.resultReady = true;
@@ -319,12 +312,12 @@ bool InitDepth()
     d.directory = ExeDirectory();
     if (GetFileAttributesW((d.directory + kModelFile).c_str()) == INVALID_FILE_ATTRIBUTES)
     {
-        std::puts("Depth estimation is not installed. Depth-based effects will not work.");
+        Log(LogLevel::Info, L"Depth estimation is not installed. Depth-based effects will not work.");
         return false;
     }
     if (!reshade::register_addon(GetModuleHandleW(nullptr)))
     {
-        std::puts("Depth estimation needs ReShade with full add-on support and is off while the add-on is disabled in ReShade.");
+        Log(LogLevel::Warning, L"Depth estimation needs ReShade with full add-on support and is off while the add-on is disabled in ReShade.");
         return false;
     }
     d.registered = true;
@@ -339,7 +332,7 @@ bool InitDepth()
     }
     catch (const std::exception& e)
     {
-        std::printf("Depth estimation disabled: %s\n", e.what());
+        Log(LogLevel::Error, L"Depth estimation is off: %hs", e.what());
         return false;
     }
     d.inputReady = CreateEventW(nullptr, FALSE, FALSE, nullptr);

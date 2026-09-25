@@ -40,6 +40,7 @@ add_executable(RobloxShadeHost
     src/main.cpp
     src/capture.cpp
     src/config.cpp
+    src/log.cpp
     src/depth/depth.cpp
     src/depth/depth_model.cpp
     src/overlay.cpp

@@ -5,6 +5,7 @@
 #include "capture.h"
 #include "config.h"
 #include "depth/depth.h"
+#include "log.h"
 #include "overlay.h"
 #include "roblox_window.h"
 #include "state.h"
@@ -20,7 +21,8 @@ int Run()
     const auto hotkeys = LoadInputHotkeys();
     if (!GraphicsCaptureSession::IsSupported())
     {
-        std::puts("Windows Graphics Capture is not supported on this system.");
+        Log(LogLevel::Error, L"Windows Graphics Capture is not available, and RobloxShadeHost needs it to copy Roblox's picture. "
+                             L"Update Windows and your graphics driver.");
         return 1;
     }
 
@@ -46,11 +48,12 @@ int Run()
     CreateDevice();
     InitDepth();
 
-    std::puts("Install ReShade on this exe (DirectX 10/11/12).\n"
-              "Waiting for Roblox...");
-    std::printf("%ls: toggle input capture. ReShade keeps its own menu and effect shortcuts.\n", g.inputHotkey.c_str());
+    Log(LogLevel::Info, L"Install ReShade on this exe (DirectX 10/11/12).");
+    Log(LogLevel::Info, L"%ls: toggle input capture. ReShade keeps its own menu and effect shortcuts.", g.inputHotkey.c_str());
     if (hotkeys.overlay.key)
-        std::printf("%ls: toggle overlay and frame capture.\n", g.overlayHotkey.c_str());
+        Log(LogLevel::Info, L"%ls: toggle overlay and frame capture.", g.overlayHotkey.c_str());
+    Log(LogLevel::Info, L"Log file: %ls", LogPath().c_str());
+    Log(LogLevel::Info, L"Waiting for Roblox...");
 
     ULONGLONG nextSearch = 0;
     for (;;)
@@ -73,7 +76,7 @@ int Run()
         if (g.target && !IsWindow(g.target))
         {
             StopCapture();
-            std::puts("Roblox closed. Waiting for Roblox...");
+            Log(LogLevel::Info, L"Roblox closed. Waiting for Roblox...");
         }
 
         if (g.captureEnabled && !g.target && GetTickCount64() >= nextSearch)
@@ -87,7 +90,7 @@ int Run()
                 }
                 catch (const winrt::hresult_error& e)
                 {
-                    std::printf("Could not capture Roblox: %ls\n", e.message().c_str());
+                    Log(LogLevel::Error, L"Could not capture Roblox: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
                 }
             }
         }
@@ -108,7 +111,7 @@ int Run()
                     g.latestFrame = nullptr;
                     g.poolSize = size;
                     g.pool.Recreate(g.captureDevice, kPixelFormat, 2, size);
-                    std::printf("Roblox resized to %dx%d\n", size.Width, size.Height);
+                    Log(LogLevel::Info, L"Roblox resized to %dx%d", size.Width, size.Height);
                 }
             }
 
@@ -119,6 +122,16 @@ int Run()
 
         MsgWaitForMultipleObjects(1, &g.frameEvent, FALSE, g.overlayVisible ? 16 : 250, QS_ALLINPUT);
     }
+}
+
+// A console window the host opened itself would close with the error in it.
+void KeepConsoleOpen()
+{
+    DWORD processes[2];
+    if (GetConsoleProcessList(processes, 2) != 1)
+        return;
+    std::puts("\nPress Enter to close.");
+    std::getchar();
 }
 } // namespace
 
@@ -131,15 +144,23 @@ int main()
  |_| \_\___/|_.__/|_|\___/_/\_\|____/|_| |_|\__,_|\__,_|\___|_| |_|\___/|___/\__|
 )");
     std::printf("v%s\n\n", ROBLOX_SHADE_HOST_VERSION);
+    InitLog();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    int result = 1;
     try
     {
-        return Run();
+        result = Run();
     }
     catch (const winrt::hresult_error& e)
     {
-        std::printf("Error 0x%08X: %ls\n", static_cast<unsigned>(e.code()), e.message().c_str());
-        return 1;
+        Log(LogLevel::Error, L"RobloxShadeHost stopped: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
     }
+    catch (const std::exception& e)
+    {
+        Log(LogLevel::Error, L"RobloxShadeHost stopped: %hs", e.what());
+    }
+    if (result != 0)
+        KeepConsoleOpen();
+    return result;
 }
