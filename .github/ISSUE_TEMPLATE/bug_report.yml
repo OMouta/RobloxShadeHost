@@ -48,6 +48,6 @@ body:
   - type: textarea
     id: console
     attributes:
-      label: Console output
-      description: Copy the text from the host's console window. For installer problems, run the installer with `/LOG="setup.log"` and attach the file.
+      label: Log
+      description: Paste `RobloxShadeHost.log` from the host's folder. For installer problems, paste `%TEMP%\RobloxShadeHost-Setup.log`.
       render: text

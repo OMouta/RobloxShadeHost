@@ -4,7 +4,7 @@ Bug reports, presets, and code changes are welcome. Open an issue before startin
 
 ## Report a bug
 
-Use the bug report form. Include the host version, how you installed it, your Windows version, and the text printed in the host's console window. Installer problems need the setup log: run the installer with `/LOG="setup.log"` and attach the file.
+Use the bug report form. Include the host version, how you installed it, your Windows version, and `RobloxShadeHost.log` from the host's folder. Installer problems need the setup log, `%TEMP%\RobloxShadeHost-Setup.log`.
 
 ## Add a preset
 
@@ -32,7 +32,7 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The installer needs Inno Setup 6. See `installer/README.md` for building and testing it.
+See `installer/README.md` for building and testing the installer.
 
 ## Code changes
 
