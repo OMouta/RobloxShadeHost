@@ -9,6 +9,7 @@
 #include "log.h"
 #include "overlay.h"
 #include "roblox_window.h"
+#include "setup_check.h"
 #include "state.h"
 
 #include <cstdio>
@@ -60,6 +61,7 @@ int Run()
     InitAddon();
     g.frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     CreateDevice();
+    CheckSetup();
     InitDepth();
 
     // Reports a taken shortcut now rather than on the first press in Roblox.
@@ -70,7 +72,6 @@ int Run()
                                L"RobloxShadeHost Setup or in RobloxShadeHost.ini, then restart RobloxShadeHost.",
             g.overlayHotkey.c_str());
 
-    Log(LogLevel::Info, L"Install ReShade on this exe (DirectX 10/11/12).");
     if (AddonRegistered())
         Log(LogLevel::Info, L"Press %ls in Roblox to open ReShade, and again to go back to Roblox.", g.inputHotkey.c_str());
     else

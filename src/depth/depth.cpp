@@ -305,12 +305,10 @@ void PublishResult()
 
 bool InitDepth()
 {
+    // The setup check at startup reports missing files.
     d.directory = ExeDirectory();
     if (GetFileAttributesW((d.directory + kModelFile).c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        Log(LogLevel::Info, L"Depth estimation is not installed. Depth-based effects will not work.");
         return false;
-    }
     if (!AddonRegistered())
     {
         Log(LogLevel::Warning, L"Depth estimation is off. It needs ReShade with full add-on support, with RobloxShadeHost enabled in ReShade's Add-ons tab.");

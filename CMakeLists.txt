@@ -45,12 +45,13 @@ add_executable(RobloxShadeHost
     src/depth/depth.cpp
     src/depth/depth_model.cpp
     src/overlay.cpp
-    src/roblox_window.cpp)
+    src/roblox_window.cpp
+    src/setup_check.cpp)
 target_include_directories(RobloxShadeHost PRIVATE "${RESHADE_INCLUDE}" "${ONNXRUNTIME_INCLUDE}")
 target_compile_definitions(RobloxShadeHost PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(RobloxShadeHost PRIVATE ROBLOX_SHADE_HOST_VERSION="${PROJECT_VERSION}")
 target_compile_options(RobloxShadeHost PRIVATE /W4 /permissive- /EHsc /bigobj)
-target_link_libraries(RobloxShadeHost PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi windowsapp gdi32)
+target_link_libraries(RobloxShadeHost PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi windowsapp gdi32 version)
 
 # Setup draws its window with Dear ImGui and unpacks effect packages with miniz.
 set(IMGUI_DIR "${CMAKE_BINARY_DIR}/imgui")
