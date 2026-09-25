@@ -1,38 +1,36 @@
 param(
-    [string]$Compiler = "$env:LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe",
+    [string]$Setup = (Get-ChildItem "$PSScriptRoot/../build/installer/RobloxShadeHost-Setup-*.exe" |
+        Sort-Object LastWriteTime | Select-Object -Last 1).FullName,
     [switch]$DownloadDLSS,
     [switch]$DownloadDepth,
     [string]$PresetsBaseUrl
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $Setup -or -not (Test-Path $Setup)) { throw 'Build the installer first: cmake --build build --config Release --target installer' }
 $repo = Split-Path $PSScriptRoot -Parent
 $testRoot = Join-Path $repo ('build/installer-tests/' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
-function Build-TestInstaller([string]$Name, [string]$ManifestUrl = '', [string]$DepthManifestUrl = '') {
-    $arguments = @('/Q', '/DTestMode', "/O$testRoot", "/F$Name")
-    if ($ManifestUrl) { $arguments += "/DDownloadManifestUrl=$ManifestUrl" }
-    if ($DepthManifestUrl) { $arguments += "/DDepthManifestUrl=$DepthManifestUrl" }
-    if ($PresetsBaseUrl) { $arguments += "/DPresetsBaseUrl=$PresetsBaseUrl" }
-    & $Compiler @arguments "$repo/installer/RobloxShadeHost.iss"
-    if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
-    return Join-Path $testRoot "$Name.exe"
+# --portable keeps the tests out of the Start menu and Windows' app list.
+function Invoke-Setup([string]$Name, [string[]]$Arguments) {
+    $arguments = @('--silent', '--log', "`"$testRoot/$Name.log`"") + $Arguments
+    if ($PresetsBaseUrl) { $arguments += @('--presets-url', $PresetsBaseUrl) }
+    return (Start-Process $Setup -ArgumentList $arguments -Wait -PassThru).ExitCode
 }
 
 function Invoke-TestInstaller(
-    [string]$Setup, [string]$Name, [string]$Components, [bool]$AcceptLicense = $true,
-    [bool]$ExpectSuccess = $AcceptLicense
+    [string]$Name, [string]$Components, [bool]$AcceptLicense = $true,
+    [bool]$ExpectSuccess = $AcceptLicense, [string[]]$Extra = @()
 ) {
     $destination = Join-Path $testRoot $Name
-    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS',
-        "/COMPONENTS=$Components", "/DIR=`"$destination`"", "/LOG=`"$testRoot/$Name.log`"")
-    if ($AcceptLicense) { $arguments += '/ACCEPTRESHADELICENSE=1' }
-    $process = Start-Process $Setup -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
-    if ($ExpectSuccess -and $process.ExitCode -ne 0) {
-        throw "$Name failed with exit code $($process.ExitCode). See $testRoot/$Name.log"
+    $arguments = @('--portable', '--components', $Components, '--dir', "`"$destination`"") + $Extra
+    if ($AcceptLicense) { $arguments += '--accept-reshade-license' }
+    $exitCode = Invoke-Setup $Name $arguments
+    if ($ExpectSuccess -and $exitCode -ne 0) {
+        throw "$Name failed with exit code $exitCode. See $testRoot/$Name.log"
     }
-    if (-not $ExpectSuccess -and ($process.ExitCode -eq 0 -or (Test-Path $destination))) {
+    if (-not $ExpectSuccess -and ($exitCode -eq 0 -or (Test-Path $destination))) {
         throw "$Name installed although Setup should have stopped."
     }
     return $destination
@@ -44,25 +42,27 @@ function Assert-File([string]$Directory, [string]$Name, [bool]$Expected = $true)
     }
 }
 
-$setup = Build-TestInstaller 'Setup'
-$hostOnly = Invoke-TestInstaller $setup 'host-only' 'host'
+$hostOnly = Invoke-TestInstaller 'host-only' 'host'
 Assert-File $hostOnly 'RobloxShadeHost.exe'
 Assert-File $hostOnly 'CREDITS.txt'
 Assert-File $hostOnly 'dxgi.dll' $false
 Assert-File $hostOnly 'nvngx_dlssnr.dll' $false
 Assert-File $hostOnly 'depth-anything-v2-small.onnx' $false
-Assert-File $hostOnly 'unins000.exe' $false
+Assert-File $hostOnly 'RobloxShadeHost-Setup.exe' $false
 
-$null = Invoke-TestInstaller $setup 'no-license' 'host,reshade' $false
-$null = Invoke-TestInstaller $setup 'dlss5-and-depth' 'host,reshade,reshade\dlss5,reshade\depth' -ExpectSuccess $false
+$null = Invoke-TestInstaller 'no-license' 'reshade' $false
+$null = Invoke-TestInstaller 'dlss5-and-depth' 'reshade,dlss5,depth' -ExpectSuccess $false
 if ((Get-Content "$testRoot/dlss5-and-depth.log" -Raw) -notmatch 'do not work together') {
     throw 'Setup did not refuse DLSS5 and depth estimation together.'
 }
-$reshade = Invoke-TestInstaller $setup 'reshade' 'host,reshade,reshade\presets'
+$reshade = Invoke-TestInstaller 'reshade' 'reshade,presets'
 Assert-File $reshade 'dxgi.dll'
 Assert-File $reshade 'ReShade-LICENSE.txt'
 Assert-File $reshade 'renodx-dlss.addon64' $false
 Assert-File $reshade 'onnxruntime.dll' $false
+# ReShade's installer leaves these next to the exe; only its DLL and settings are installed.
+Assert-File $reshade 'ReShadePreset.ini' $false
+Assert-File $reshade 'ReShade.log' $false
 Assert-File $reshade 'reshade-shaders/Shaders/ReShade.fxh'
 Assert-File $reshade 'reshade-shaders/Shaders/FXShaders/AdaptiveTonemapper.fx'
 Assert-File $reshade 'reshade-shaders/Shaders/qUINT/qUINT_common.fxh'
@@ -99,17 +99,21 @@ if ((Get-Content "$reshade/CREDITS.txt" -Raw) -notmatch 'tiago@mouta.me') {
 Add-Content "$reshade/ReShade.ini" "`n[InstallerTest]`nPreserve=1"
 $originalHash = (Get-FileHash "$reshade/ReShade.ini").Hash
 Set-Content "$reshade/presets/GenericPreset1.ini" 'Techniques=Edited@Edited.fx'
-$null = Invoke-TestInstaller $setup 'reshade' 'host,reshade,reshade\presets'
+Set-Content "$reshade/ReShadePreset.ini" 'Techniques=Mine@Mine.fx'
+$null = Invoke-TestInstaller 'reshade' 'reshade,presets'
 if ((Get-FileHash "$reshade/ReShade.ini").Hash -ne $originalHash) {
     throw 'Reinstall changed the existing ReShade configuration.'
 }
+if ((Get-Content "$reshade/ReShadePreset.ini" -Raw) -notmatch 'Mine') {
+    throw "Reinstall overwrote the user's ReShadePreset.ini."
+}
 
-# An install from the earlier installer kept ReShade's doubled search paths. Reinstalling repairs
+# An install from an earlier installer kept ReShade's doubled search paths. Reinstalling repairs
 # those lines and nothing else.
 $brokenIni = $reshadeIni -replace '(?m)^((?:Effect|Texture)SearchPaths=.*\\\*\*)(?=\r?$)', '$1\**'
 $brokenIni += "`n[InstallerTest]`nPreserve=1`n"
 [IO.File]::WriteAllText("$reshade/ReShade.ini", $brokenIni.TrimStart([char]0xFEFF), [Text.UTF8Encoding]::new($true))
-$null = Invoke-TestInstaller $setup 'reshade' 'host,reshade,reshade\presets'
+$null = Invoke-TestInstaller 'reshade' 'reshade,presets'
 $repairedIni = Get-Content "$reshade/ReShade.ini" -Raw
 Assert-SearchPaths $repairedIni
 if ($repairedIni -notmatch '(?m)^Preserve=1' -or ([regex]::Matches($repairedIni, '(?m)^\[GENERAL\]')).Count -ne 1) {
@@ -119,10 +123,10 @@ if ((Get-Content "$reshade/presets/GenericPreset1.ini" -Raw) -notmatch 'Edited')
     throw 'Reinstall overwrote an edited preset.'
 }
 
-$missingSetup = Build-TestInstaller 'Setup-Missing' `
-    'https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/not-present.ini' `
-    'https://github.com/OMouta/RobloxShadeHost/releases/download/depth-assets/not-present.ini'
-$missing = Invoke-TestInstaller $missingSetup 'missing-dlss5' 'host,reshade,reshade\dlss5'
+$missingManifests = @(
+    '--dlss5-manifest', 'https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/not-present.ini',
+    '--depth-manifest', 'https://github.com/OMouta/RobloxShadeHost/releases/download/depth-assets/not-present.ini')
+$missing = Invoke-TestInstaller 'missing-dlss5' 'reshade,dlss5' -Extra $missingManifests
 Assert-File $missing 'RobloxShadeHost.exe'
 Assert-File $missing 'dxgi.dll'
 Assert-File $missing 'nvngx_dlssnr.dll' $false
@@ -130,7 +134,7 @@ Assert-File $missing 'renodx-dlss.addon64' $false
 if ((Get-Content "$testRoot/missing-dlss5.log" -Raw) -notmatch 'DLSS5 skipped:') {
     throw 'Missing DLSS5 downloads were not reported.'
 }
-$missing = Invoke-TestInstaller $missingSetup 'missing-depth' 'host,reshade,reshade\depth'
+$missing = Invoke-TestInstaller 'missing-depth' 'reshade,depth' -Extra $missingManifests
 Assert-File $missing 'dxgi.dll'
 Assert-File $missing 'onnxruntime.dll' $false
 Assert-File $missing 'DirectML.dll' $false
@@ -143,7 +147,7 @@ if ($DownloadDLSS) {
     # Installing DLSS5 over depth estimation removes the depth files.
     New-Item -ItemType Directory -Path "$testRoot/full" -Force | Out-Null
     Set-Content "$testRoot/full/depth-anything-v2-small.onnx" 'stale'
-    $full = Invoke-TestInstaller $setup 'full' 'host,reshade,reshade\dlss5'
+    $full = Invoke-TestInstaller 'full' 'reshade,dlss5'
     Assert-File $full 'depth-anything-v2-small.onnx' $false
     Assert-File $full 'nvngx_dlssnr.dll'
     Assert-File $full 'renodx-dlss.addon64'
@@ -161,7 +165,7 @@ if ($DownloadDepth) {
     # Installing depth estimation over DLSS5 removes the DLSS5 files.
     New-Item -ItemType Directory -Path "$testRoot/depth" -Force | Out-Null
     Set-Content "$testRoot/depth/renodx-dlss.addon64" 'stale'
-    $depth = Invoke-TestInstaller $setup 'depth' 'host,reshade,reshade\depth'
+    $depth = Invoke-TestInstaller 'depth' 'reshade,depth'
     Assert-File $depth 'renodx-dlss.addon64' $false
     $manifest = Get-Content "$repo/vendor/depth/downloads.ini" -Raw
     foreach ($file in @('onnxruntime.dll', 'DirectML.dll', 'depth-anything-v2-small.onnx')) {
@@ -172,6 +176,17 @@ if ($DownloadDepth) {
             throw "$file does not match the repository manifest."
         }
     }
+}
+
+# Uninstalling keeps ReShade settings and presets unless asked to delete them too.
+if ((Invoke-Setup 'uninstall' @('--uninstall', '--dir', "`"$reshade`"")) -ne 0) {
+    throw "Uninstall failed. See $testRoot/uninstall.log"
+}
+foreach ($file in @('RobloxShadeHost.exe', 'dxgi.dll', 'CREDITS.txt', 'reshade-shaders')) { Assert-File $reshade $file $false }
+Assert-File $reshade 'ReShade.ini'
+Assert-File $reshade 'presets/GenericPreset1.ini'
+if ((Invoke-Setup 'uninstall-all' @('--uninstall', '--delete-user-files', '--dir', "`"$reshade`"")) -ne 0 -or (Test-Path $reshade)) {
+    throw "Uninstall did not delete the folder. See $testRoot/uninstall-all.log"
 }
 
 Write-Output "Installer checks passed. Test files and logs: $testRoot"
