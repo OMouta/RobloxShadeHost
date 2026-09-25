@@ -32,6 +32,25 @@ int main()
             return 1;
         }
     }
+    // The installer writes shortcuts with FormatHotkey and the host reads them with ParseHotkey.
+    const struct { const wchar_t* text; const wchar_t* formatted; } roundTrip[] = {
+        { L"home", L"Home" }, { L"shift+ctrl+f8", L"Ctrl+Shift+F8" }, { L"Win+Alt+pagedown", L"Alt+Win+PageDown" },
+        { L"F24", L"F24" }, { L"Ctrl+7", L"Ctrl+7" }, { L"q", L"Q" },
+    };
+    for (const auto& test : roundTrip)
+    {
+        Hotkey parsed;
+        if (!ParseHotkey(test.text, parsed) || FormatHotkey(parsed) != test.formatted)
+        {
+            std::printf("Failed to format shortcut: %ls\n", test.text);
+            return 1;
+        }
+    }
+    if (!FormatHotkey({ MOD_CONTROL, VK_F12 }).empty() || !FormatHotkey({ MOD_CONTROL, VK_LBUTTON }).empty() || !FormatHotkey({}).empty())
+    {
+        std::puts("Formatted an unsupported shortcut.");
+        return 1;
+    }
     std::puts("Hotkey tests passed.");
     return 0;
 }

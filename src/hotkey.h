@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include <cwchar>
 #include <cwctype>
 #include <string>
 #include <string_view>
@@ -9,6 +10,20 @@ struct Hotkey
 {
     UINT modifiers = MOD_NOREPEAT;
     UINT key = 0;
+};
+
+struct NamedKey
+{
+    const wchar_t* name;
+    UINT key;
+};
+
+// Keys other than letters, digits and function keys.
+inline constexpr NamedKey kNamedKeys[] = {
+    { L"Home", VK_HOME }, { L"End", VK_END }, { L"Insert", VK_INSERT },
+    { L"Delete", VK_DELETE }, { L"PageUp", VK_PRIOR }, { L"PageDown", VK_NEXT },
+    { L"Pause", VK_PAUSE }, { L"ScrollLock", VK_SCROLL }, { L"Space", VK_SPACE },
+    { L"Tab", VK_TAB }, { L"Escape", VK_ESCAPE },
 };
 
 inline bool ParseHotkey(std::wstring_view text, Hotkey& result)
@@ -59,14 +74,8 @@ inline bool ParseHotkey(std::wstring_view text, Hotkey& result)
             }
             else
             {
-                const struct { const wchar_t* name; UINT key; } keys[] = {
-                    { L"HOME", VK_HOME }, { L"END", VK_END }, { L"INSERT", VK_INSERT },
-                    { L"DELETE", VK_DELETE }, { L"PAGEUP", VK_PRIOR }, { L"PAGEDOWN", VK_NEXT },
-                    { L"PAUSE", VK_PAUSE }, { L"SCROLLLOCK", VK_SCROLL }, { L"SPACE", VK_SPACE },
-                    { L"TAB", VK_TAB }, { L"ESCAPE", VK_ESCAPE },
-                };
-                for (const auto& named : keys)
-                    if (token == named.name)
+                for (const auto& named : kNamedKeys)
+                    if (_wcsicmp(token.c_str(), named.name) == 0)
                         parsed.key = named.key;
                 if (!parsed.key)
                     return false;
@@ -82,4 +91,27 @@ inline bool ParseHotkey(std::wstring_view text, Hotkey& result)
         return false;
     result = parsed;
     return true;
+}
+
+// Writes a hotkey the way ParseHotkey reads it, such as Ctrl+Shift+F8. Returns an empty string for a key
+// ParseHotkey does not accept.
+inline std::wstring FormatHotkey(const Hotkey& hotkey)
+{
+    std::wstring key;
+    if ((hotkey.key >= 'A' && hotkey.key <= 'Z') || (hotkey.key >= '0' && hotkey.key <= '9'))
+        key = static_cast<wchar_t>(hotkey.key);
+    else if (hotkey.key >= VK_F1 && hotkey.key <= VK_F24 && hotkey.key != VK_F12)
+        key = L"F" + std::to_wstring(hotkey.key - VK_F1 + 1);
+    for (const auto& named : kNamedKeys)
+        if (hotkey.key == named.key)
+            key = named.name;
+    if (key.empty())
+        return {};
+
+    std::wstring text;
+    if (hotkey.modifiers & MOD_CONTROL) text += L"Ctrl+";
+    if (hotkey.modifiers & MOD_ALT) text += L"Alt+";
+    if (hotkey.modifiers & MOD_SHIFT) text += L"Shift+";
+    if (hotkey.modifiers & MOD_WIN) text += L"Win+";
+    return text + key;
 }
