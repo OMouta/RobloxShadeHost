@@ -1522,6 +1522,11 @@ Arguments ParseArguments()
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
+    // Setup's copy lives next to ReShade, which installs itself as dxgi.dll or d3d11.dll, and Windows looks
+    // in the exe's folder first. d3d11.dll is delay-loaded, so loading both from System32 before anything
+    // else keeps ReShade out of Setup; later loads by name get these copies.
+    LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const Arguments arguments = ParseArguments();

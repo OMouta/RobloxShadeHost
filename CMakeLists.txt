@@ -100,7 +100,9 @@ target_include_directories(installer PRIVATE "$<TARGET_FILE_DIR:RobloxShadeHost>
 target_compile_definitions(installer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(installer PRIVATE ROBLOX_SHADE_HOST_VERSION="${PROJECT_VERSION}")
 target_compile_options(installer PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(installer PRIVATE setup_libraries d3d11 dxgi d3dcompiler dwmapi windowscodecs winhttp bcrypt imm32)
+target_link_libraries(installer PRIVATE setup_libraries d3d11 dxgi d3dcompiler dwmapi windowscodecs winhttp bcrypt imm32 delayimp)
+# Loaded from System32 at startup instead, see wWinMain.
+target_link_options(installer PRIVATE /DELAYLOAD:d3d11.dll)
 add_dependencies(installer RobloxShadeHost)
 # The generator expression keeps multi-config generators from adding a Release folder.
 set_target_properties(installer PROPERTIES
