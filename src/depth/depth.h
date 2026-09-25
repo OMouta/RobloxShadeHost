@@ -2,8 +2,8 @@
 
 #include <d3d11.h>
 
-// Loads the depth model from beside the exe and registers the host as a ReShade add-on that supplies
-// the DEPTH texture. Prints why depth is unavailable and returns false otherwise.
+// Loads the depth model from beside the exe and supplies ReShade's DEPTH texture through the host's
+// add-on. Returns false when depth is not installed, and logs why when it is installed but unusable.
 bool InitDepth();
 
 // Estimates depth for the captured frame on a worker thread and publishes the newest result to ReShade.

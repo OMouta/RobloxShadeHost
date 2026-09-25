@@ -19,16 +19,19 @@ using winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 constexpr int kEditModeHotkey = 1;
 constexpr int kOverlayToggleHotkey = 2;
+// Posted when the ReShade menu is closed with ReShade's own key.
+constexpr UINT kMenuClosedMessage = WM_APP + 1;
 
 struct State
 {
     HWND overlay = nullptr;
     HWND target = nullptr;
     HWND indicator = nullptr;
-    std::wstring inputHotkey = L"Ctrl+Home";
+    std::wstring inputHotkey;
     std::wstring overlayHotkey;
     std::wstring indicatorText;
     bool editMode = false;
+    bool inputHotkeyRegistered = false;
     bool overlayVisible = false;
     bool captureEnabled = true;
     RECT overlayRect{};

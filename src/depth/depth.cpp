@@ -1,5 +1,6 @@
 #include "depth.h"
 #include "depth_model.h"
+#include "../addon.h"
 #include "../config.h"
 #include "../log.h"
 #include "../state.h"
@@ -16,10 +17,6 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
-
-// Shown in ReShade's add-on list.
-extern "C" __declspec(dllexport) const char* NAME = "RobloxShadeHost depth";
-extern "C" __declspec(dllexport) const char* DESCRIPTION = "Estimates a depth buffer from the captured Roblox image with Depth Anything V2.";
 
 namespace
 {
@@ -63,7 +60,6 @@ void main(uint3 id : SV_DispatchThreadID)
 struct Depth
 {
     bool enabled = false;
-    bool registered = false;
     std::wstring directory;
 
     int width = 0;  // model input and output size, follows the frame's aspect ratio
@@ -315,12 +311,11 @@ bool InitDepth()
         Log(LogLevel::Info, L"Depth estimation is not installed. Depth-based effects will not work.");
         return false;
     }
-    if (!reshade::register_addon(GetModuleHandleW(nullptr)))
+    if (!AddonRegistered())
     {
-        Log(LogLevel::Warning, L"Depth estimation needs ReShade with full add-on support and is off while the add-on is disabled in ReShade.");
+        Log(LogLevel::Warning, L"Depth estimation is off. It needs ReShade with full add-on support, with RobloxShadeHost enabled in ReShade's Add-ons tab.");
         return false;
     }
-    d.registered = true;
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
     reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
@@ -409,6 +404,4 @@ void ShutdownDepth()
     d.d3d12Proxy = nullptr;
     if (d.inputReady)
         CloseHandle(d.inputReady);
-    if (d.registered)
-        reshade::unregister_addon(GetModuleHandleW(nullptr));
 }

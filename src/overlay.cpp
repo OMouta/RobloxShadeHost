@@ -1,4 +1,5 @@
 #include "overlay.h"
+#include "addon.h"
 #include "log.h"
 #include "state.h"
 
@@ -70,6 +71,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             SetForegroundWindow(hwnd);
         }
         return 0;
+    case kMenuClosedMessage:
+        if (g.editMode)
+        {
+            SetEditMode(false);
+            SetForegroundWindow(g.target);
+        }
+        return 0;
     case WM_ACTIVATE:
         if (LOWORD(wParam) == WA_INACTIVE)
             SetEditMode(false);
@@ -116,8 +124,11 @@ void SetEditMode(bool enabled)
     SetWindowPos(g.overlay, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     if (!enabled)
         ShowWindow(g.indicator, SW_HIDE);
-    if (enabled)
-        Log(LogLevel::Info, L"Input captured. Use your ReShade menu key to open its menu; %ls returns to Roblox.", g.inputHotkey.c_str());
+    OpenReShadeMenu(enabled);
+    if (enabled && AddonRegistered())
+        Log(LogLevel::Info, L"ReShade menu opened. %ls returns to Roblox.", g.inputHotkey.c_str());
+    else if (enabled)
+        Log(LogLevel::Info, L"Input captured. Open the menu with ReShade's own key; %ls returns to Roblox.", g.inputHotkey.c_str());
     else
         Log(LogLevel::Info, L"Input returned to Roblox.");
 }

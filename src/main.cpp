@@ -2,6 +2,7 @@
 // installed on this exe instead of Roblox. Roblox is only observed from outside, through window
 // enumeration and Windows.Graphics.Capture. Nothing is opened, read or loaded into its process.
 
+#include "addon.h"
 #include "capture.h"
 #include "config.h"
 #include "depth/depth.h"
@@ -16,6 +17,35 @@ State g;
 
 namespace
 {
+bool RegisterInputHotkey(const Hotkey& hotkey)
+{
+    if (RegisterHotKey(g.overlay, kEditModeHotkey, hotkey.modifiers, hotkey.key))
+        return true;
+    static bool reported = false;
+    if (!reported)
+        Log(LogLevel::Warning, L"%ls is in use by another program. Choose another shortcut in RobloxShadeHost Setup or in "
+                               L"RobloxShadeHost.ini, then restart RobloxShadeHost.",
+            g.inputHotkey.c_str());
+    reported = true;
+    return false;
+}
+
+// Holding a bare key such as Home all the time would break it in every other program, so the shortcut is
+// only registered while Roblox or the host is in front.
+void UpdateInputHotkey(const Hotkey& hotkey)
+{
+    const bool wanted = g.target && (g.editMode || GetForegroundWindow() == g.target);
+    if (wanted == g.inputHotkeyRegistered)
+        return;
+    if (wanted)
+        g.inputHotkeyRegistered = RegisterInputHotkey(hotkey);
+    else
+    {
+        UnregisterHotKey(g.overlay, kEditModeHotkey);
+        g.inputHotkeyRegistered = false;
+    }
+}
+
 int Run()
 {
     const auto hotkeys = LoadInputHotkeys();
@@ -27,24 +57,26 @@ int Run()
     }
 
     CreateOverlayWindows();
+    InitAddon();
+    g.frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    CreateDevice();
+    InitDepth();
 
-    if (!RegisterHotKey(g.overlay, kEditModeHotkey, hotkeys.input.modifiers, hotkeys.input.key))
-        Log(LogLevel::Warning, L"%ls is in use by another program. Choose another shortcut in RobloxShadeHost Setup or in "
-                               L"RobloxShadeHost.ini, then restart RobloxShadeHost.",
-            g.inputHotkey.c_str());
+    // Reports a taken shortcut now rather than on the first press in Roblox.
+    if (RegisterInputHotkey(hotkeys.input))
+        UnregisterHotKey(g.overlay, kEditModeHotkey);
     if (hotkeys.overlay.key && !RegisterHotKey(g.overlay, kOverlayToggleHotkey, hotkeys.overlay.modifiers, hotkeys.overlay.key))
         Log(LogLevel::Warning, L"%ls is in use by another program, so the overlay shortcut is off. Choose another shortcut in "
                                L"RobloxShadeHost Setup or in RobloxShadeHost.ini, then restart RobloxShadeHost.",
             g.overlayHotkey.c_str());
 
-    g.frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    CreateDevice();
-    InitDepth();
-
     Log(LogLevel::Info, L"Install ReShade on this exe (DirectX 10/11/12).");
-    Log(LogLevel::Info, L"%ls: toggle input capture. ReShade keeps its own menu and effect shortcuts.", g.inputHotkey.c_str());
+    if (AddonRegistered())
+        Log(LogLevel::Info, L"Press %ls in Roblox to open ReShade, and again to go back to Roblox.", g.inputHotkey.c_str());
+    else
+        Log(LogLevel::Info, L"Press %ls in Roblox to use ReShade's menu, and again to go back to Roblox.", g.inputHotkey.c_str());
     if (hotkeys.overlay.key)
-        Log(LogLevel::Info, L"%ls: toggle overlay and frame capture.", g.overlayHotkey.c_str());
+        Log(LogLevel::Info, L"Press %ls to turn the overlay off and on.", g.overlayHotkey.c_str());
     Log(LogLevel::Info, L"Log file: %ls", LogPath().c_str());
     Log(LogLevel::Info, L"Waiting for Roblox...");
 
@@ -57,6 +89,7 @@ int Run()
             if (msg.message == WM_QUIT)
             {
                 ShutdownDepth();
+                ShutdownAddon();
                 return 0;
             }
             TranslateMessage(&msg);
@@ -89,6 +122,7 @@ int Run()
         }
 
         UpdateOverlay();
+        UpdateInputHotkey(hotkeys.input);
 
         if (g.target)
         {

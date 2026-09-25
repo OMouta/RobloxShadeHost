@@ -38,6 +38,7 @@ fetch_file("https://raw.githubusercontent.com/microsoft/onnxruntime/v1.24.4/incl
 add_executable(RobloxShadeHost
     src/RobloxShadeHost.rc
     src/main.cpp
+    src/addon.cpp
     src/capture.cpp
     src/config.cpp
     src/log.cpp

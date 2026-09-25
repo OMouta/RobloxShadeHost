@@ -6,7 +6,7 @@
 
 namespace
 {
-constexpr wchar_t kDefaultToggleKey[] = L"Ctrl+Home";
+constexpr wchar_t kDefaultToggleKey[] = L"Home";
 constexpr wchar_t kDefaultOverlayToggleKey[] = L"Ctrl+F8";
 
 // A missing entry uses the default. An empty one leaves the shortcut unassigned when allowEmpty is set.
