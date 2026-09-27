@@ -3,7 +3,7 @@
 #include <unknwn.h>
 #include <windows.h>
 #include <d3d11_4.h>
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>

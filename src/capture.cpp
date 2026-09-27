@@ -94,6 +94,9 @@ void PresentLatestFrame()
         desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         winrt::check_hresult(factory->CreateSwapChainForHwnd(g.device.get(), g.overlay, &desc, nullptr, nullptr, g.swapchain.put()));
         factory->MakeWindowAssociation(g.overlay, DXGI_MWA_NO_ALT_ENTER);
+        // DWM only skips its own SDR-to-HDR boost on this window's content once it knows the
+        // buffer is already scRGB; without this it can double up on already-correct HDR values.
+        winrt::check_hresult(g.swapchain.as<IDXGISwapChain3>()->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709));
     }
     else
     {
