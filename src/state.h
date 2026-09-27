@@ -16,7 +16,7 @@ using winrt::Windows::Graphics::SizeInt32;
 using winrt::Windows::Graphics::DirectX::DirectXPixelFormat;
 using winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 
-constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
+constexpr auto kPixelFormat = DirectXPixelFormat::R16G16B16A16Float;
 constexpr int kEditModeHotkey = 1;
 constexpr int kOverlayToggleHotkey = 2;
 // Posted when the ReShade menu is closed with ReShade's own key.

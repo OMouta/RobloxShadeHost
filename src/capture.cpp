@@ -85,7 +85,7 @@ void PresentLatestFrame()
         DXGI_SWAP_CHAIN_DESC1 desc{};
         desc.Width = size.Width;
         desc.Height = size.Height;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         desc.BufferCount = 2;
