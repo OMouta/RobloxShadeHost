@@ -4,7 +4,7 @@ If DLSS5 stays on "waiting", follow these steps.
 
 ## 1. Turn off "Require DLSS"
 
-In the RobloxShadeHost menu, open **Settings** and click **DLSS5 settings**, then turn off **Require DLSS**.
+In the RobloxShadeHost menu, click the **DLSS5** tab, then turn off **Require DLSS**.
 
 ![Require DLSS turned off](assets/dlss5-require-dlss.png)
 

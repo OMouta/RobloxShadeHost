@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -1235,16 +1236,6 @@ void SettingsTab()
         StopCapture();
         ApplyHotkeys(hotkeys);
     }
-
-    // RenoDX's DLSS5 add-on only draws its settings in ReShade's menu, so this opens it there.
-    if (GetModuleHandleW(kDlssModule))
-    {
-        ImGui::Dummy(ImVec2(0, S(10)));
-        Heading("DLSS5");
-        Text("Its settings open in ReShade's menu.", kDim, 13);
-        if (Button("DLSS5 settings", ImVec2(S(150), S(32))))
-            m.openDlss = true;
-    }
 }
 
 // Status
@@ -1350,27 +1341,47 @@ void Header(ImVec2 origin, float width)
 
 void Tabs(ImVec2 origin, float width)
 {
-    const char* names[] = { "Presets", "Effects", "Settings", "Status" };
+    struct Entry
+    {
+        const char* name;
+        // Empty for DLSS5. RenoDX's add-on only draws its settings in ReShade's menu, so its tab opens that.
+        std::optional<Tab> tab;
+    };
+    Entry entries[5];
+    int count = 0;
+    entries[count++] = { "Presets", Tab::Presets };
+    entries[count++] = { "Effects", Tab::Effects };
+    if (GetModuleHandleW(kDlssModule))
+        entries[count++] = { "DLSS5", std::nullopt };
+    entries[count++] = { "Settings", Tab::Settings };
+    entries[count++] = { "Status", Tab::Status };
+
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    const float tabWidth = (width - S(kPadding) * 2) / 4;
+    const float tabWidth = (width - S(kPadding) * 2) / count;
     const bool problems = HasProblems();
     PushSize(14);
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < count; ++i)
     {
+        const Entry& entry = entries[i];
         const ImVec2 start = origin + ImVec2(S(kPadding) + i * tabWidth, S(kHeader));
         ImGui::SetCursorScreenPos(start);
-        if (ImGui::InvisibleButton(names[i], ImVec2(tabWidth, S(kTabs)), ImGuiButtonFlags_EnableNav))
-            m.tab = static_cast<Tab>(i);
+        if (ImGui::InvisibleButton(entry.name, ImVec2(tabWidth, S(kTabs)), ImGuiButtonFlags_EnableNav))
+        {
+            if (entry.tab)
+                m.tab = *entry.tab;
+            else
+                m.openDlss = true;
+        }
         const bool hovered = ImGui::IsItemHovered();
         HandOnHover();
-        const bool active = m.tab == static_cast<Tab>(i);
-        const ImVec2 text = ImGui::CalcTextSize(names[i]);
+        const bool active = entry.tab == m.tab;
+        const ImVec2 text = ImGui::CalcTextSize(entry.name);
         const ImVec2 textStart = start + ImVec2((tabWidth - text.x) / 2, (S(kTabs) - text.y) / 2);
-        draw->AddText(textStart, active || hovered ? kText : kDim, names[i]);
+        draw->AddText(textStart, active || hovered ? kText : kDim, entry.name);
         if (active)
             draw->AddRectFilled(ImVec2(textStart.x - S(6), start.y + S(kTabs) - S(2)), ImVec2(textStart.x + text.x + S(6), start.y + S(kTabs)),
                                 kAccent, S(1));
-        if (i == static_cast<int>(Tab::Status) && problems)
+        if (entry.tab == Tab::Status && problems)
             draw->AddCircleFilled(textStart + ImVec2(text.x + S(6), S(3)), S(3), kWarning);
     }
     ImGui::PopFont();
