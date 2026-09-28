@@ -31,5 +31,9 @@ void SuspendHotkeys(bool suspended);
 // another program holds one of them or the file cannot be written.
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys);
 
+// Whether the menu saves preset changes as they happen, from RobloxShadeHost.ini. On unless turned off.
+bool AutoSavePresets();
+void SetAutoSavePresets(bool enabled);
+
 // Folder of RobloxShadeHost.exe, with a trailing backslash.
 std::wstring ExeDirectory();

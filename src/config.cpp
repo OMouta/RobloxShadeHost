@@ -124,6 +124,17 @@ void SuspendHotkeys(bool suspended)
     }
 }
 
+bool AutoSavePresets()
+{
+    return GetPrivateProfileIntW(L"Menu", L"AutoSavePresets", 1, IniPath().c_str()) != 0;
+}
+
+void SetAutoSavePresets(bool enabled)
+{
+    if (!WritePrivateProfileStringW(L"Menu", L"AutoSavePresets", enabled ? L"1" : L"0", IniPath().c_str()))
+        Log(LogLevel::Warning, L"Could not save the auto-save setting to RobloxShadeHost.ini. It applies until RobloxShadeHost closes.");
+}
+
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys)
 {
     const InputHotkeys previous = g.hotkeys;

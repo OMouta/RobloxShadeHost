@@ -113,6 +113,15 @@ enum class NameAction
     New,
     Duplicate,
     Rename,
+    SaveAsNew,
+};
+
+// What to do with unsaved changes before switching presets.
+enum class UnsavedChoice
+{
+    Ask,
+    Save,
+    Discard,
 };
 
 struct Menu
@@ -136,6 +145,15 @@ struct Menu
     // Keys of the effects listed under Active since the menu opened or the preset changed.
     std::set<std::string> active;
     bool presetChanged = false;
+    // With auto-save off, changes wait for the save icon. ReShade saves the current preset whenever it switches
+    // to another one, so a switch first asks what to do with them.
+    bool autoSave = true;
+    bool unsaved = false;
+    UnsavedChoice unsavedChoice = UnsavedChoice::Ask;
+    bool openUnsavedPopup = false;
+    bool askingUnsaved = false;
+    // Set when the changes went into the preset being switched to, so the one left behind is reverted.
+    bool pendingKeepsEdits = false;
 
     std::vector<fs::path> presets;
     ULONGLONG presetsScanned = 0;
@@ -392,6 +410,18 @@ void Spinner(float radius)
     ImGui::Dummy(ImVec2(radius * 2, radius * 2));
 }
 
+// A floppy disk: an outline with one corner cut, the shutter at the top and the label below.
+void SaveIcon(ImDrawList* draw, ImVec2 center, float size, ImU32 color)
+{
+    const ImVec2 min = center - ImVec2(size, size) * 0.5f;
+    const ImVec2 max = center + ImVec2(size, size) * 0.5f;
+    const float corner = size * 0.25f;
+    const ImVec2 outline[] = { min, ImVec2(max.x - corner, min.y), ImVec2(max.x, min.y + corner), max, ImVec2(min.x, max.y) };
+    draw->AddPolyline(outline, 5, color, ImDrawFlags_Closed, S(1.5f));
+    draw->AddRectFilled(ImVec2(min.x + size * 0.25f, min.y), ImVec2(max.x - size * 0.35f, min.y + size * 0.3f), color);
+    draw->AddRect(ImVec2(min.x + size * 0.2f, center.y + size * 0.1f), ImVec2(max.x - size * 0.2f, max.y), color, 0, 0, S(1.5f));
+}
+
 void Rainbow(ImDrawList* draw, ImVec2 min, ImVec2 max)
 {
     constexpr int count = static_cast<int>(std::size(theme::kRainbow));
@@ -452,6 +482,23 @@ fs::path CurrentPreset()
     return fs::path(Wide(path));
 }
 
+void SavePreset()
+{
+    m.runtime->save_current_preset();
+    m.presetChanged = false;
+    m.unsaved = false;
+}
+
+// Loads the active preset again as it was last saved. ReShade only saves the preset it leaves when switching to
+// a different one, so switching to the same one discards the changes.
+void DiscardChanges()
+{
+    m.runtime->set_current_preset_path(Utf8(CurrentPreset().wstring()).c_str());
+    m.presetChanged = false;
+    m.unsaved = false;
+    m.active.clear();
+}
+
 bool IsPreset(const fs::path& path)
 {
     std::ifstream file(path);
@@ -487,7 +534,9 @@ void OpenNamePopup(NameAction action, const fs::path& target)
     m.nameTarget = target;
     m.nameError.clear();
     const std::string stem = Utf8(target.stem().wstring());
-    const std::string name = action == NameAction::New ? "New preset" : action == NameAction::Duplicate ? stem + " copy" : stem;
+    const std::string name = action == NameAction::New    ? "New preset"
+                             : action == NameAction::Rename ? stem
+                                                            : stem + " copy";
     strncpy_s(m.name, name.c_str(), _TRUNCATE);
     m.openNamePopup = true;
 }
@@ -523,8 +572,13 @@ bool ApplyName(const fs::path& current)
         m.saveNewPreset = true;
         break;
     case NameAction::Duplicate:
+    case NameAction::SaveAsNew:
+        // The active preset is copied as it is on screen, unsaved changes included.
         if (SamePath(m.nameTarget, current))
+        {
             m.runtime->export_current_preset(Utf8(path.wstring()).c_str());
+            m.pendingKeepsEdits = true;
+        }
         else
             fs::copy_file(m.nameTarget, path, error);
         m.pendingPreset = path;
@@ -556,8 +610,8 @@ void NamePopup(const fs::path& current)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(20), S(18)));
     if (ImGui::BeginPopupModal("##name", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize))
     {
-        const char* titles[] = { "New preset", "Duplicate preset", "Rename preset" };
-        const char* actions[] = { "Create", "Duplicate", "Rename" };
+        const char* titles[] = { "New preset", "Duplicate preset", "Rename preset", "Save as new preset" };
+        const char* actions[] = { "Create", "Duplicate", "Rename", "Save" };
         const int action = static_cast<int>(m.nameAction);
         Text(titles[action], kText, 16.5f);
         if (m.nameAction == NameAction::New)
@@ -696,6 +750,48 @@ void PresetRow(const fs::path& path, bool active)
     ImGui::PopID();
 }
 
+// Asks what to do with unsaved changes when switching presets. The switch waits for the answer.
+void UnsavedPopup(const fs::path& current)
+{
+    if (m.openUnsavedPopup)
+    {
+        ImGui::OpenPopup("##unsaved");
+        m.openUnsavedPopup = false;
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(S(420), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(20), S(18)));
+    if (ImGui::BeginPopupModal("##unsaved", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        Text("Save your changes to " + Utf8(current.stem().wstring()) + "?", kText, 16.5f);
+        Text("Discarding goes back to how the preset was last saved.", kDim, 13.5f);
+        ImGui::Dummy(ImVec2(0, S(2)));
+        const float buttonWidth = S(100);
+        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - S(20) - buttonWidth * 3 - S(16));
+        if (Button("Discard", ImVec2(buttonWidth, S(32))))
+            m.unsavedChoice = UnsavedChoice::Discard;
+        ImGui::SameLine(0, S(8));
+        if (Button("Cancel", ImVec2(buttonWidth, S(32))) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        {
+            m.pendingPreset.clear();
+            m.saveNewPreset = false;
+            m.pendingKeepsEdits = false;
+        }
+        ImGui::SameLine(0, S(8));
+        if (Button("Save", ImVec2(buttonWidth, S(32)), true))
+            m.unsavedChoice = UnsavedChoice::Save;
+        // Answered, or the menu closed and dropped the switch.
+        if (m.unsavedChoice != UnsavedChoice::Ask || m.pendingPreset.empty())
+        {
+            m.askingUnsaved = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+}
+
 void PresetsTab()
 {
     const fs::path current = CurrentPreset();
@@ -705,6 +801,12 @@ void PresetsTab()
     if (Button("New preset", ImVec2(S(130), S(32)), true))
         OpenNamePopup(NameAction::New, {});
     ImGui::SameLine(0, S(8));
+    if (!m.autoSave)
+    {
+        if (Button("Save as new", ImVec2(S(120), S(32))))
+            OpenNamePopup(NameAction::SaveAsNew, current);
+        ImGui::SameLine(0, S(8));
+    }
     if (Button("Open folder", ImVec2(S(120), S(32))))
         ShellOpen(current.parent_path().wstring());
     ImGui::Dummy(ImVec2(0, S(2)));
@@ -713,9 +815,12 @@ void PresetsTab()
         PresetRow(preset, SamePath(preset, current));
 
     ImGui::Dummy(ImVec2(0, S(4)));
-    Text("Changes save to the active preset as you make them.", kDim, 13);
+    Text(m.autoSave ? "Changes save to the active preset as you make them."
+                    : "Changes apply right away. Save them with the icon at the top.",
+         kDim, 13);
     NamePopup(current);
     DeletePopup();
+    UnsavedPopup(current);
 }
 
 // Effects
@@ -1237,6 +1342,22 @@ void SettingsTab()
         StopCapture();
         ApplyHotkeys(hotkeys);
     }
+
+    ImGui::Dummy(ImVec2(0, S(14)));
+    Heading("PRESETS");
+    if (Switch("autosave", m.autoSave))
+    {
+        m.autoSave = !m.autoSave;
+        SetAutoSavePresets(m.autoSave);
+        // From here on every change saves as it happens, so changes that were waiting are saved too.
+        if (m.autoSave && m.unsaved)
+            SavePreset();
+    }
+    ImGui::SameLine(0, S(12));
+    ImGui::BeginGroup();
+    Text("Save changes automatically", kText, 14.5f);
+    Text("Turn off to try changes first and save them with the icon at the top.", kDim, 13);
+    ImGui::EndGroup();
 }
 
 // Status
@@ -1302,12 +1423,40 @@ void Header(ImVec2 origin, float width)
     draw->AddText(origin + ImVec2(textX, S(17)), kText, "RobloxShadeHost");
     const float titleWidth = ImGui::CalcTextSize("RobloxShadeHost").x;
     ImGui::PopFont();
+    // The right side holds the effects switch, its label and, with auto-save off, the save icon.
     PushSize(13);
+    const ImVec2 labelSize = ImGui::CalcTextSize("Effects");
+    const float switchX = width - S(kPadding) - S(32);
+    const float labelX = switchX - S(8) - labelSize.x;
+    const ImVec2 saveSize(S(30), S(30));
+    const float saveX = labelX - S(14) - saveSize.x;
+
     const std::string preset = Utf8(CurrentPreset().stem().wstring());
-    draw->PushClipRect(origin, origin + ImVec2(width - S(110), S(kHeader)), true);
+    const ImVec2 nameSize = ImGui::CalcTextSize(preset.c_str());
+    draw->PushClipRect(origin, origin + ImVec2((m.autoSave ? labelX : saveX) - S(12), S(kHeader)), true);
     draw->AddText(origin + ImVec2(textX, S(39)), kDim, preset.c_str());
+    if (m.unsaved)
+        draw->AddCircleFilled(origin + ImVec2(textX + nameSize.x + S(7), S(39) + ImGui::GetFontSize() / 2 + S(1)), S(3), kWarning);
     draw->PopClipRect();
     ImGui::PopFont();
+
+    if (!m.autoSave)
+    {
+        const ImVec2 start = origin + ImVec2(saveX, S(22));
+        ImGui::SetCursorScreenPos(start);
+        if (ImGui::InvisibleButton("save", saveSize, ImGuiButtonFlags_EnableNav) && m.unsaved)
+            SavePreset();
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(m.unsaved ? "Save changes to %s" : "No unsaved changes in %s", preset.c_str());
+            if (m.unsaved)
+            {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                draw->AddRectFilled(start, start + saveSize, kBorder, S(6));
+            }
+        }
+        SaveIcon(draw, start + saveSize * 0.5f, S(14), m.unsaved ? kAccentHover : kBorderStrong);
+    }
 
     const Update update = AvailableUpdate();
     if (!update.version.empty())
@@ -1327,14 +1476,13 @@ void Header(ImVec2 origin, float width)
 
     // Effects on and off for everything, like ReShade's own shortcut.
     const bool on = m.runtime->get_effects_state() || m.comparing;
-    ImGui::SetCursorScreenPos(origin + ImVec2(width - S(kPadding) - S(32), S(28)));
+    ImGui::SetCursorScreenPos(origin + ImVec2(switchX, S(28)));
     if (Switch("effects", on) && !m.comparing)
         m.runtime->set_effects_state(!on);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(on ? "Turn all effects off" : "Turn effects back on");
     PushSize(13);
-    const ImVec2 labelSize = ImGui::CalcTextSize("Effects");
-    draw->AddText(origin + ImVec2(width - S(kPadding) - S(32) - S(8) - labelSize.x, S(28) + (S(18) - labelSize.y) / 2), kDim, "Effects");
+    draw->AddText(origin + ImVec2(labelX, S(28) + (S(18) - labelSize.y) / 2), kDim, "Effects");
     ImGui::PopFont();
 
     Rainbow(draw, origin + ImVec2(0, S(kHeader) - S(2)), origin + ImVec2(width, S(kHeader)));
@@ -1509,24 +1657,43 @@ void DrawMenuFrame()
 
     if (m.capturing >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered())
         StopCapture();
-    // Saving writes the whole preset, so it waits until a slider is let go.
-    if (m.presetChanged && !ImGui::IsAnyItemActive())
+    // Saving writes the whole preset, so it waits until a slider is let go. With auto-save off, changes only mark
+    // the preset as unsaved.
+    if (m.presetChanged && (!ImGui::IsAnyItemActive() || !m.pendingPreset.empty()))
     {
-        m.runtime->save_current_preset();
+        if (m.autoSave)
+            SavePreset();
+        else
+            m.unsaved = true;
         m.presetChanged = false;
     }
     if (!m.pendingPreset.empty())
     {
-        if (m.presetChanged)
-            m.runtime->save_current_preset();
-        m.presetChanged = false;
-        m.runtime->set_current_preset_path(Utf8(m.pendingPreset.wstring()).c_str());
-        if (m.saveNewPreset)
-            m.runtime->save_current_preset();
-        m.pendingPreset.clear();
-        m.saveNewPreset = false;
-        m.presetsScanned = 0;
-        m.active.clear();
+        if (m.unsaved && !m.pendingKeepsEdits && m.unsavedChoice == UnsavedChoice::Ask)
+        {
+            if (!m.askingUnsaved)
+            {
+                m.askingUnsaved = true;
+                m.openUnsavedPopup = true;
+            }
+        }
+        else
+        {
+            // Changes that went into the new preset, or were discarded, must not be saved into this one.
+            if (m.unsaved && (m.pendingKeepsEdits || m.unsavedChoice == UnsavedChoice::Discard))
+                DiscardChanges();
+            else if (m.unsaved)
+                SavePreset();
+            m.runtime->set_current_preset_path(Utf8(m.pendingPreset.wstring()).c_str());
+            if (m.saveNewPreset)
+                m.runtime->save_current_preset();
+            m.pendingPreset.clear();
+            m.saveNewPreset = false;
+            m.pendingKeepsEdits = false;
+            m.unsavedChoice = UnsavedChoice::Ask;
+            m.presetsScanned = 0;
+            m.active.clear();
+        }
     }
     if (m.openReShade || m.openDlss)
     {
@@ -1604,6 +1771,7 @@ void InitMenu()
 {
     if (!AddonRegistered())
         return;
+    m.autoSave = AutoSavePresets();
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
     reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
@@ -1631,9 +1799,16 @@ void ResetMenu()
     if (m.comparing)
         m.runtime->set_effects_state(m.effectsBeforeCompare);
     m.comparing = false;
-    if (m.presetChanged)
-        m.runtime->save_current_preset();
+    if (m.presetChanged && m.autoSave)
+        SavePreset();
+    else if (m.presetChanged)
+        m.unsaved = true;
     m.presetChanged = false;
+    // A switch still waiting for an answer about unsaved changes is dropped.
+    m.pendingPreset.clear();
+    m.saveNewPreset = false;
+    m.pendingKeepsEdits = false;
+    m.unsavedChoice = UnsavedChoice::Ask;
 }
 
 LPCWSTR MenuCursor()
