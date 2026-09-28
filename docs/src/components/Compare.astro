@@ -1,0 +1,164 @@
+---
+import { Image } from 'astro:assets';
+import before from '../assets/compare-before.jpg';
+import after from '../assets/compare-after.jpg';
+
+const widths = [720, 1080, 1440];
+---
+
+<div class="compare">
+  <Image src={before} widths={widths} sizes="100vw" alt="A Roblox street as the game draws it" class="picture" loading="eager" />
+  <Image
+    src={after}
+    widths={widths}
+    sizes="100vw"
+    alt="The same street with a RobloxShadeHost preset: warmer light, deeper shadows and glow around the sun"
+    class="picture after"
+    loading="eager"
+  />
+  <span class="label label-before" aria-hidden="true">Roblox</span>
+  <span class="label label-after" aria-hidden="true">With RobloxShadeHost</span>
+  <span class="seam" aria-hidden="true"><span class="handle"></span></span>
+  <input type="range" min="0" max="100" value="50" step="0.5" aria-label="Compare Roblox with and without RobloxShadeHost" />
+</div>
+
+<script>
+  for (const compare of document.querySelectorAll<HTMLElement>('.compare')) {
+    const input = compare.querySelector('input')!;
+    input.addEventListener('input', () => {
+      // The opening sweep stops as soon as someone takes the handle.
+      compare.classList.add('touched');
+      compare.style.setProperty('--position', `${input.value}%`);
+    });
+  }
+</script>
+
+<style>
+  @property --position {
+    syntax: '<percentage>';
+    inherits: true;
+    initial-value: 50%;
+  }
+
+  .compare {
+    --position: 50%;
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    animation: sweep 1.6s cubic-bezier(0.2, 0.7, 0.2, 1) 0.3s backwards;
+  }
+
+  .compare.touched {
+    animation: none;
+  }
+
+  /* The shaded picture slides in from the right once, on load. */
+  @keyframes sweep {
+    from {
+      --position: 100%;
+    }
+  }
+
+  .picture {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: 50% 45%;
+  }
+
+  .after {
+    clip-path: inset(0 0 0 var(--position));
+  }
+
+  .seam {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--position);
+    width: 3px;
+    translate: -50% 0;
+    background: linear-gradient(to bottom, var(--spectrum));
+    pointer-events: none;
+  }
+
+  .handle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    translate: -50% -50%;
+    border: 3px solid transparent;
+    border-radius: 50%;
+    background:
+      linear-gradient(rgb(15 16 36 / 0.55), rgb(15 16 36 / 0.55)) padding-box,
+      conic-gradient(var(--spectrum), #ff4860) border-box;
+    backdrop-filter: blur(6px);
+  }
+
+  .handle::before,
+  .handle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    width: 7px;
+    height: 7px;
+    border: solid var(--ink);
+    border-width: 0 0 2px 2px;
+  }
+
+  .handle::before {
+    left: 10px;
+    rotate: 45deg;
+    translate: 0 -50%;
+  }
+
+  .handle::after {
+    right: 10px;
+    rotate: -135deg;
+    translate: 0 -50%;
+  }
+
+  .label {
+    position: absolute;
+    top: 96px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    background: rgb(15 16 36 / 0.6);
+    backdrop-filter: blur(6px);
+    pointer-events: none;
+  }
+
+  .label-before {
+    left: calc((100% - var(--page)) / 2);
+  }
+
+  .label-after {
+    right: calc((100% - var(--page)) / 2);
+  }
+
+  input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: ew-resize;
+  }
+
+  .compare:has(input:focus-visible) .handle {
+    outline: 2px solid var(--ink);
+    outline-offset: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .compare {
+      animation: none;
+    }
+  }
+</style>

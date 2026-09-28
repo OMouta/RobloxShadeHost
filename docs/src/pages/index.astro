@@ -1,0 +1,270 @@
+---
+import { Image } from 'astro:assets';
+import Base from '../layouts/Base.astro';
+import Compare from '../components/Compare.astro';
+import menu from '../assets/menu-effects-crop.jpg';
+import { links, page } from '../links';
+---
+
+<Base
+  title="RobloxShadeHost: run ReShade on Roblox"
+  description="Run ReShade on Roblox without modifying the game. Presets, every ReShade effect and an in-game menu, for Windows."
+  overlay
+>
+  <main>
+    <section class="hero">
+      <div class="stage">
+        <Compare />
+      </div>
+      <div class="lede">
+        <h1>Run ReShade on Roblox without modifying the game.</h1>
+        <div class="actions">
+          <a class="button button-primary" href={links.download}>Download for Windows</a>
+          <span class="dim">Free for Windows 10 and 11</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="menu">
+      <div class="menu-text">
+        <h2>Press Home and pick a look</h2>
+        <p>
+          The menu opens over the game while it keeps running. Switch presets, turn effects on and drag their settings while you watch
+          the result, then press Home again to keep playing.
+        </p>
+        <ul>
+          <li>Save your own presets, or duplicate one to start from.</li>
+          <li>Search every installed effect and change its settings.</li>
+          <li>Hold Compare to see plain Roblox for a moment.</li>
+          <li>Change the shortcuts without restarting.</li>
+        </ul>
+      </div>
+      <Image
+        src={menu}
+        widths={[640, 1000]}
+        sizes="(max-width: 900px) 100vw, 60vw"
+        alt="The RobloxShadeHost menu over Roblox, with an effect's settings open"
+        class="menu-shot"
+      />
+    </section>
+
+    <section class="included">
+      <h2>What Setup installs</h2>
+      <dl>
+        <div>
+          <dt>Every ReShade effect</dt>
+          <dd>Every package on ReShade's official list, around five hundred effects.</dd>
+        </div>
+        <div>
+          <dt>Presets for Roblox</dt>
+          <dd>Ready-made looks to start from. People share more on Discord.</dd>
+        </div>
+        <div>
+          <dt>Depth estimation, optional</dt>
+          <dd>Roblox keeps its depth to itself, so an AI model estimates it from the picture. Ambient occlusion, depth of field and fog work from that.</dd>
+        </div>
+        <div>
+          <dt>DLSS5, optional</dt>
+          <dd>NVIDIA's DLSS5 through RenoDX's add-on, for RTX graphics cards. <a href={page('dlss5/')}>DLSS5 setup</a></dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="outside">
+      <div class="outside-text">
+        <h2>Roblox stays untouched</h2>
+        <p>
+          RobloxShadeHost is a separate program. Windows gives it a copy of Roblox's picture, ReShade draws the effects on that copy, and
+          RobloxShadeHost shows the result over the game window. It never opens Roblox's files or memory.
+        </p>
+        <p class="dim">Copying and processing every frame costs some frame rate.</p>
+      </div>
+      <svg class="flow" viewBox="0 0 560 150" role="img" aria-label="Roblox's picture goes to RobloxShadeHost, which draws the effects and shows the result over Roblox">
+        <defs>
+          <linearGradient id="spectrum" x1="0" x2="1">
+            <stop offset="0" stop-color="#ff4860" />
+            <stop offset="0.17" stop-color="#ff9e36" />
+            <stop offset="0.33" stop-color="#f8e44c" />
+            <stop offset="0.5" stop-color="#54de7a" />
+            <stop offset="0.67" stop-color="#3ec6ff" />
+            <stop offset="0.83" stop-color="#546eff" />
+            <stop offset="1" stop-color="#ba5cff" />
+          </linearGradient>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 L10 5 L0 10" fill="none" stroke="#a3a6c8" stroke-width="1.5" />
+          </marker>
+        </defs>
+        <rect x="2" y="40" width="130" height="70" rx="12" fill="none" stroke="#2a2d52" stroke-width="2" />
+        <text x="67" y="80" text-anchor="middle">Roblox</text>
+        <line x1="138" y1="75" x2="206" y2="75" stroke="#a3a6c8" stroke-width="1.5" marker-end="url(#arrow)" />
+        <text x="172" y="62" text-anchor="middle" class="small">picture</text>
+        <rect x="214" y="30" width="170" height="90" rx="12" fill="#161834" stroke="url(#spectrum)" stroke-width="2.5" />
+        <text x="299" y="70" text-anchor="middle">RobloxShadeHost</text>
+        <text x="299" y="92" text-anchor="middle" class="small">+ ReShade</text>
+        <line x1="390" y1="75" x2="420" y2="75" stroke="#a3a6c8" stroke-width="1.5" marker-end="url(#arrow)" />
+        <rect x="428" y="40" width="130" height="70" rx="12" fill="none" stroke="#2a2d52" stroke-width="2" />
+        <text x="493" y="72" text-anchor="middle">Over the</text>
+        <text x="493" y="92" text-anchor="middle">game</text>
+      </svg>
+    </section>
+
+    <section class="install">
+      <h2>Set it up in a few minutes</h2>
+      <ol>
+        <li>Download RobloxShadeHost Setup and run it.</li>
+        <li>Pick the add-ons you want. Setup downloads ReShade, the effects and the presets.</li>
+        <li>Open Roblox and press Home.</li>
+      </ol>
+      <div class="actions">
+        <a class="button button-primary" href={links.download}>Download for Windows</a>
+        <a class="button button-secondary" href={page('install/')}>Read the install guide</a>
+      </div>
+      <p class="dim">Needs 64-bit Windows 10 version 1903 or newer, or Windows 11.</p>
+    </section>
+  </main>
+</Base>
+
+<style>
+  /* The picture stays clear of text. The headline sits under it. */
+  .stage {
+    position: relative;
+    height: clamp(380px, 60svh, 720px);
+    isolation: isolate;
+  }
+
+  .lede {
+    display: grid;
+    gap: 24px;
+    width: var(--page);
+    margin: clamp(28px, 4vw, 44px) auto 0;
+  }
+
+  .lede h1 {
+    max-width: 24ch;
+    font-size: clamp(1.9rem, 3.9vw, 3.5rem);
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px 20px;
+  }
+
+  section:not(.hero) {
+    width: var(--page);
+    margin: clamp(96px, 13vw, 160px) auto 0;
+  }
+
+  .menu {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 8fr);
+    gap: clamp(32px, 5vw, 64px);
+    align-items: center;
+  }
+
+  .menu-text {
+    display: grid;
+    gap: 20px;
+    max-width: 42ch;
+  }
+
+  .menu-text ul {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding-left: 1.2em;
+  }
+
+  .menu-text li::marker {
+    color: var(--accent);
+  }
+
+  .menu-shot {
+    width: 100%;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+  }
+
+  .included h2 {
+    margin-bottom: 36px;
+  }
+
+  dl {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 36px clamp(32px, 6vw, 88px);
+    margin: 0;
+  }
+
+  dt {
+    font-size: 1.2rem;
+    font-weight: 700;
+    font-stretch: 112%;
+  }
+
+  dd {
+    margin: 6px 0 0;
+    max-width: 46ch;
+    color: var(--haze);
+  }
+
+  .outside {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: clamp(32px, 6vw, 88px);
+    align-items: center;
+  }
+
+  .outside-text {
+    display: grid;
+    gap: 18px;
+    max-width: 48ch;
+  }
+
+  .flow {
+    width: 100%;
+    height: auto;
+  }
+
+  .flow text {
+    fill: var(--ink);
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .flow text.small {
+    fill: var(--haze);
+    font-size: 13px;
+    font-weight: 400;
+  }
+
+  .install {
+    display: grid;
+    gap: 24px;
+    justify-items: start;
+  }
+
+  .install ol {
+    display: grid;
+    gap: 12px;
+    max-width: 60ch;
+    margin: 0;
+    padding-left: 1.4em;
+    font-size: 1.1rem;
+  }
+
+  .install li::marker {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (max-width: 900px) {
+    .menu,
+    .outside,
+    dl {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>
