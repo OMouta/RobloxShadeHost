@@ -35,23 +35,34 @@ fetch_file("${ONNXRUNTIME_HEADERS_URL}/onnxruntime_c_api.h" 9ed0d7054a4e74249467
 fetch_file("${ONNXRUNTIME_HEADERS_URL}/onnxruntime_ep_c_api.h" e94ac3490697bdb107844fa9d403952ee7136134132a057eae5c1207b57ce352 "${ONNXRUNTIME_INCLUDE}/onnxruntime_ep_c_api.h")
 fetch_file("https://raw.githubusercontent.com/microsoft/onnxruntime/v1.24.4/include/onnxruntime/core/providers/dml/dml_provider_factory.h" 893ddb645545bddad8c3f24bb768e97651c9ce45ec22076b435439889e4228c8 "${ONNXRUNTIME_INCLUDE}/dml_provider_factory.h")
 
-add_executable(RobloxShadeHost
+# The in-game menu draws through ReShade's own Dear ImGui, so it needs the header of the exact version ReShade
+# exports its functions for. Only the header: the functions are ReShade's.
+set(RESHADE_IMGUI_INCLUDE "${CMAKE_BINARY_DIR}/reshade-imgui")
+fetch_file("https://raw.githubusercontent.com/ocornut/imgui/v1.92.5-docking/imgui.h" 07562842049eaca4e47c3fcdcc9d8eafd442695b9856d6f6639e92e1bb6c737e "${RESHADE_IMGUI_INCLUDE}/imgui.h")
+fetch_file("https://raw.githubusercontent.com/ocornut/imgui/v1.92.5-docking/imconfig.h" 6e5687893594ebfaf8569280cfea83d025904a8a4e23bec073086f6c5bc8f7fb "${RESHADE_IMGUI_INCLUDE}/imconfig.h")
+
+add_executable(RobloxShadeHost WIN32
     src/RobloxShadeHost.rc
     src/main.cpp
     src/addon.cpp
     src/capture.cpp
     src/config.cpp
+    src/launcher.cpp
     src/log.cpp
+    src/menu.cpp
     src/depth/depth.cpp
     src/depth/depth_model.cpp
     src/overlay.cpp
+    src/reshade_config.cpp
     src/roblox_window.cpp
-    src/setup_check.cpp)
-target_include_directories(RobloxShadeHost PRIVATE "${RESHADE_INCLUDE}" "${ONNXRUNTIME_INCLUDE}")
+    src/setup_check.cpp
+    src/update.cpp
+    installer/net.cpp)
+target_include_directories(RobloxShadeHost PRIVATE "${RESHADE_INCLUDE}" "${RESHADE_IMGUI_INCLUDE}" "${ONNXRUNTIME_INCLUDE}")
 target_compile_definitions(RobloxShadeHost PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(RobloxShadeHost PRIVATE ROBLOX_SHADE_HOST_VERSION="${PROJECT_VERSION}")
 target_compile_options(RobloxShadeHost PRIVATE /W4 /permissive- /EHsc /bigobj)
-target_link_libraries(RobloxShadeHost PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi windowsapp gdi32 version)
+target_link_libraries(RobloxShadeHost PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi windowsapp gdi32 gdiplus version winhttp bcrypt shlwapi windowscodecs)
 
 # Setup draws its window with Dear ImGui and unpacks effect packages with miniz.
 set(IMGUI_DIR "${CMAKE_BINARY_DIR}/imgui")
@@ -115,4 +126,8 @@ if(BUILD_TESTING)
     target_compile_definitions(hotkey_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(hotkey_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME hotkey_tests COMMAND hotkey_tests)
+
+    add_executable(ini_text_tests tests/ini_text_tests.cpp)
+    target_compile_options(ini_text_tests PRIVATE /W4 /permissive- /EHsc)
+    add_test(NAME ini_text_tests COMMAND ini_text_tests)
 endif()

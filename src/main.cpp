@@ -6,79 +6,49 @@
 #include "capture.h"
 #include "config.h"
 #include "depth/depth.h"
+#include "launcher.h"
 #include "log.h"
+#include "menu.h"
 #include "overlay.h"
+#include "reshade_config.h"
 #include "roblox_window.h"
 #include "setup_check.h"
 #include "state.h"
-
-#include <cstdio>
+#include "update.h"
 
 State g;
 
 namespace
 {
-bool RegisterInputHotkey(const Hotkey& hotkey)
+void ShowError(const std::wstring& message)
 {
-    if (RegisterHotKey(g.overlay, kEditModeHotkey, hotkey.modifiers, hotkey.key))
-        return true;
-    static bool reported = false;
-    if (!reported)
-        Log(LogLevel::Warning, L"%ls is in use by another program. Choose another shortcut in RobloxShadeHost Setup or in "
-                               L"RobloxShadeHost.ini, then restart RobloxShadeHost.",
-            g.inputHotkey.c_str());
-    reported = true;
-    return false;
-}
-
-// Holding a bare key such as Home all the time would break it in every other program, so the shortcut is
-// only registered while Roblox or the host is in front.
-void UpdateInputHotkey(const Hotkey& hotkey)
-{
-    const bool wanted = g.target && (g.editMode || GetForegroundWindow() == g.target);
-    if (wanted == g.inputHotkeyRegistered)
-        return;
-    if (wanted)
-        g.inputHotkeyRegistered = RegisterInputHotkey(hotkey);
-    else
-    {
-        UnregisterHotKey(g.overlay, kEditModeHotkey);
-        g.inputHotkeyRegistered = false;
-    }
+    MessageBoxW(g.launcher, (message + L"\n\nMore details are in " + LogPath() + L".").c_str(), L"RobloxShadeHost", MB_ICONERROR);
 }
 
 int Run()
 {
-    const auto hotkeys = LoadInputHotkeys();
     if (!GraphicsCaptureSession::IsSupported())
     {
-        Log(LogLevel::Error, L"Windows Graphics Capture is not available, and RobloxShadeHost needs it to copy Roblox's picture. "
-                             L"Update Windows and your graphics driver.");
+        const wchar_t* message = L"Windows Graphics Capture is not available, and RobloxShadeHost needs it to copy Roblox's picture. "
+                                 L"Update Windows and your graphics driver.";
+        Log(LogLevel::Error, L"%ls", message);
+        ShowError(message);
         return 1;
     }
 
-    CreateOverlayWindows();
+    LoadInputHotkeys();
+    if (ReShadeLoaded())
+        PrepareReShadeConfig();
+    CreateOverlayWindow();
     InitAddon();
+    InitMenu();
     g.frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     CreateDevice();
     CheckSetup();
     InitDepth();
-
-    // Reports a taken shortcut now rather than on the first press in Roblox.
-    if (RegisterInputHotkey(hotkeys.input))
-        UnregisterHotKey(g.overlay, kEditModeHotkey);
-    if (hotkeys.overlay.key && !RegisterHotKey(g.overlay, kOverlayToggleHotkey, hotkeys.overlay.modifiers, hotkeys.overlay.key))
-        Log(LogLevel::Warning, L"%ls is in use by another program, so the overlay shortcut is off. Choose another shortcut in "
-                               L"RobloxShadeHost Setup or in RobloxShadeHost.ini, then restart RobloxShadeHost.",
-            g.overlayHotkey.c_str());
-
-    if (AddonRegistered())
-        Log(LogLevel::Info, L"Press %ls in Roblox to open ReShade, and again to go back to Roblox.", g.inputHotkey.c_str());
-    else
-        Log(LogLevel::Info, L"Press %ls in Roblox to use ReShade's menu, and again to go back to Roblox.", g.inputHotkey.c_str());
-    if (hotkeys.overlay.key)
-        Log(LogLevel::Info, L"Press %ls to turn the overlay off and on.", g.overlayHotkey.c_str());
-    Log(LogLevel::Info, L"Log file: %ls", LogPath().c_str());
+    RegisterHotkeys();
+    CheckForUpdate();
+    CreateLauncher();
     Log(LogLevel::Info, L"Waiting for Roblox...");
 
     ULONGLONG nextSearch = 0;
@@ -91,6 +61,7 @@ int Run()
             {
                 ShutdownDepth();
                 ShutdownAddon();
+                DestroyLauncher();
                 return 0;
             }
             TranslateMessage(&msg);
@@ -123,7 +94,8 @@ int Run()
         }
 
         UpdateOverlay();
-        UpdateInputHotkey(hotkeys.input);
+        UpdateInputHotkey();
+        UpdateLauncher();
 
         if (g.target)
         {
@@ -143,7 +115,7 @@ int Run()
                 }
             }
 
-            // Also re-presents on timeout, so the ReShade menu stays responsive if Roblox stops drawing.
+            // Also re-presents on timeout, so the menu stays responsive if Roblox stops drawing.
             if (g.overlayVisible && g.latestFrame)
                 PresentLatestFrame();
         }
@@ -151,27 +123,22 @@ int Run()
         MsgWaitForMultipleObjects(1, &g.frameEvent, FALSE, g.overlayVisible ? 16 : 250, QS_ALLINPUT);
     }
 }
-
-// A console window the host opened itself would close with the error in it.
-void KeepConsoleOpen()
-{
-    DWORD processes[2];
-    if (GetConsoleProcessList(processes, 2) != 1)
-        return;
-    std::puts("\nPress Enter to close.");
-    std::getchar();
-}
 } // namespace
 
-int main()
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
-    std::puts(R"(  ____       _     _            ____  _               _      _   _           _
- |  _ \ ___ | |__ | | _____  __/ ___|| |__   __ _  __| | ___| | | | ___  ___| |_
- | |_) / _ \| '_ \| |/ _ \ \/ /\___ \| '_ \ / _` |/ _` |/ _ \ |_| |/ _ \/ __| __|
- |  _ < (_) | |_) | | (_) >  <  ___) | | | | (_| | (_| |  __/  _  | (_) \__ \ |_
- |_| \_\___/|_.__/|_|\___/_/\_\|____/|_| |_|\__,_|\__,_|\___|_| |_|\___/|___/\__|
-)");
-    std::printf("v%s\n\n", ROBLOX_SHADE_HOST_VERSION);
+    // A second copy would fight the first over Roblox and the shortcuts, so it shows the first one instead.
+    const HANDLE instance = CreateMutexW(nullptr, TRUE, L"Local\\RobloxShadeHost");
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        if (const HWND other = FindWindowW(kLauncherClass, nullptr))
+        {
+            ShowWindow(other, SW_RESTORE);
+            SetForegroundWindow(other);
+        }
+        return 0;
+    }
+
     InitLog();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -183,12 +150,16 @@ int main()
     catch (const winrt::hresult_error& e)
     {
         Log(LogLevel::Error, L"RobloxShadeHost stopped: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
+        ShowError(L"RobloxShadeHost stopped because of an error: " + std::wstring(e.message()));
     }
     catch (const std::exception& e)
     {
         Log(LogLevel::Error, L"RobloxShadeHost stopped: %hs", e.what());
+        ShowError(L"RobloxShadeHost stopped because of an error.");
     }
-    if (result != 0)
-        KeepConsoleOpen();
-    return result;
+    CloseHandle(instance);
+    // Releasing the swapchain makes ReShade wait for the effects it is still compiling, which can take minutes
+    // right after installing. ReShade writes settings and presets a second after they change, so the host exits
+    // without that wait.
+    ExitProcess(static_cast<UINT>(result));
 }
