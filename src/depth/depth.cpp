@@ -3,9 +3,9 @@
 #include "../addon.h"
 #include "../config.h"
 #include "../log.h"
+#include "../reshade_imgui.h"
 #include "../state.h"
 
-#include <reshade.hpp>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 
@@ -173,7 +173,7 @@ void Worker()
                 model->Load(d.directory, kModelFile, d.width, d.height, d.d3d12.get());
                 loadedWidth = d.width;
                 loadedHeight = d.height;
-                Log(LogLevel::Ok, L"Depth model ready (%dx%d)", d.width, d.height);
+                Report(LogLevel::Ok, L"Depth estimation ready (%dx%d)", d.width, d.height);
             }
             model->Run(d.input, d.width, d.height, d.result);
         }
@@ -311,7 +311,7 @@ bool InitDepth()
         return false;
     if (!AddonRegistered())
     {
-        Log(LogLevel::Warning, L"Depth estimation is off. It needs ReShade with full add-on support, with RobloxShadeHost enabled in ReShade's Add-ons tab.");
+        Log(LogLevel::Warning, L"Depth estimation is off because ReShade did not load the RobloxShadeHost add-on.");
         return false;
     }
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
