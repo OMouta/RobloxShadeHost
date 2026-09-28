@@ -1,1 +1,4 @@
+#include "resource.h"
+
 1 ICON "../assets/RobloxShadeHost.ico"
+IDR_LOGO RCDATA "../assets/RobloxShadeHost.png"

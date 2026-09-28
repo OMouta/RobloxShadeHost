@@ -1,12 +1,21 @@
 #pragma once
 
-// Registers the host as a ReShade add-on, so its shortcut can open and close the ReShade menu. Returns false
-// when ReShade is missing or refuses add-ons, for example when the add-on is disabled in ReShade.
+// Whether ReShade was loaded into the host, which happens when it is installed beside the exe.
+bool ReShadeLoaded();
+
+// Registers the host as a ReShade add-on, which the menu and depth estimation need. Returns false when ReShade
+// is missing, refuses add-ons, for example when the add-on is disabled in ReShade, or is too old for the menu.
 bool InitAddon();
 
 bool AddonRegistered();
 
-// Opens or closes the ReShade menu. Does nothing without the add-on or before the first frame is shown.
+// Whether the installed ReShade is too old for the menu. Only meaningful when the add-on is not registered.
+bool ReShadeTooOld();
+
+// Opens or closes ReShade's own menu. ReShade's own key cannot open it, only this. Does nothing without the
+// add-on or before the first frame is shown.
 void OpenReShadeMenu(bool open);
+
+bool ReShadeMenuOpen();
 
 void ShutdownAddon();

@@ -1,11 +1,10 @@
 #include "overlay.h"
 #include "addon.h"
 #include "log.h"
+#include "menu.h"
 #include "state.h"
 
 #include <dwmapi.h>
-
-#include <algorithm>
 
 namespace
 {
@@ -14,73 +13,36 @@ namespace
 constexpr DWORD kPassThroughStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
 constexpr DWORD kEditStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
 
-LRESULT CALLBACK IndicatorWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    if (message == WM_PAINT)
-    {
-        PAINTSTRUCT paint{};
-        HDC dc = BeginPaint(hwnd, &paint);
-        RECT rect{};
-        GetClientRect(hwnd, &rect);
-        HBRUSH background = CreateSolidBrush(RGB(30, 30, 30));
-        FillRect(dc, &rect, background);
-        DeleteObject(background);
-        HFONT font = CreateFontW(-MulDiv(14, GetDpiForWindow(hwnd), 96), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH, L"Segoe UI");
-        HGDIOBJ previous = SelectObject(dc, font);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(255, 218, 128));
-        DrawTextW(dc, g.indicatorText.c_str(), -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        SelectObject(dc, previous);
-        DeleteObject(font);
-        EndPaint(hwnd, &paint);
-        return 0;
-    }
-    return DefWindowProcW(hwnd, message, wParam, lParam);
-}
-
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
     case WM_HOTKEY:
         if (wParam == kOverlayToggleHotkey)
-        {
-            g.captureEnabled = !g.captureEnabled;
-            if (!g.captureEnabled && g.editMode)
-            {
-                SetEditMode(false);
-                SetForegroundWindow(g.target);
-            }
-            UpdateOverlay();
-            Log(LogLevel::Info, g.captureEnabled ? L"Overlay on." : L"Overlay off. Frame capture stopped.");
-            return 0;
-        }
-        if (wParam != kEditModeHotkey)
-            break;
-        if (g.editMode)
-        {
-            SetEditMode(false);
-            SetForegroundWindow(g.target);
-        }
-        else if (g.captureEnabled && g.target && !IsIconic(g.target))
+            ToggleOverlay();
+        else if (wParam == kEditModeHotkey && g.editMode)
+            ReturnToRoblox();
+        else if (wParam == kEditModeHotkey && g.captureEnabled && g.target && !IsIconic(g.target))
         {
             SetEditMode(true);
             UpdateOverlay();
             SetForegroundWindow(hwnd);
         }
         return 0;
-    case kMenuClosedMessage:
+    case kLeaveMenuMessage:
         if (g.editMode)
-        {
-            SetEditMode(false);
-            SetForegroundWindow(g.target);
-        }
+            ReturnToRoblox();
         return 0;
     case WM_ACTIVATE:
         if (LOWORD(wParam) == WA_INACTIVE)
             SetEditMode(false);
+        break;
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT && g.editMode)
+        {
+            SetCursor(LoadCursorW(nullptr, MenuCursor()));
+            return TRUE;
+        }
         break;
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -90,12 +52,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 }
 } // namespace
 
-void CreateOverlayWindows()
+void CreateOverlayWindow()
 {
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    // Setup finds the running host by this class and closes it with WM_CLOSE.
     wc.lpszClassName = L"RobloxShadeHost";
     RegisterClassW(&wc);
 
@@ -103,16 +66,6 @@ void CreateOverlayWindows()
                                 wc.hInstance, nullptr);
     winrt::check_bool(g.overlay != nullptr);
     SetLayeredWindowAttributes(g.overlay, 0, 255, LWA_ALPHA);
-
-    WNDCLASSW indicatorClass{};
-    indicatorClass.lpfnWndProc = IndicatorWndProc;
-    indicatorClass.hInstance = wc.hInstance;
-    indicatorClass.lpszClassName = L"RobloxShadeHostInputIndicator";
-    winrt::check_bool(RegisterClassW(&indicatorClass));
-    g.indicator = CreateWindowExW(kPassThroughStyle, indicatorClass.lpszClassName, L"Input captured", WS_POPUP,
-                                  0, 0, 1, 1, g.overlay, nullptr, wc.hInstance, nullptr);
-    winrt::check_bool(g.indicator != nullptr);
-    winrt::check_bool(SetLayeredWindowAttributes(g.indicator, 0, 255, LWA_ALPHA));
 }
 
 void SetEditMode(bool enabled)
@@ -123,14 +76,26 @@ void SetEditMode(bool enabled)
     SetWindowLongPtrW(g.overlay, GWL_EXSTYLE, enabled ? kEditStyle : kPassThroughStyle);
     SetWindowPos(g.overlay, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     if (!enabled)
-        ShowWindow(g.indicator, SW_HIDE);
-    OpenReShadeMenu(enabled);
-    if (enabled && AddonRegistered())
-        Log(LogLevel::Info, L"ReShade menu opened. %ls returns to Roblox.", g.inputHotkey.c_str());
-    else if (enabled)
-        Log(LogLevel::Info, L"Input captured. Open the menu with ReShade's own key; %ls returns to Roblox.", g.inputHotkey.c_str());
-    else
-        Log(LogLevel::Info, L"Input returned to Roblox.");
+    {
+        OpenReShadeMenu(false);
+        ResetMenu();
+    }
+    Log(LogLevel::Info, !enabled ? L"Input returned to Roblox." : AddonRegistered() ? L"Menu opened." : L"Input captured.");
+}
+
+void ReturnToRoblox()
+{
+    SetEditMode(false);
+    SetForegroundWindow(g.target);
+}
+
+void ToggleOverlay()
+{
+    g.captureEnabled = !g.captureEnabled;
+    if (!g.captureEnabled && g.editMode)
+        ReturnToRoblox();
+    UpdateOverlay();
+    Log(LogLevel::Info, g.captureEnabled ? L"Overlay on." : L"Overlay off. Frame capture stopped.");
 }
 
 void UpdateOverlay()
@@ -145,7 +110,6 @@ void UpdateOverlay()
         if (g.overlayVisible)
             ShowWindow(g.overlay, SW_HIDE);
         g.overlayVisible = false;
-        ShowWindow(g.indicator, SW_HIDE);
         return;
     }
 
@@ -155,15 +119,5 @@ void UpdateOverlay()
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
         g.overlayRect = bounds;
         g.overlayVisible = true;
-    }
-    if (g.editMode)
-    {
-        const UINT dpi = GetDpiForWindow(g.overlay);
-        const int margin = MulDiv(12, dpi, 96);
-        const int height = MulDiv(36, dpi, 96);
-        // Keep the badge above the swapchain, without taking focus or blocking clicks.
-        const int width = std::min<int>(bounds.right - bounds.left, MulDiv(560, dpi, 96));
-        SetWindowPos(g.indicator, HWND_TOPMOST, bounds.left + (bounds.right - bounds.left - width) / 2,
-                     bounds.bottom - height - margin, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
 }

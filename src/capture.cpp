@@ -1,6 +1,7 @@
 #include "capture.h"
 #include "depth/depth.h"
 #include "log.h"
+#include "menu.h"
 #include "overlay.h"
 #include "state.h"
 
@@ -53,6 +54,7 @@ void StartCapture(HWND target)
     g.session.StartCapture();
     g.target = target;
     Log(LogLevel::Info, L"Capturing Roblox (%dx%d)", g.poolSize.Width, g.poolSize.Height);
+    ShowStartHint();
 }
 
 void StopCapture()

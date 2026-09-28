@@ -1,5 +1,7 @@
 #pragma once
 
+#include "config.h"
+
 #include <unknwn.h>
 #include <windows.h>
 #include <d3d11_4.h>
@@ -19,19 +21,23 @@ using winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 constexpr int kEditModeHotkey = 1;
 constexpr int kOverlayToggleHotkey = 2;
-// Posted when the ReShade menu is closed with ReShade's own key.
-constexpr UINT kMenuClosedMessage = WM_APP + 1;
+// Posted by the menu to give input back to Roblox. The menu runs inside ReShade's present, so window
+// changes wait for the message loop.
+constexpr UINT kLeaveMenuMessage = WM_APP + 1;
 
 struct State
 {
     HWND overlay = nullptr;
     HWND target = nullptr;
-    HWND indicator = nullptr;
+    HWND launcher = nullptr;
+    InputHotkeys hotkeys;
+    // The shortcuts as shown to the user, such as Ctrl+F8.
     std::wstring inputHotkey;
     std::wstring overlayHotkey;
-    std::wstring indicatorText;
     bool editMode = false;
     bool inputHotkeyRegistered = false;
+    // While the menu waits for a new shortcut, so the current ones arrive as ordinary keys.
+    bool hotkeysSuspended = false;
     bool overlayVisible = false;
     bool captureEnabled = true;
     RECT overlayRect{};
