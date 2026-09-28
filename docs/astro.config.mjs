@@ -17,7 +17,7 @@ const linkGuides = {
 };
 
 export default defineConfig({
-  site: 'https://omouta.github.io',
+  site: 'https://pages.mouta.me',
   base,
   trailingSlash: 'always',
   markdown: { processor: satteri({ mdastPlugins: [linkGuides] }) },
