@@ -1,0 +1,135 @@
+---
+import '../styles/global.css';
+import { Image } from 'astro:assets';
+import logo from '../../../assets/RobloxShadeHostSmall.png';
+import icon from '../../../assets/RobloxShadeHost.ico?url';
+import { links, page } from '../links';
+
+interface Props {
+  title: string;
+  description: string;
+  // The home page lays its navigation over the picture.
+  overlay?: boolean;
+}
+
+const { title, description, overlay = false } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#0f1024" />
+    <link rel="icon" href={icon} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+  </head>
+  <body>
+    <header class:list={['nav', { overlay }]}>
+      <a class="brand" href={page()} aria-label="RobloxShadeHost home">
+        <Image src={logo} alt="" width={52} class="brand-logo" />
+        <span class="brand-name">RobloxShadeHost</span>
+      </a>
+      <nav aria-label="Main">
+        <a href={page('install/')}>Install guide</a>
+        <a href={links.discord}>Discord</a>
+        <a href={links.github}>GitHub</a>
+        <a class="button button-primary" href={links.download}>Download</a>
+      </nav>
+    </header>
+
+    <slot />
+
+    <footer class="footer">
+      <div class="footer-inner">
+        <p>
+          Need help? Ask on <a href={links.discord}>Discord</a>. Only the newest version is supported, and updating keeps your presets.
+        </p>
+        <p class="dim">
+          Effects run on <a href={links.reshade}>ReShade</a> by crosire. RobloxShadeHost is not affiliated with Roblox.{' '}
+          <a href={links.github}>Source on GitHub</a>, <a href={links.license}>MIT license</a>.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
+
+<style>
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    width: var(--page);
+    margin: 0 auto;
+    padding: 18px 0;
+  }
+
+  /* Over the picture, but on the same edges as the page. */
+  .nav.overlay {
+    position: absolute;
+    inset: 0 0 auto;
+    z-index: 3;
+    width: auto;
+    padding: 18px calc((100% - var(--page)) / 2);
+    background: linear-gradient(to bottom, rgb(15 16 36 / 0.7), transparent);
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--ink);
+    font-weight: 750;
+    font-stretch: 118%;
+    text-decoration: none;
+  }
+
+  .brand-logo {
+    width: 40px;
+    height: auto;
+  }
+
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 26px;
+  }
+
+  nav a:not(.button) {
+    color: var(--ink);
+    text-decoration: none;
+  }
+
+  nav a:not(.button):hover {
+    color: var(--accent);
+  }
+
+  .footer {
+    margin-top: clamp(80px, 12vw, 140px);
+    border-top: 1px solid var(--line);
+  }
+
+  .footer-inner {
+    display: grid;
+    gap: 10px;
+    width: var(--page);
+    margin: 0 auto;
+    padding: 36px 0 48px;
+  }
+
+  @media (max-width: 720px) {
+    nav a:not(.button) {
+      display: none;
+    }
+  }
+
+  @media (max-width: 440px) {
+    .brand-name {
+      display: none;
+    }
+  }
+</style>
