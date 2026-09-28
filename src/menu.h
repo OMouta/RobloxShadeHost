@@ -6,7 +6,8 @@
 // Does nothing without the add-on.
 void InitMenu();
 
-// Shows which key opens the menu over Roblox for a few seconds.
+// Shows which key opens the menu over Roblox for a few seconds, the first time capture starts after the host
+// launches.
 void ShowStartHint();
 
 // Ends what only lasts while the menu is open, such as waiting for a shortcut or comparing with Roblox's

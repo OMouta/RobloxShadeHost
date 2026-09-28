@@ -121,6 +121,7 @@ struct Menu
     float scale = 1;
     ImGuiMouseCursor cursor = ImGuiMouseCursor_Arrow;
     ULONGLONG hintStart = 0;
+    bool hintShown = false;
     Tab tab = Tab::Presets;
 
     // Handles become invalid when ReShade reloads effects, so everything is read again after a reload.
@@ -1612,8 +1613,11 @@ void InitMenu()
 
 void ShowStartHint()
 {
-    if (AddonRegistered())
-        m.hintStart = GetTickCount64();
+    // Capture also restarts whenever the overlay is turned back on, often while taking comparison shots.
+    if (!AddonRegistered() || m.hintShown)
+        return;
+    m.hintShown = true;
+    m.hintStart = GetTickCount64();
 }
 
 void ResetMenu()
