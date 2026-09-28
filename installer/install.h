@@ -101,7 +101,6 @@ std::optional<Installation> FindInstallation();
 Addon InstalledAddon(const std::filesystem::path& directory);
 
 std::wstring ReadShortcut(const std::filesystem::path& directory, const wchar_t* name, const wchar_t* fallback);
-void WriteShortcuts(const std::filesystem::path& directory, const std::wstring& toggleKey, const std::wstring& overlayToggleKey);
 
 bool HostRunning(const std::filesystem::path& directory);
 void LaunchHost(const std::filesystem::path& directory);

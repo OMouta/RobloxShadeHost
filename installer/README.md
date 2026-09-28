@@ -23,9 +23,9 @@ The DLSS5 component reads `downloads.ini` from the `dlss5-assets` release, and d
 
 DLSS5 and depth estimation do not work together, so the add-ons page allows only one. Installing removes the files of the add-on that is not selected.
 
-Reinstalling keeps `ReShade.ini`, presets and `RobloxShadeHost.ini`. After installing, Setup shows the shortcuts page, which writes `RobloxShadeHost.ini`.
+Reinstalling keeps `ReShade.ini`, presets and `RobloxShadeHost.ini`. The host writes `RobloxShadeHost.ini` on its first start and when shortcuts change in its menu.
 
-Setup copies itself into the installation folder as `RobloxShadeHost-Setup.exe`, adds **RobloxShadeHost** and **RobloxShadeHost Setup** to the Start menu, and registers in Windows' app list under the key earlier Inno Setup versions used, so an update replaces their entry. Running it again from the Start menu offers updating, changing shortcuts and uninstalling. `RobloxShadeHost-Setup.files` lists the installed files for uninstalling. Uninstalling keeps `ReShade.ini`, presets and `RobloxShadeHost.ini` unless the user asks to delete them.
+Setup copies itself into the installation folder as `RobloxShadeHost-Setup.exe`, adds **RobloxShadeHost** and **RobloxShadeHost Setup** to the Start menu, and registers in Windows' app list under the key earlier Inno Setup versions used, so an update replaces their entry. Running it again from the Start menu offers updating and uninstalling. `RobloxShadeHost-Setup.files` lists the installed files for uninstalling. Uninstalling keeps `ReShade.ini`, presets and `RobloxShadeHost.ini` unless the user asks to delete them.
 
 Credits open from the sidebar and are installed as `CREDITS.txt`. Removal requests go to **tiago@mouta.me**.
 

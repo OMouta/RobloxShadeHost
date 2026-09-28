@@ -883,15 +883,6 @@ std::wstring ReadShortcut(const fs::path& directory, const wchar_t* name, const 
     return value;
 }
 
-void WriteShortcuts(const fs::path& directory, const std::wstring& toggleKey, const std::wstring& overlayToggleKey)
-{
-    const std::wstring ini = (directory / L"RobloxShadeHost.ini").wstring();
-    if (!WritePrivateProfileStringW(L"Input", L"ToggleKey", toggleKey.c_str(), ini.c_str()) ||
-        !WritePrivateProfileStringW(L"Input", L"OverlayToggleKey", overlayToggleKey.c_str(), ini.c_str()))
-        throw std::runtime_error("Could not save " + Utf8(ini) + ": " + SystemError(GetLastError()) + ".");
-    SetupLog("Shortcuts saved: ToggleKey=" + Utf8(toggleKey) + ", OverlayToggleKey=" + Utf8(overlayToggleKey));
-}
-
 bool HostRunning(const fs::path& directory)
 {
     bool running = false;

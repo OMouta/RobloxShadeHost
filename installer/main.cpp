@@ -71,7 +71,6 @@ enum class Page
     License,
     Installing,
     Failed,
-    Shortcuts,
     Finished,
     Uninstall,
     Uninstalled,
@@ -169,10 +168,6 @@ struct App
 
     Hotkey toggleKey;
     Hotkey overlayToggleKey;
-    int capturing = -1; // which shortcut is waiting for a key press
-    std::string captureError;
-    bool shortcutsOnly = false;
-    std::string saveError;
     bool hostRunning = false;
     bool launch = true;
 
@@ -544,55 +539,6 @@ void KeyLine(const Hotkey& hotkey, const std::string& description)
     Text(description, kText, 15);
 }
 
-// The key a shortcut uses, and a button that waits for new keys when clicked.
-void ShortcutRow(int index, const char* title, const char* description, Hotkey& hotkey, bool clearable)
-{
-    const float buttonWidth = S(190);
-    const float right = ImGui::GetContentRegionAvail().x;
-    const float top = ImGui::GetCursorPosY();
-    ImGui::BeginGroup();
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + right - buttonWidth - S(56));
-    ImGui::PushFont(ui.semibold, 16.5f);
-    ImGui::TextUnformatted(title);
-    ImGui::PopFont();
-    ImGui::PushFont(ui.regular, 14.5f);
-    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-    ImGui::TextUnformatted(description);
-    ImGui::PopStyleColor();
-    ImGui::PopFont();
-    ImGui::PopTextWrapPos();
-    ImGui::EndGroup();
-    const float bottom = ImGui::GetCursorPosY();
-
-    ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + right - buttonWidth - S(40), top + S(4)));
-    const bool capturing = app.capturing == index;
-    const std::string label = capturing ? "Press keys..." : hotkey.key ? Utf8(FormatHotkey(hotkey)) : "Not set";
-    ImGui::PushID(index);
-    ImGui::PushStyleColor(ImGuiCol_Border, capturing ? kAccent : kBorderStrong);
-    ImGui::PushStyleColor(ImGuiCol_Text, capturing ? kAccentHover : hotkey.key ? kText : kDim);
-    if (Button(label.c_str(), ImVec2(buttonWidth, S(40)), false))
-    {
-        app.capturing = capturing ? -1 : index;
-        app.captureError.clear();
-    }
-    ImGui::PopStyleColor(2);
-    if (clearable)
-    {
-        ImGui::SameLine(0, S(6));
-        ImGui::BeginDisabled(!hotkey.key);
-        if (Button("x", ImVec2(S(34), S(40)), false))
-        {
-            hotkey = {};
-            app.capturing = -1;
-        }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetItemTooltip("Leave unassigned");
-    }
-    ImGui::PopID();
-    ImGui::SetCursorPosY(std::max(bottom, top + S(48)) + S(14));
-}
-
 void Sidebar(std::initializer_list<const char*> steps, int current)
 {
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -703,12 +649,6 @@ void ManagePage()
         app.addon = InstalledAddon(Directory());
         app.page = Page::Addons;
     }
-    if (Card("shortcuts", "Change shortcuts", nullptr, 0, "Pick the keys that open ReShade and turn the overlay off.", CardKind::Action))
-    {
-        LoadShortcuts();
-        app.shortcutsOnly = true;
-        app.page = Page::Shortcuts;
-    }
     if (Card("uninstall", "Uninstall", nullptr, 0, "Remove RobloxShadeHost, ReShade and the effects from this PC.", CardKind::Action))
         app.page = Page::Uninstall;
 }
@@ -718,7 +658,7 @@ void AddonsPage()
     Title("Choose what to install");
     Spacing(6);
     Card("reshade", "ReShade and effects", "Included", kDim, "ReShade from reshade.me and every effect package on ReShade's official list.", CardKind::Static);
-    if (Card("presets", "Presets", nullptr, 0, "Ready-made looks for Roblox. Pick one from the list at the top of the ReShade menu.", CardKind::Toggle, app.presets))
+    if (Card("presets", "Presets", nullptr, 0, "Ready-made looks for Roblox. Pick one in the RobloxShadeHost menu.", CardKind::Toggle, app.presets))
         app.presets = !app.presets;
     Spacing(8);
     Text("Optional add-ons", kText, 15, ui.semibold);
@@ -798,62 +738,16 @@ void FailedPage()
         OpenFile(SetupLogPath());
 }
 
-void ShortcutsPage()
-{
-    Title("Shortcuts");
-    Text("Click a shortcut, then press the keys you want.", kDim, 15);
-    Spacing(16);
-    ShortcutRow(0, "Open ReShade", "Opens the ReShade menu over Roblox and gives it your mouse and keyboard. Press it again to go back to playing.",
-                app.toggleKey, false);
-    ShortcutRow(1, "Turn the overlay off and on", "Shows Roblox without effects and stops capturing it until you press it again.",
-                app.overlayToggleKey, true);
-
-    const auto bare = [](const Hotkey& hotkey) { return hotkey.key && !(hotkey.modifiers & (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN)); };
-    const bool typing = app.toggleKey.key == VK_SPACE || app.toggleKey.key == VK_TAB || (app.toggleKey.key >= '0' && app.toggleKey.key <= 'Z');
-    if (!app.captureError.empty())
-        Text(app.captureError, kError, 14.5f);
-    else if (app.overlayToggleKey.key == app.toggleKey.key && app.overlayToggleKey.modifiers == app.toggleKey.modifiers)
-        Text("Pick two different shortcuts.", kError, 14.5f);
-    else
-    {
-        if (bare(app.toggleKey) && typing)
-            Text("Roblox will not receive " + Utf8(FormatHotkey(app.toggleKey)) + " while RobloxShadeHost runs.", kWarning, 14.5f);
-        if (bare(app.overlayToggleKey))
-            Text("Other programs will not receive " + Utf8(FormatHotkey(app.overlayToggleKey)) + " while RobloxShadeHost runs.", kWarning, 14.5f);
-    }
-    if (!app.saveError.empty())
-        Text(app.saveError, kError, 14.5f);
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(6));
-    if (Link("Reset to defaults", kDim, 14))
-    {
-        ParseHotkey(kDefaultToggleKey, app.toggleKey);
-        ParseHotkey(kDefaultOverlayToggleKey, app.overlayToggleKey);
-        app.capturing = -1;
-        app.captureError.clear();
-    }
-}
-
 void FinishedPage()
 {
-    if (app.shortcutsOnly)
-    {
-        Title("Shortcuts saved");
-        Text(app.hostRunning ? "Restart RobloxShadeHost to use them." : "RobloxShadeHost uses them the next time it starts.", kDim, 15);
-    }
-    else
-    {
-        Title("RobloxShadeHost is ready");
-        Text("Open a Roblox experience and start RobloxShadeHost from the Start menu, in either order.", kDim, 15);
-    }
+    Title("RobloxShadeHost is ready");
+    Text("Open a Roblox experience and start RobloxShadeHost from the Start menu, in either order.", kDim, 15);
     Spacing(14);
-    KeyLine(app.toggleKey, "opens ReShade over Roblox. Press it again to go back to playing.");
+    KeyLine(app.toggleKey, "opens the RobloxShadeHost menu in Roblox. Press it again to go back to playing.");
     if (app.overlayToggleKey.key)
         KeyLine(app.overlayToggleKey, "turns the overlay off and on.");
-    if (!app.shortcutsOnly && app.presets)
-    {
-        Spacing(4);
-        Text("Pick a preset from the list at the top of the ReShade menu.", kText, 15);
-    }
+    Spacing(4);
+    Text(app.presets ? "Pick a preset or change shortcuts in the menu." : "You can change shortcuts in the menu.", kText, 15);
     for (const auto& note : app.notes)
     {
         Spacing(4);
@@ -912,7 +806,8 @@ void CollectTasks()
             app.notes = app.progress->Read().notes;
             app.installation = FindInstallation();
             LoadShortcuts();
-            app.page = Page::Shortcuts;
+            app.hostRunning = HostRunning(Directory());
+            app.page = Page::Finished;
         }
         if (app.closeRequested)
             DestroyWindow(ui.window);
@@ -938,8 +833,6 @@ void DrawUi()
     const Page page = app.page;
     if (page == Page::Uninstall || page == Page::Uninstalled)
         Sidebar({ "Uninstall", "Done" }, page == Page::Uninstall ? 0 : 1);
-    else if (app.shortcutsOnly && (page == Page::Shortcuts || page == Page::Finished))
-        Sidebar({ "Shortcuts", "Done" }, page == Page::Shortcuts ? 0 : 1);
     else
     {
         int step = 0;
@@ -949,11 +842,10 @@ void DrawUi()
         case Page::License: step = 2; break;
         case Page::Installing:
         case Page::Failed: step = 3; break;
-        case Page::Shortcuts: step = 4; break;
-        case Page::Finished: step = 5; break;
+        case Page::Finished: step = 4; break;
         default: break;
         }
-        Sidebar({ "Welcome", "Add-ons", "License", "Install", "Shortcuts", "Done" }, step);
+        Sidebar({ "Welcome", "Add-ons", "License", "Install", "Done" }, step);
     }
 
     // Content, above a footer separated by a line.
@@ -971,7 +863,6 @@ void DrawUi()
     case Page::License: LicensePage(); break;
     case Page::Installing: InstallingPage(); break;
     case Page::Failed: FailedPage(); break;
-    case Page::Shortcuts: ShortcutsPage(); break;
     case Page::Finished: FinishedPage(); break;
     case Page::Uninstall: UninstallPage(); break;
     case Page::Uninstalled: UninstalledPage(); break;
@@ -1014,31 +905,6 @@ void DrawUi()
         if (FooterButton(1, "Close", false))
             DestroyWindow(ui.window);
         break;
-    case Page::Shortcuts:
-    {
-        const bool distinct = app.overlayToggleKey.key != app.toggleKey.key || app.overlayToggleKey.modifiers != app.toggleKey.modifiers;
-        if (FooterButton(0, "Save", true, distinct && app.capturing < 0))
-        {
-            try
-            {
-                WriteShortcuts(Directory(), FormatHotkey(app.toggleKey), FormatHotkey(app.overlayToggleKey));
-                app.saveError.clear();
-                app.hostRunning = HostRunning(Directory());
-                app.page = Page::Finished;
-            }
-            catch (const std::exception& e)
-            {
-                app.saveError = e.what();
-            }
-        }
-        if (app.shortcutsOnly && FooterButton(1, "Back", false))
-        {
-            app.shortcutsOnly = false;
-            app.capturing = -1;
-            app.page = Page::Manage;
-        }
-        break;
-    }
     case Page::Finished:
         if (FooterButton(0, "Finish", true))
         {
@@ -1064,45 +930,8 @@ void DrawUi()
         break;
     }
 
-    // Clicking anywhere else stops waiting for a shortcut.
-    if (app.capturing >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered())
-        app.capturing = -1;
-
     CreditsPopup();
     ImGui::End();
-}
-
-void CaptureKey(WPARAM key, LPARAM lParam)
-{
-    if (key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU || key == VK_LWIN || key == VK_RWIN)
-        return;
-    Hotkey hotkey;
-    if (GetKeyState(VK_CONTROL) < 0)
-        hotkey.modifiers |= MOD_CONTROL;
-    if (GetKeyState(VK_MENU) < 0)
-        hotkey.modifiers |= MOD_ALT;
-    if (GetKeyState(VK_SHIFT) < 0)
-        hotkey.modifiers |= MOD_SHIFT;
-    if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0)
-        hotkey.modifiers |= MOD_WIN;
-    if (key == VK_ESCAPE && hotkey.modifiers == MOD_NOREPEAT)
-    {
-        app.capturing = -1;
-        return;
-    }
-    hotkey.key = static_cast<UINT>(key);
-    if (FormatHotkey(hotkey).empty())
-    {
-        wchar_t name[64]{};
-        GetKeyNameTextW(static_cast<LONG>(lParam), name, static_cast<int>(std::size(name)));
-        app.captureError = (name[0] ? Utf8(name) : std::string("That key")) +
-                           " cannot be used. Use a letter, number, F key other than F12, Home, End, Insert, Delete, Page Up, Page Down, "
-                           "Pause or Scroll Lock, with or without Ctrl, Alt, Shift or Win.";
-        return;
-    }
-    (app.capturing == 0 ? app.toggleKey : app.overlayToggleKey) = hotkey;
-    app.capturing = -1;
-    app.captureError.clear();
 }
 
 ComPtr<ID3D11ShaderResourceView> LoadLogo(UINT size)
@@ -1206,17 +1035,6 @@ void CreateRenderTarget()
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    // While a shortcut is being picked, keys go to it rather than to the window.
-    if (app.capturing >= 0)
-    {
-        if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
-        {
-            CaptureKey(wParam, lParam);
-            return 0;
-        }
-        if (message == WM_KEYUP || message == WM_SYSKEYUP || message == WM_CHAR || message == WM_SYSCHAR)
-            return 0;
-    }
     if (ImGui_ImplWin32_WndProcHandler(hwnd, message, wParam, lParam))
         return 1;
 
@@ -1398,7 +1216,7 @@ int RunWindow(const Arguments& arguments)
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         ui.swapchain->Present(1, 0);
 
-        const bool animating = app.installTask.Running() || app.uninstallTask.Running() || app.capturing >= 0 ||
+        const bool animating = app.installTask.Running() || app.uninstallTask.Running() ||
                                (app.page == Page::License && app.releaseTask.Running());
         if (!animating && --framesLeft <= 0)
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 500, QS_ALLINPUT);
