@@ -32,7 +32,11 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-See `installer/README.md` for building and testing the installer.
+The EXE is at `build\Release\RobloxShadeHost.exe`. See `installer/README.md` for building and testing the installer.
+
+GitHub Actions builds and tests the EXE for pushes and pull requests. You can also run **Build and release** manually from the Actions tab. Successful builds provide a `RobloxShadeHost-windows-x64` artifact containing the EXE and the installer.
+
+To publish a release, push a version tag such as `v0.1.0`. After the build and tests pass, the workflow creates a GitHub release with the EXE attached. Branch pushes and manual builds do not publish releases.
 
 ## Code changes
 
