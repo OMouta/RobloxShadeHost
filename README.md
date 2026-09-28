@@ -9,7 +9,9 @@
 <p align="center">
   <a href="https://github.com/OMouta/RobloxShadeHost/releases/latest">Download for Windows</a>
   &nbsp;·&nbsp;
-  <a href="INSTALLATION.md">Installation guide</a>
+  <a href="https://pages.mouta.me/RobloxShadeHost/">Website</a>
+  &nbsp;·&nbsp;
+  <a href="https://pages.mouta.me/RobloxShadeHost/install/">Installation guide</a>
   &nbsp;·&nbsp;
   <a href="https://discord.gg/wVbVUdENas">Discord &amp; community presets</a>
 </p>
@@ -43,7 +45,7 @@ Effects cost frame rate. The host copies Roblox's picture every frame and runs t
 
 ## Get started
 
-Download **RobloxShadeHost-Setup** from the [latest release](https://github.com/OMouta/RobloxShadeHost/releases/latest) and follow the [installation guide](INSTALLATION.md). You need 64-bit Windows 10 version 1903 or newer, or Windows 11.
+Download **RobloxShadeHost-Setup** from the [latest release](https://github.com/OMouta/RobloxShadeHost/releases/latest) and follow the [installation guide](https://pages.mouta.me/RobloxShadeHost/install/). You need 64-bit Windows 10 version 1903 or newer, or Windows 11.
 
 ## Help and updates
 
