@@ -10,10 +10,18 @@ body:
     validations:
       required: true
   - type: input
+    id: game
+    attributes:
+      label: Target game
+      description: The game and integration you were using.
+      placeholder: Roblox
+    validations:
+      required: true
+  - type: input
     id: version
     attributes:
-      label: RobloxShadeHost version
-      description: Shown in the RobloxShadeHost window.
+      label: Unishade version
+      description: Shown in the Unishade window.
       placeholder: 0.1.1
     validations:
       required: true
@@ -22,8 +30,8 @@ body:
     attributes:
       label: How did you install it?
       options:
-        - Installer (RobloxShadeHost-Setup.exe)
-        - Manual (RobloxShadeHost.exe and the ReShade installer)
+        - Installer (Unishade-Setup.exe)
+        - Manual (Unishade.exe and the ReShade installer)
         - Built from source
     validations:
       required: true
@@ -31,7 +39,7 @@ body:
     id: reshade
     attributes:
       label: ReShade version
-      description: Listed in the RobloxShadeHost window. Say whether it is the full add-on support build.
+      description: Listed in the Unishade window. Say whether it is the full add-on support build.
       placeholder: 6.5.1 with full add-on support
   - type: input
     id: windows
@@ -49,5 +57,5 @@ body:
     id: console
     attributes:
       label: Log
-      description: Paste `RobloxShadeHost.log` from the host's folder. For installer problems, paste `%TEMP%\RobloxShadeHost-Setup.log`.
+      description: Paste `Unishade.log` from the host's folder. For installer problems, paste `%TEMP%\Unishade-Setup.log`.
       render: text
