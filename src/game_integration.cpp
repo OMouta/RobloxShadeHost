@@ -13,8 +13,6 @@
 
 namespace fs = std::filesystem;
 
-namespace
-{
 fs::path ProcessExecutable(DWORD processId)
 {
     const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
@@ -30,7 +28,11 @@ fs::path ProcessExecutable(DWORD processId)
     path.resize(size);
     return path;
 }
-} // namespace
+
+bool MatchesExecutable(const AutoGame& game, const fs::path& executable)
+{
+    return _wcsicmp((game.executable.has_parent_path() ? executable : executable.filename()).c_str(), game.executable.c_str()) == 0;
+}
 
 std::vector<AutoGame> LoadAutoGames(const fs::path& path)
 {
@@ -97,7 +99,7 @@ void AddAutoGame(std::vector<AutoGame>& games, const GameWindow& window)
         throw std::runtime_error("The game window has closed. Open it again before adding it");
     const fs::path executable = ProcessExecutable(window.processId);
     for (AutoGame& game : games)
-        if (_wcsicmp((game.executable.has_parent_path() ? executable : executable.filename()).c_str(), game.executable.c_str()) == 0)
+        if (MatchesExecutable(game, executable))
         {
             game.enabled = true;
             return;

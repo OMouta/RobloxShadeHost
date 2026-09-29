@@ -16,6 +16,11 @@ struct AutoGame
 
 std::vector<AutoGame> LoadAutoGames(const std::filesystem::path& path);
 void SaveAutoGames(const std::filesystem::path& path, std::span<const AutoGame> games);
+// Games saved with a folder match that exact file. Games saved by filename, like Roblox, match it in any folder.
+bool MatchesExecutable(const AutoGame& game, const std::filesystem::path& executable);
+
+// Throws std::system_error when the process has exited or denies access.
+std::filesystem::path ProcessExecutable(DWORD processId);
 
 struct GameWindow
 {
