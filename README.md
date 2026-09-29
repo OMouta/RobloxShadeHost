@@ -10,6 +10,10 @@
   <a href="https://discord.gg/wVbVUdENas">Discord</a>
 </p>
 
-Use ReShade on games that won't let you install it. Formerly RobloxShadeHost.
+<p align="center">Formerly RobloxShadeHost.</p>
 
-Downloads, docs and presets are on [unishade.me](https://unishade.me) and [Discord](https://discord.gg/wVbVUdENas). To build it or send a preset, see [CONTRIBUTING.md](CONTRIBUTING.md). [MIT license](LICENSE).
+Unishade applies ReShade post-processing externally to supported games, making it useful where traditional ReShade injection is unavailable or undesirable. It runs outside the game process, captures the game image through Windows Graphics Capture, and renders ReShade effects in an overlay, with ReShade itself running inside Unishade’s process. Unishade does not inject DLLs into the game or modify game files as part of its normal architecture.
+
+Use normal ReShade where it already works for you. Unishade support depends on the game’s compatibility with external capture and overlays.
+
+[MIT license](LICENSE).
