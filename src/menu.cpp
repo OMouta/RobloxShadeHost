@@ -152,9 +152,16 @@ struct Menu
     // The key that keeps effects off, while the compare shortcut is held.
     UINT compareKey = 0;
 
+    // The effect files the active preset uses, read from it when switching to it. ReShade drops effects that are
+    // not installed from a preset the next time it saves it, so the file is read before that can happen.
+    fs::path effectsOf;
+    std::vector<std::string> presetEffects;
+
     // Handles become invalid when ReShade reloads effects, so everything is read again after a reload.
     bool techniquesDirty = true;
     std::vector<Technique> techniques;
+    // Lowercase names of the effect files that loaded, hidden techniques included.
+    std::set<std::string> effects;
     std::vector<size_t> byName;
     std::string expanded;
     std::string parametersEffect;
@@ -587,6 +594,45 @@ bool SamePath(const fs::path& a, const fs::path& b)
     return _wcsicmp(a.c_str(), b.c_str()) == 0;
 }
 
+void ReadPresetEffects(const fs::path& path)
+{
+    m.effectsOf = path;
+    m.presetEffects.clear();
+    std::ifstream file(path);
+    for (std::string line; std::getline(file, line);)
+    {
+        if (line.rfind("Techniques=", 0) != 0)
+            continue;
+        // Entries are technique@file, separated by commas.
+        for (size_t start = line.find('=') + 1; start < line.size();)
+        {
+            const size_t end = std::min(line.find(',', start), line.size());
+            const size_t at = line.find('@', start);
+            if (at < end)
+            {
+                std::string effect = line.substr(at + 1, end - at - 1);
+                effect.erase(effect.find_last_not_of(" \r") + 1);
+                if (!effect.empty() && std::none_of(m.presetEffects.begin(), m.presetEffects.end(),
+                                                    [&](const std::string& known) { return _stricmp(known.c_str(), effect.c_str()) == 0; }))
+                    m.presetEffects.push_back(effect);
+            }
+            start = end + 1;
+        }
+    }
+}
+
+// Effects the active preset uses that did not load, once ReShade has loaded effects.
+std::vector<std::string> MissingEffects(const fs::path& current)
+{
+    std::vector<std::string> missing;
+    if (m.techniquesDirty || !SamePath(m.effectsOf, current))
+        return missing;
+    for (const std::string& effect : m.presetEffects)
+        if (!m.effects.count(Lower(effect)))
+            missing.push_back(effect);
+    return missing;
+}
+
 // Switches presets right away, for shortcuts, which cannot ask about unsaved changes. Returns false when there
 // are some.
 bool SwitchNow(const fs::path& target)
@@ -595,6 +641,7 @@ bool SwitchNow(const fs::path& target)
         return false;
     if (m.presetChanged)
         SavePreset();
+    ReadPresetEffects(target);
     m.runtime->set_current_preset_path(Utf8(target.wstring()).c_str());
     m.presetsScanned = 0;
     m.active.clear();
@@ -958,6 +1005,8 @@ void UnsavedPopup(const fs::path& current)
     ImGui::PopStyleVar();
 }
 
+void LoadTechniques();
+
 void PresetsTab()
 {
     const fs::path current = CurrentPreset();
@@ -976,6 +1025,20 @@ void PresetsTab()
             OpenNamePopup(NameAction::SaveAsNew, current);
     }
     ImGui::Dummy(ImVec2(0, S(2)));
+
+    if (m.techniquesDirty)
+        LoadTechniques();
+    const std::vector<std::string> missing = MissingEffects(current);
+    if (!missing.empty())
+    {
+        std::string names;
+        for (const std::string& effect : missing)
+            names += (names.empty() ? "" : ", ") + effect;
+        Text("This preset uses effects that are not installed: " + names +
+                 ". They stay off, and saving or switching presets removes them from it.",
+             kWarning, 13.5f);
+        ImGui::Dummy(ImVec2(0, S(2)));
+    }
 
     for (const fs::path& preset : m.presets)
         PresetRow(preset, SamePath(preset, current));
@@ -1020,17 +1083,19 @@ std::string UniformString(effect_runtime* runtime, effect_uniform_variable varia
 void LoadTechniques()
 {
     m.techniques.clear();
+    m.effects.clear();
     m.parameters.clear();
     m.parametersEffect.clear();
     // Returns nothing while ReShade compiles effects.
     m.runtime->enumerate_techniques(nullptr, [](effect_runtime* runtime, effect_technique handle) {
+        char name[256] = "";
+        char effect[256] = "";
+        runtime->get_technique_effect_name(handle, effect);
+        m.effects.insert(Lower(effect));
         int32_t hidden = 0;
         if (runtime->get_annotation_int_from_technique(handle, "hidden", &hidden, 1) && hidden)
             return;
-        char name[256] = "";
-        char effect[256] = "";
         runtime->get_technique_name(handle, name);
-        runtime->get_technique_effect_name(handle, effect);
         Technique technique;
         technique.handle = handle;
         technique.key = std::string(name) + "@" + effect;
@@ -1919,6 +1984,7 @@ void DrawMenuFrame()
                 DiscardChanges();
             else if (m.unsaved)
                 SavePreset();
+            ReadPresetEffects(m.pendingPreset);
             m.runtime->set_current_preset_path(Utf8(m.pendingPreset.wstring()).c_str());
             if (m.saveNewPreset)
                 m.runtime->save_current_preset();
@@ -2011,6 +2077,7 @@ void OnInitRuntime(effect_runtime* runtime)
 {
     m.runtime = runtime;
     m.techniquesDirty = true;
+    ReadPresetEffects(CurrentPreset());
 }
 
 void OnDestroyRuntime(effect_runtime* runtime)
