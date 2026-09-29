@@ -145,6 +145,8 @@ struct Menu
     bool beforeTaken = false;
     ULONGLONG lastScreenshot = 0;
     int presetStep = 0;
+    // The key that keeps effects off, while the compare shortcut is held.
+    UINT compareKey = 0;
 
     // Handles become invalid when ReShade reloads effects, so everything is read again after a reload.
     bool techniquesDirty = true;
@@ -205,6 +207,7 @@ constexpr struct
 } kShortcutText[] = {
     { "Open the menu", "Press it again, or Escape, to go back to Roblox." },
     { "Overlay off and on", "Shows Roblox without effects and stops capturing it." },
+    { "Compare while held", "Shows Roblox without effects for as long as you hold it." },
     { "Screenshot", "Saves what you see, without the menu." },
     { "Before and after screenshots", "Saves the same moment with and without effects." },
     { "Next preset", "Switches to the next preset in the Presets tab." },
@@ -1633,7 +1636,8 @@ void Tabs(ImVec2 origin, float width)
 // Effects stay off while the compare button is held.
 void Compare(bool holding)
 {
-    if (holding == m.comparing)
+    // The compare shortcut, while held, decides instead.
+    if (holding == m.comparing || m.compareKey)
         return;
     if (holding)
     {
@@ -1912,6 +1916,8 @@ void OnDestroyRuntime(effect_runtime* runtime)
         return;
     DestroyLogo();
     m.runtime = nullptr;
+    m.comparing = false;
+    m.compareKey = 0;
     m.techniques.clear();
     m.parameters.clear();
     m.parametersEffect.clear();
@@ -1971,6 +1977,23 @@ void RequestPresetStep(int step)
         m.presetStep += step;
 }
 
+void StartHeldCompare(UINT key)
+{
+    if (!m.runtime || m.comparing)
+        return;
+    Compare(true);
+    m.compareKey = key;
+}
+
+void UpdateHeldCompare()
+{
+    if (!m.compareKey || (GetAsyncKeyState(static_cast<int>(m.compareKey)) & 0x8000))
+        return;
+    m.compareKey = 0;
+    if (m.runtime)
+        Compare(false);
+}
+
 void ResetMenu()
 {
     if (m.capturing >= 0)
@@ -1979,9 +2002,12 @@ void ResetMenu()
     m.active.clear();
     if (!m.runtime)
         return;
-    if (m.comparing)
+    // The compare shortcut keeps effects off until it is let go, even outside the menu.
+    if (m.comparing && !m.compareKey)
+    {
         m.runtime->set_effects_state(m.effectsBeforeCompare);
-    m.comparing = false;
+        m.comparing = false;
+    }
     if (m.presetChanged && m.autoSave)
         SavePreset();
     else if (m.presetChanged)

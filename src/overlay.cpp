@@ -33,6 +33,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 SetForegroundWindow(hwnd);
             }
             break;
+        case kCompareHotkey:
+            StartHeldCompare(g.hotkeys.compare.key);
+            break;
         case kScreenshotHotkey:
         case kBeforeAfterHotkey:
             RequestScreenshot(wParam == kBeforeAfterHotkey);

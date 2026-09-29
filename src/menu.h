@@ -14,6 +14,10 @@ void ShowStartHint();
 void RequestScreenshot(bool beforeAfter);
 void RequestPresetStep(int step);
 
+// Shows Roblox without effects until key is let go. UpdateHeldCompare notices that, every loop.
+void StartHeldCompare(UINT key);
+void UpdateHeldCompare();
+
 // Ends what only lasts while the menu is open, such as waiting for a shortcut or comparing with Roblox's
 // own picture. Called when input goes back to Roblox.
 void ResetMenu();

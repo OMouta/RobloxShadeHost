@@ -95,6 +95,7 @@ int Run()
 
         UpdateOverlay();
         UpdateInputHotkey();
+        UpdateHeldCompare();
         UpdateLauncher();
 
         if (g.target)
