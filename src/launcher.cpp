@@ -43,6 +43,10 @@ namespace
 // Size in pixels at 100% scaling. Longer content makes the window taller, up to the screen, and then scrolls.
 constexpr float kWidth = 620;
 constexpr float kMinHeight = 540;
+// The picker scrolls past its height.
+constexpr float kPickerWidth = 480;
+constexpr float kPickerMaxHeight = 520;
+constexpr wchar_t kPickerClass[] = L"UnishadePicker";
 
 enum class Action
 {
@@ -53,10 +57,8 @@ enum class Action
     AddGame,
     PickWindow,
     DetectAutomatically,
-    ClosePicker,
     ToggleGame,
     RemoveGame,
-    UseWindow,
 };
 
 enum class Look
@@ -66,7 +68,6 @@ enum class Look
     PrimaryButton,
     Switch,
     Remove,
-    Row,
 };
 
 // Something that can be clicked. index is the game or window it acts on.
@@ -136,13 +137,7 @@ struct Launcher
     fs::path activeExecutable;
     Update update;
     std::wstring setup;
-    Picker picker = Picker::None;
-    std::vector<GameWindow> windows;
-    std::vector<fs::path> windowExecutables;
-    std::wstring sectionTitle;
-    std::wstring sectionDetail;
     std::vector<Entry> entries;
-    std::wstring empty;
 
     // Layout in client pixels, moved up by scroll.
     int height = 0; // of everything, unscrolled
@@ -154,8 +149,7 @@ struct Launcher
     RECT statusDetailRect{};
     RECT updateCard{};
     RECT updateText{};
-    RECT sectionTitleRect{};
-    RECT sectionDetailRect{};
+    RECT gamesTitle{};
     RECT list{};
     RECT setupTitle{};
     std::vector<Row> rows;
@@ -163,6 +157,18 @@ struct Launcher
     std::vector<Target> targets;
     int hovered = -1;
     bool tracking = false;
+
+    // The picker, a dialog over the launcher listing the open windows.
+    HWND pickerWindow = nullptr;
+    Picker picker = Picker::None;
+    std::vector<GameWindow> windows;
+    std::vector<Entry> choices;
+    RECT pickerDetail{};
+    RECT pickerList{};
+    int pickerHeight = 0; // of everything, unscrolled
+    int pickerScroll = 0;
+    int pickerHovered = -1;
+    bool pickerTracking = false;
 };
 Launcher l;
 
@@ -323,34 +329,17 @@ void Describe()
     }
 
     l.entries.clear();
-    switch (l.picker)
+    LocateGames();
+    for (const AutoGame& saved : g.autoGames)
     {
-    case Picker::None:
-        LocateGames();
-        for (const AutoGame& saved : g.autoGames)
-        {
-            const auto located = l.located.find(saved.executable.wstring());
-            l.entries.push_back({ .name = saved.name,
-                                  .detail = saved.executable.wstring(),
-                                  .icon = saved.executable.has_parent_path() ? saved.executable
-                                        : located != l.located.end()        ? located->second
-                                                                            : fs::path{},
-                                  .enabled = saved.enabled,
-                                  .running = g.target && MatchesExecutable(saved, l.activeExecutable) });
-        }
-        l.sectionTitle = L"Games";
-        l.sectionDetail.clear();
-        l.empty = L"No games yet. Open one and choose Add game.";
-        break;
-    case Picker::Add:
-    case Picker::Session:
-        for (size_t i = 0; i < l.windows.size(); ++i)
-            l.entries.push_back({ .name = l.windows[i].name, .detail = l.windowExecutables[i].filename().wstring(), .icon = l.windowExecutables[i] });
-        l.sectionTitle = l.picker == Picker::Add ? L"Pick the game's window" : L"Pick a window for this session";
-        l.sectionDetail = l.picker == Picker::Add ? L"Open the game first if it is not listed."
-                                                  : L"Unishade stays on it until you choose Detect automatically.";
-        l.empty = L"No open windows.";
-        break;
+        const auto located = l.located.find(saved.executable.wstring());
+        l.entries.push_back({ .name = saved.name,
+                              .detail = saved.executable.wstring(),
+                              .icon = saved.executable.has_parent_path() ? saved.executable
+                                    : located != l.located.end()        ? located->second
+                                                                        : fs::path{},
+                              .enabled = saved.enabled,
+                              .running = g.target && MatchesExecutable(saved, l.activeExecutable) });
     }
 
     l.update = AvailableUpdate();
@@ -361,6 +350,17 @@ void Describe()
 int ButtonWidth(HDC dc, HFONT font, const wchar_t* label)
 {
     return TextWidth(dc, font, label) + P(28);
+}
+
+// Places an entry's icon, name and detail in a row, with the text ending at textRight.
+void PlaceEntry(Entry& entry, const RECT& row, int iconSize, int textRight)
+{
+    const int middle = (row.top + row.bottom) / 2;
+    entry.rect = row;
+    entry.iconRect = { row.left + P(14), middle - iconSize / 2, row.left + P(14) + iconSize, middle - iconSize / 2 + iconSize };
+    const int nameLeft = entry.iconRect.right + P(12);
+    entry.nameRect = entry.detail.empty() ? RECT{ nameLeft, row.top, textRight, row.bottom } : RECT{ nameLeft, middle - P(20), textRight, middle };
+    entry.detailRect = { nameLeft, middle + P(1), textRight, middle + P(19) };
 }
 
 void Layout(HDC dc)
@@ -405,55 +405,31 @@ void Layout(HDC dc)
         y = l.updateCard.bottom + P(14);
     }
 
-    // The saved games, or the open windows while picking one.
     y += P(12);
-    const bool picking = l.picker != Picker::None;
-    const wchar_t* sectionLabel = picking ? L"Cancel" : L"Add game";
-    const int sectionButton = ButtonWidth(dc, picking ? l.body : l.strong, sectionLabel);
-    l.sectionTitleRect = { pad, y, right - sectionButton - P(12), y + P(30) };
-    l.targets.push_back({ { right - sectionButton, y, right, y + P(30) }, picking ? Action::ClosePicker : Action::AddGame,
-                          picking ? Look::Button : Look::PrimaryButton, 0, sectionLabel });
-    y += P(30);
-    l.sectionDetailRect = {};
-    if (!l.sectionDetail.empty())
-    {
-        l.sectionDetailRect = { pad, y, right, y + TextHeight(dc, l.body, l.sectionDetail, right - pad) };
-        y = l.sectionDetailRect.bottom;
-    }
-    y += P(12);
+    const int addWidth = ButtonWidth(dc, l.strong, L"Add game");
+    l.gamesTitle = { pad, y, right - addWidth - P(12), y + P(30) };
+    l.targets.push_back({ { right - addWidth, y, right, y + P(30) }, Action::AddGame, Look::PrimaryButton, 0, L"Add game" });
+    y += P(30) + P(12);
 
-    const int rowHeight = P(picking ? 48.0f : 56.0f);
-    const int rowIcon = P(picking ? 28.0f : 32.0f);
+    const int rowHeight = P(56);
     l.list = { pad, y, right, y + std::max<int>(1, static_cast<int>(l.entries.size())) * rowHeight };
     for (size_t i = 0; i < l.entries.size(); ++i)
     {
         Entry& entry = l.entries[i];
         const int top = y + static_cast<int>(i) * rowHeight;
         middle = top + rowHeight / 2;
-        entry.rect = { pad, top, right, top + rowHeight };
-        entry.iconRect = { pad + P(14), middle - rowIcon / 2, pad + P(14) + rowIcon, middle - rowIcon / 2 + rowIcon };
-        int nameRight = right - P(14);
+        const RECT remove{ right - P(12) - P(28), middle - P(14), right - P(12), middle + P(14) };
+        const RECT toggle{ remove.left - P(10) - P(36), middle - P(10), remove.left - P(10), middle + P(10) };
+        l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, i });
+        l.targets.push_back({ toggle, Action::ToggleGame, Look::Switch, i, L"", entry.enabled });
+        int nameRight = toggle.left - P(14);
         entry.badge = {};
-        if (picking)
-            l.targets.push_back({ entry.rect, Action::UseWindow, Look::Row, i });
-        else
+        if (entry.running)
         {
-            const RECT remove{ right - P(12) - P(28), middle - P(14), right - P(12), middle + P(14) };
-            const RECT toggle{ remove.left - P(10) - P(36), middle - P(10), remove.left - P(10), middle + P(10) };
-            l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, i });
-            l.targets.push_back({ toggle, Action::ToggleGame, Look::Switch, i, L"", entry.enabled });
-            nameRight = toggle.left - P(14);
-            if (entry.running)
-            {
-                entry.badge = { nameRight - TextWidth(dc, l.note, L"Running") - P(18), middle - P(11), nameRight, middle + P(11) };
-                nameRight = entry.badge.left - P(12);
-            }
+            entry.badge = { nameRight - TextWidth(dc, l.note, L"Running") - P(18), middle - P(11), nameRight, middle + P(11) };
+            nameRight = entry.badge.left - P(12);
         }
-        const int nameLeft = entry.iconRect.right + P(12);
-        entry.nameRect = { nameLeft, middle - P(20), nameRight, middle };
-        entry.detailRect = { nameLeft, middle + P(1), nameRight, middle + P(19) };
-        if (entry.detail.empty())
-            entry.nameRect = { nameLeft, top, nameRight, top + rowHeight };
+        PlaceEntry(entry, { pad, top, right, top + rowHeight }, P(32), nameRight);
     }
     y = l.list.bottom + P(26);
 
@@ -717,6 +693,30 @@ void PaintText(HDC dc, HFONT font, unsigned color, const std::wstring& text, REC
     DrawTextW(dc, text.c_str(), -1, &rect, format | DT_NOPREFIX);
 }
 
+// The executable's icon, or the name's first letter on a tile. Turned-off games are faded.
+void EntryIcon(Gdiplus::Graphics& graphics, const Entry& entry)
+{
+    if (const HICON icon = ExecutableIcon(entry.icon, entry.iconRect.right - entry.iconRect.left))
+        PaintIcon(graphics, icon, entry.iconRect);
+    else
+        LetterTile(graphics, entry.iconRect);
+    if (!entry.enabled)
+    {
+        Gdiplus::SolidBrush fade(Plus(theme::kCard, 0xA0));
+        graphics.FillRectangle(&fade, F(entry.iconRect.left), F(entry.iconRect.top), F(entry.iconRect.right - entry.iconRect.left),
+                               F(entry.iconRect.bottom - entry.iconRect.top));
+    }
+}
+
+void EntryText(HDC dc, const Entry& entry)
+{
+    const unsigned color = entry.enabled ? theme::kText : theme::kDim;
+    if (!ExecutableIcon(entry.icon, entry.iconRect.right - entry.iconRect.left))
+        PaintText(dc, l.semibold, color, Initial(entry.name), entry.iconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    PaintText(dc, l.strong, color, entry.name, entry.nameRect, DT_SINGLELINE | (entry.detail.empty() ? DT_VCENTER : DT_BOTTOM) | DT_END_ELLIPSIS);
+    PaintText(dc, l.note, theme::kDim, entry.detail, entry.detailRect, DT_SINGLELINE | DT_PATH_ELLIPSIS);
+}
+
 void Paint(HDC output)
 {
     RECT client{};
@@ -778,10 +778,6 @@ void Paint(HDC output)
             case Look::Remove:
                 RemoveIcon(graphics, target.rect, hovered);
                 break;
-            case Look::Row:
-                if (hovered)
-                    FillRounded(graphics, Inset(target.rect, P(4)), F(8.0f), Plus(theme::kCardHover), Plus(theme::kCardHover));
-                break;
             case Look::Link:
                 break;
             }
@@ -789,16 +785,7 @@ void Paint(HDC output)
 
         for (const Entry& entry : l.entries)
         {
-            if (const HICON icon = ExecutableIcon(entry.icon, entry.iconRect.right - entry.iconRect.left))
-                PaintIcon(graphics, icon, entry.iconRect);
-            else
-                LetterTile(graphics, entry.iconRect);
-            if (!entry.enabled)
-            {
-                Gdiplus::SolidBrush fade(Plus(theme::kCard, 0xA0));
-                graphics.FillRectangle(&fade, F(entry.iconRect.left), F(entry.iconRect.top), F(entry.iconRect.right - entry.iconRect.left),
-                                       F(entry.iconRect.bottom - entry.iconRect.top));
-            }
+            EntryIcon(graphics, entry);
             if (entry.running)
                 FillRounded(graphics, entry.badge, F(entry.badge.bottom - entry.badge.top) / 2, Plus(theme::kSuccess, 0x26),
                             Plus(theme::kSuccess, 0x26));
@@ -824,21 +811,16 @@ void Paint(HDC output)
         PaintText(dc, l.body, theme::kText, L"Unishade " + l.update.version + L" is available.", l.updateText,
                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
-    PaintText(dc, l.semibold, theme::kText, l.sectionTitle, l.sectionTitleRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-    PaintText(dc, l.body, theme::kDim, l.sectionDetail, l.sectionDetailRect);
+    PaintText(dc, l.semibold, theme::kText, L"Games", l.gamesTitle, DT_SINGLELINE | DT_VCENTER);
     for (const Entry& entry : l.entries)
     {
-        if (!ExecutableIcon(entry.icon, entry.iconRect.right - entry.iconRect.left))
-            PaintText(dc, l.semibold, entry.enabled ? theme::kText : theme::kDim, Initial(entry.name), entry.iconRect,
-                     DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-        PaintText(dc, l.strong, entry.enabled ? theme::kText : theme::kDim, entry.name, entry.nameRect,
-                 DT_SINGLELINE | (entry.detail.empty() ? DT_VCENTER : DT_BOTTOM) | DT_END_ELLIPSIS);
-        PaintText(dc, l.note, theme::kDim, entry.detail, entry.detailRect, DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        EntryText(dc, entry);
         if (entry.running)
             PaintText(dc, l.note, theme::kSuccess, L"Running", entry.badge, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     }
     if (l.entries.empty())
-        PaintText(dc, l.body, theme::kDim, l.empty, Inset(l.list, P(18)), DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        PaintText(dc, l.body, theme::kDim, L"No games yet. Open one and click Add game.", Inset(l.list, P(18)),
+                 DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
     if (!l.rows.empty())
         PaintText(dc, l.semibold, theme::kText, L"Setup", l.setupTitle, DT_SINGLELINE | DT_VCENTER);
@@ -876,13 +858,159 @@ void Paint(HDC output)
     DeleteDC(dc);
 }
 
+const wchar_t* PickerDetail()
+{
+    return l.picker == Picker::Add ? L"Pick your game's window. If it isn't here, open the game first."
+                                   : L"Unishade uses this window until you click Detect automatically.";
+}
+
+// Lists the open windows. Returns whether they changed, which moves the rows.
+bool ListWindows()
+{
+    std::vector<GameWindow> windows = ListGameWindows();
+    if (std::equal(windows.begin(), windows.end(), l.windows.begin(), l.windows.end(),
+                   [](const GameWindow& a, const GameWindow& b) { return a.window == b.window && a.name == b.name; }))
+        return false;
+    l.windows = std::move(windows);
+    l.choices.clear();
+    for (const GameWindow& window : l.windows)
+    {
+        const fs::path executable = Executable(window.processId);
+        l.choices.push_back({ .name = window.name, .detail = executable.filename().wstring(), .icon = executable });
+    }
+    l.pickerHovered = -1;
+    return true;
+}
+
+void PickerLayout(HDC dc)
+{
+    const int width = P(kPickerWidth);
+    const int pad = P(20);
+    const int right = width - pad;
+    int y = P(3) + P(16) - l.pickerScroll;
+    l.pickerDetail = { pad, y, right, y + TextHeight(dc, l.body, PickerDetail(), right - pad) };
+    y = l.pickerDetail.bottom + P(14);
+    const int rowHeight = P(52);
+    l.pickerList = { pad, y, right, y + std::max<int>(1, static_cast<int>(l.choices.size())) * rowHeight };
+    for (size_t i = 0; i < l.choices.size(); ++i)
+    {
+        const int top = y + static_cast<int>(i) * rowHeight;
+        PlaceEntry(l.choices[i], { pad, top, right, top + rowHeight }, P(32), right - P(14));
+    }
+    l.pickerHeight = l.pickerList.bottom + pad + l.pickerScroll;
+}
+
+// Sizes the picker to its content, up to kPickerMaxHeight, keeping it where it is.
+void ResizePicker()
+{
+    const HDC dc = GetDC(l.pickerWindow);
+    PickerLayout(dc);
+    ReleaseDC(l.pickerWindow, dc);
+    RECT frame{ 0, 0, P(kPickerWidth), std::min(l.pickerHeight, P(kPickerMaxHeight)) };
+    AdjustWindowRectExForDpi(&frame, static_cast<DWORD>(GetWindowLongPtrW(l.pickerWindow, GWL_STYLE)), FALSE,
+                             static_cast<DWORD>(GetWindowLongPtrW(l.pickerWindow, GWL_EXSTYLE)), GetDpiForWindow(l.pickerWindow));
+    SetWindowPos(l.pickerWindow, nullptr, 0, 0, frame.right - frame.left, frame.bottom - frame.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(l.pickerWindow, nullptr, FALSE);
+}
+
+int ChoiceAt(POINT point)
+{
+    for (size_t i = 0; i < l.choices.size(); ++i)
+        if (PtInRect(&l.choices[i].rect, point))
+            return static_cast<int>(i);
+    return -1;
+}
+
+void PaintPicker(HDC output)
+{
+    RECT client{};
+    GetClientRect(l.pickerWindow, &client);
+    const int width = client.right;
+    const int height = client.bottom;
+    l.pickerScroll = std::clamp(l.pickerScroll, 0, std::max(0, l.pickerHeight - height));
+    const HDC dc = CreateCompatibleDC(output);
+    const HBITMAP bitmap = CreateCompatibleBitmap(output, width, height);
+    const HGDIOBJ previousBitmap = SelectObject(dc, bitmap);
+    const HGDIOBJ previousFont = SelectObject(dc, l.body);
+    PickerLayout(dc);
+
+    {
+        Gdiplus::Graphics graphics(dc);
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        Gdiplus::SolidBrush background(Plus(theme::kBackground));
+        graphics.FillRectangle(&background, 0, 0, width, height);
+        FillRounded(graphics, l.pickerList, F(10.0f), Plus(theme::kCard), Plus(theme::kBorder));
+        Gdiplus::Pen line(Plus(theme::kBorder), 1.0f);
+        for (size_t i = 1; i < l.choices.size(); ++i)
+        {
+            const int top = l.choices[i].rect.top;
+            graphics.DrawLine(&line, static_cast<int>(l.pickerList.left) + P(14), top, static_cast<int>(l.pickerList.right) - P(14), top);
+        }
+        if (l.pickerHovered >= 0 && l.pickerHovered < static_cast<int>(l.choices.size()))
+            FillRounded(graphics, Inset(l.choices[l.pickerHovered].rect, P(4)), F(8.0f), Plus(theme::kCardHover), Plus(theme::kCardHover));
+        for (const Entry& choice : l.choices)
+            EntryIcon(graphics, choice);
+    }
+
+    SetBkMode(dc, TRANSPARENT);
+    PaintText(dc, l.body, theme::kDim, PickerDetail(), l.pickerDetail);
+    for (const Entry& choice : l.choices)
+        EntryText(dc, choice);
+    if (l.choices.empty())
+        PaintText(dc, l.body, theme::kDim, L"No open windows.", Inset(l.pickerList, P(18)), DT_SINGLELINE | DT_VCENTER);
+
+    Strip(dc, width);
+    BitBlt(output, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, previousFont);
+    SelectObject(dc, previousBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+}
+
+void DarkFrame(HWND window)
+{
+    const BOOL dark = TRUE;
+    DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    const COLORREF caption = Gdi(theme::kBackground);
+    DwmSetWindowAttribute(window, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+}
+
+// Opens the list of open windows over the launcher, which stays disabled until it closes.
 void OpenPicker(Picker picker)
 {
     l.picker = picker;
-    l.windows = ListGameWindows();
-    l.windowExecutables.clear();
-    for (const GameWindow& window : l.windows)
-        l.windowExecutables.push_back(Executable(window.processId));
+    l.windows.clear();
+    l.choices.clear();
+    l.pickerScroll = 0;
+    l.pickerHovered = -1;
+    ListWindows();
+    l.pickerWindow = CreateWindowExW(WS_EX_DLGMODALFRAME, kPickerClass, picker == Picker::Add ? L"Add a game" : L"Pick a window",
+                                     WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 100, 100, g.launcher, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!l.pickerWindow)
+    {
+        Log(LogLevel::Error, L"Could not open the window list (error %lu).", GetLastError());
+        return;
+    }
+    DarkFrame(l.pickerWindow);
+    ResizePicker();
+    RECT owner{};
+    RECT own{};
+    GetWindowRect(g.launcher, &owner);
+    GetWindowRect(l.pickerWindow, &own);
+    SetWindowPos(l.pickerWindow, nullptr, (owner.left + owner.right - (own.right - own.left)) / 2,
+                 std::max<int>(owner.top, (owner.top + owner.bottom - (own.bottom - own.top)) / 2), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    EnableWindow(g.launcher, FALSE);
+    ShowWindow(l.pickerWindow, SW_SHOW);
+}
+
+void ClosePicker()
+{
+    if (!l.pickerWindow)
+        return;
+    // Enabled first, so the launcher becomes the active window again.
+    EnableWindow(g.launcher, TRUE);
+    DestroyWindow(l.pickerWindow);
 }
 
 // Saves a changed game list. A game that was turned off or removed stops being used, unless its window was
@@ -905,12 +1033,8 @@ void SaveGames(std::vector<AutoGame> games)
         StopCapture();
 }
 
-void UseWindow(size_t index)
+void UseWindow(Picker picker, const GameWindow& window)
 {
-    const Picker picker = std::exchange(l.picker, Picker::None);
-    if (index >= l.windows.size())
-        return;
-    const GameWindow window = l.windows[index];
     if (picker == Picker::Add)
     {
         auto games = g.autoGames;
@@ -951,7 +1075,6 @@ void Run(const Target& target)
     case Action::Download: ShellOpen(l.update.url); return;
     case Action::AddGame: OpenPicker(Picker::Add); break;
     case Action::PickWindow: OpenPicker(Picker::Session); break;
-    case Action::ClosePicker: l.picker = Picker::None; break;
     case Action::DetectAutomatically:
         g.selectedGame.reset();
         if (g.target)
@@ -973,9 +1096,111 @@ void Run(const Target& target)
             SaveGames(std::move(games));
         }
         break;
-    case Action::UseWindow: UseWindow(target.index); break;
     }
     Refresh();
+}
+
+void Choose(size_t index)
+{
+    const Picker picker = l.picker;
+    const GameWindow window = l.windows[index];
+    ClosePicker();
+    UseWindow(picker, window);
+    Refresh();
+}
+
+LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message)
+    {
+    case WM_PAINT:
+    {
+        PAINTSTRUCT paint{};
+        const HDC dc = BeginPaint(hwnd, &paint);
+        PaintPicker(dc);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_MOUSEMOVE:
+    {
+        if (!l.pickerTracking)
+        {
+            TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, hwnd, 0 };
+            l.pickerTracking = TrackMouseEvent(&track);
+        }
+        const int hovered = ChoiceAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) });
+        if (hovered != l.pickerHovered)
+        {
+            l.pickerHovered = hovered;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        l.pickerTracking = false;
+        if (l.pickerHovered >= 0)
+        {
+            l.pickerHovered = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_MOUSEWHEEL:
+    {
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        const int scroll = std::clamp(l.pickerScroll - GET_WHEEL_DELTA_WPARAM(wParam) * P(52) / WHEEL_DELTA, 0,
+                                      std::max(0, l.pickerHeight - static_cast<int>(client.bottom)));
+        if (scroll != l.pickerScroll)
+        {
+            l.pickerScroll = scroll;
+            l.pickerHovered = -1;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCLIENT && l.pickerHovered >= 0)
+        {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if (const int index = ChoiceAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }); index >= 0)
+            Choose(static_cast<size_t>(index));
+        return 0;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE)
+        {
+            ClosePicker();
+            return 0;
+        }
+        break;
+    // A game opened while the picker was open shows up when the picker is activated again. A click that activates
+    // it while the rows move is dropped, so it cannot pick the wrong window.
+    case WM_MOUSEACTIVATE:
+        if (LOWORD(lParam) == HTCLIENT && ListWindows())
+        {
+            ResizePicker();
+            return MA_ACTIVATEANDEAT;
+        }
+        break;
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) == WA_ACTIVE && ListWindows())
+            ResizePicker();
+        break;
+    case WM_CLOSE:
+        ClosePicker();
+        return 0;
+    case WM_DESTROY:
+        l.pickerWindow = nullptr;
+        l.picker = Picker::None;
+        l.pickerTracking = false;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1045,14 +1270,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             Run(target);
         }
         return 0;
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE && l.picker != Picker::None)
-        {
-            l.picker = Picker::None;
-            Refresh();
-            return 0;
-        }
-        break;
     case WM_DPICHANGED:
     {
         l.scale = HIWORD(wParam) / 96.0f;
@@ -1100,14 +1317,14 @@ void CreateLauncher()
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kLauncherClass;
     RegisterClassExW(&wc);
+    wc.lpfnWndProc = PickerProc;
+    wc.lpszClassName = kPickerClass;
+    RegisterClassExW(&wc);
     constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     g.launcher = CreateWindowExW(0, kLauncherClass, L"Unishade", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr,
                                  wc.hInstance, nullptr);
     winrt::check_bool(g.launcher != nullptr);
-    const BOOL dark = TRUE;
-    DwmSetWindowAttribute(g.launcher, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
-    const COLORREF caption = Gdi(theme::kBackground);
-    DwmSetWindowAttribute(g.launcher, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    DarkFrame(g.launcher);
 
     l.scale = GetDpiForWindow(g.launcher) / 96.0f;
     CreateFonts();
