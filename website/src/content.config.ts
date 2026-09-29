@@ -1,9 +1,15 @@
 import { defineCollection } from 'astro:content';
 import { glob } from 'astro/loaders';
+import { z } from 'astro/zod';
 
-// The same files GitHub shows, so the guides are written once.
-const guides = defineCollection({
-  loader: glob({ pattern: ['INSTALLATION.md', 'DLSS5-README.md'], base: '..' }),
+// Each file is a page under /docs/, listed in the sidebar by order. install.md is /docs/ itself.
+const docs = defineCollection({
+  loader: glob({ pattern: '*.md', base: './src/content/docs' }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    order: z.number(),
+  }),
 });
 
-export const collections = { guides };
+export const collections = { docs };

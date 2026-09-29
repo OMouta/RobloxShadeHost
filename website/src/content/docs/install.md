@@ -1,0 +1,60 @@
+---
+title: Install Unishade
+description: Download Setup, pick add-ons and start Unishade.
+order: 1
+---
+
+You need 64-bit Windows 10 version 1903 or newer, or Windows 11.
+
+## Run Setup
+
+[Download Setup](/download/) and run it. Keep the suggested folder or pick your own, as long as it isn't inside a game's folder.
+
+![Setup's first page](./images/setup-welcome.png)
+
+## Pick add-ons
+
+ReShade and every official ReShade effect are always included. Keep **Presets** on for ready-made looks.
+
+Two add-ons are optional. Pick one or neither, since they don't work together:
+
+- **Depth estimation** makes ambient occlusion, depth of field and fog work. It costs some frame rate.
+- **DLSS5** needs an NVIDIA RTX card. See [DLSS5](/docs/add-ons/#dlss5) after installing.
+
+![Choosing add-ons](./images/setup-addons.png)
+
+Accept ReShade's license, and Setup downloads and installs everything.
+
+## Start Unishade
+
+Leave **Start Unishade now** checked and click **Finish**. Next time, start **Unishade** from the Start menu.
+
+![Setup's last page](./images/setup-done.png)
+
+Keep the Unishade window open while you play. Minimizing it is fine. Closing it turns Unishade off.
+
+![The Unishade window running on a game](./images/launcher-running.png)
+
+Next, [add your game](/docs/games/#add-a-game).
+
+## Updating
+
+Only the newest version is supported. When one is out, the Unishade window and the menu's **Status** tab link to it. Run the new Setup and your presets, settings, shortcuts and games stay.
+
+### Coming from RobloxShadeHost
+
+Unishade is RobloxShadeHost's new name. Run Unishade Setup and it upgrades your install in place, presets and settings included.
+
+If you installed without Setup, replace `RobloxShadeHost.exe` with `Unishade.exe` in the same folder and update your shortcut.
+
+## Uninstalling
+
+Open **Unishade Setup** from the Start menu and choose **Uninstall**. Your presets, settings and games stay unless you tick the box to delete them.
+
+## Installing without Setup
+
+1. Put `Unishade.exe` from the [download page](/download/) in its own folder.
+2. Run a current ReShade installer from [reshade.me](https://reshade.me/#download), the version with full add-on support. Pick `Unishade.exe`, not the game, and **DirectX 10/11/12**.
+3. Start `Unishade.exe`.
+
+The add-ons need Setup.

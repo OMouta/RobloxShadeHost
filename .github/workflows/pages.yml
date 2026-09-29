@@ -1,13 +1,11 @@
 name: Website
 
-# Only when the site or the guides it shows change, or when started from the Actions tab.
+# Only when the site changes, or when started from the Actions tab.
 on:
   push:
     branches: [main]
     paths:
       - 'website/**'
-      - 'INSTALLATION.md'
-      - 'DLSS5-README.md'
       - 'assets/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:

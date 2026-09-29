@@ -1,0 +1,180 @@
+---
+import { getCollection, render, type CollectionEntry } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+
+export async function getStaticPaths() {
+  const pages = (await getCollection('docs')).sort((a, b) => a.data.order - b.data.order);
+  return pages.map((entry) => ({ params: { slug: entry.id === 'install' ? undefined : entry.id }, props: { entry, pages } }));
+}
+
+interface Props {
+  entry: CollectionEntry<'docs'>;
+  pages: CollectionEntry<'docs'>[];
+}
+
+const { entry, pages } = Astro.props;
+const { Content } = await render(entry);
+const href = (id: string) => (id === 'install' ? '/docs/' : `/docs/${id}/`);
+const next = pages[pages.indexOf(entry) + 1];
+---
+
+<Base title={`${entry.data.title} | Unishade`} description={entry.data.description}>
+  <div class="docs">
+    <nav class="sidebar" aria-label="Docs">
+      <ul>
+        {
+          pages.map((page) => (
+            <li>
+              <a href={href(page.id)} aria-current={page === entry ? 'page' : undefined}>
+                {page.data.title}
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </nav>
+    <main class="guide">
+      <h1>{entry.data.title}</h1>
+      <Content />
+      {
+        next && (
+          <a class="next" href={href(next.id)}>
+            <span class="dim">Next</span>
+            {next.data.title}
+          </a>
+        )
+      }
+    </main>
+  </div>
+</Base>
+
+<style>
+  .docs {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 720px);
+    gap: clamp(32px, 6vw, 88px);
+    width: var(--page);
+    margin: clamp(40px, 7vw, 80px) auto 0;
+  }
+
+  .sidebar ul {
+    position: sticky;
+    top: 24px;
+    display: grid;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .sidebar a {
+    display: block;
+    padding: 8px 12px;
+    border-radius: 8px;
+    color: var(--haze);
+    text-decoration: none;
+  }
+
+  .sidebar a:hover {
+    color: var(--ink);
+  }
+
+  .sidebar a[aria-current='page'] {
+    color: var(--ink);
+    background: var(--night-raised);
+  }
+
+  .guide h1 {
+    margin-bottom: 28px;
+    font-size: clamp(2.1rem, 4.4vw, 3.2rem);
+  }
+
+  .guide :global(h2) {
+    margin: 56px 0 16px;
+    font-size: clamp(1.5rem, 2.6vw, 2rem);
+  }
+
+  .guide :global(h3) {
+    margin: 36px 0 12px;
+  }
+
+  .guide :global(p),
+  .guide :global(ul),
+  .guide :global(ol),
+  .guide :global(table) {
+    margin: 0 0 16px;
+    max-width: 68ch;
+  }
+
+  .guide :global(li) {
+    margin-bottom: 6px;
+  }
+
+  .guide :global(li::marker) {
+    color: var(--accent);
+  }
+
+  .guide :global(img) {
+    margin: 26px 0 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+
+  .guide :global(code) {
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 0.92em;
+    background: var(--night-raised);
+  }
+
+  .guide :global(table) {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .guide :global(th),
+  .guide :global(td) {
+    padding: 10px 14px 10px 0;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+  }
+
+  .guide :global(th) {
+    color: var(--haze);
+    font-weight: 600;
+  }
+
+  .next {
+    display: grid;
+    gap: 2px;
+    width: fit-content;
+    margin-top: 64px;
+    padding: 16px 22px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-weight: 650;
+    text-decoration: none;
+  }
+
+  .next:hover {
+    border-color: var(--haze);
+  }
+
+  .next .dim {
+    font-size: 0.85rem;
+    font-weight: 400;
+  }
+
+  @media (max-width: 860px) {
+    .docs {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .sidebar ul {
+      position: static;
+      display: flex;
+      flex-wrap: wrap;
+    }
+  }
+</style>
