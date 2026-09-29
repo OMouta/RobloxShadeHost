@@ -8,6 +8,8 @@ struct InputHotkeys
 {
     Hotkey input; // opens and closes the menu
     Hotkey overlay;
+    Hotkey screenshot;
+    Hotkey beforeAfter;
     Hotkey nextPreset;
     Hotkey previousPreset;
 };
@@ -17,6 +19,8 @@ enum HotkeyId
 {
     kEditModeHotkey = 1,
     kOverlayToggleHotkey,
+    kScreenshotHotkey,
+    kBeforeAfterHotkey,
     kNextPresetHotkey,
     kPreviousPresetHotkey,
 };
@@ -36,6 +40,8 @@ struct Shortcut
 inline constexpr Shortcut kShortcuts[] = {
     { &InputHotkeys::input, kEditModeHotkey, L"ToggleKey", L"Home", false },
     { &InputHotkeys::overlay, kOverlayToggleHotkey, L"OverlayToggleKey", L"Ctrl+F8", true },
+    { &InputHotkeys::screenshot, kScreenshotHotkey, L"ScreenshotKey", L"Ctrl+F9", false },
+    { &InputHotkeys::beforeAfter, kBeforeAfterHotkey, L"BeforeAfterKey", L"Ctrl+F10", false },
     { &InputHotkeys::nextPreset, kNextPresetHotkey, L"NextPresetKey", L"Ctrl+PageDown", false },
     { &InputHotkeys::previousPreset, kPreviousPresetHotkey, L"PreviousPresetKey", L"Ctrl+PageUp", false },
 };

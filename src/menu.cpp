@@ -140,6 +140,10 @@ struct Menu
     bool hintShown = false;
 
     // Shortcut requests, carried out on the next frame the overlay draws.
+    bool screenshotRequested = false;
+    bool beforeAfterRequested = false;
+    bool beforeTaken = false;
+    ULONGLONG lastScreenshot = 0;
     int presetStep = 0;
 
     // Handles become invalid when ReShade reloads effects, so everything is read again after a reload.
@@ -201,6 +205,8 @@ constexpr struct
 } kShortcutText[] = {
     { "Open the menu", "Press it again, or Escape, to go back to Roblox." },
     { "Overlay off and on", "Shows Roblox without effects and stops capturing it." },
+    { "Screenshot", "Saves what you see, without the menu." },
+    { "Before and after screenshots", "Saves the same moment with and without effects." },
     { "Next preset", "Switches to the next preset in the Presets tab." },
     { "Previous preset", "Switches to the preset before it." },
 };
@@ -444,6 +450,16 @@ void SaveIcon(ImDrawList* draw, ImVec2 center, float size, ImU32 color)
     draw->AddRect(ImVec2(min.x + size * 0.2f, center.y + size * 0.1f), ImVec2(max.x - size * 0.2f, max.y), color, 0, 0, S(1.5f));
 }
 
+// A camera: the body, the bump on top and the lens.
+void CameraIcon(ImDrawList* draw, ImVec2 center, float size, ImU32 color)
+{
+    const ImVec2 min = center + ImVec2(-size * 0.5f, -size * 0.3f);
+    const ImVec2 max = center + ImVec2(size * 0.5f, size * 0.4f);
+    draw->AddRect(min, max, color, S(2), 0, S(1.5f));
+    draw->AddRectFilled(ImVec2(center.x - size * 0.2f, min.y - size * 0.15f), ImVec2(center.x + size * 0.2f, min.y), color, S(1));
+    draw->AddCircle(ImVec2(center.x, center.y + size * 0.05f), size * 0.2f, color, 0, S(1.5f));
+}
+
 void Rainbow(ImDrawList* draw, ImVec2 min, ImVec2 max)
 {
     constexpr int count = static_cast<int>(std::size(theme::kRainbow));
@@ -498,6 +514,17 @@ void ShowToast(std::string text, std::string key = {}, ULONGLONG duration = kToa
     m.toastKey = std::move(key);
     m.toastStart = GetTickCount64();
     m.toastDuration = duration;
+}
+
+// Where ReShade saves screenshots, which can be relative to the host's folder.
+fs::path ScreenshotFolder()
+{
+    char value[2048] = "";
+    size_t size = sizeof(value);
+    fs::path folder = ExeDirectory();
+    if (reshade::get_config_value(m.runtime, "SCREENSHOT", "SavePath", value, &size) && value[0])
+        folder /= fs::path(Wide(value));
+    return folder.lexically_normal();
 }
 
 // Presets
@@ -1638,6 +1665,38 @@ void Footer(ImVec2 origin, ImVec2 size)
         ImGui::SetTooltip("Open ReShade's own menu for everything else");
     ImGui::PopFont();
 
+    // Screenshots leave out the menu, since they are taken before it is drawn.
+    ImGui::SameLine(0, S(8));
+    const ImVec2 cameraStart = ImGui::GetCursorScreenPos();
+    const ImVec2 cameraSize(S(34), S(34));
+    if (ImGui::InvisibleButton("camera", cameraSize, ImGuiButtonFlags_EnableNav))
+        ImGui::OpenPopup("screenshots");
+    const bool cameraHovered = ImGui::IsItemHovered();
+    HandOnHover();
+    draw->AddRectFilled(cameraStart, cameraStart + cameraSize, cameraHovered ? kCardHover : kCard, S(6));
+    draw->AddRect(cameraStart, cameraStart + cameraSize, kBorder, S(6));
+    CameraIcon(draw, cameraStart + cameraSize * 0.5f, S(15), cameraHovered ? kText : kDim);
+    if (cameraHovered)
+        ImGui::SetTooltip("Screenshots");
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(6), S(6)));
+    if (ImGui::BeginPopup("screenshots"))
+    {
+        if (ImGui::MenuItem("Screenshot"))
+            RequestScreenshot(false);
+        if (ImGui::MenuItem("Before and after"))
+            RequestScreenshot(true);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Open screenshots folder"))
+        {
+            const fs::path folder = ScreenshotFolder();
+            std::error_code ignored;
+            fs::create_directories(folder, ignored);
+            ShellOpen(folder.wstring());
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+
     // The menu shortcut, which also leaves.
     PushSize(13.5f);
     const char* label = "Back to Roblox";
@@ -1772,8 +1831,15 @@ void DrawMenuFrame()
     }
 }
 
+// Runs before anything is drawn, so screenshots leave out the menu and ReShade's messages.
 void CarryOutRequests()
 {
+    if (m.screenshotRequested)
+    {
+        // Without a picture from before the effects, which ReShade skips while they are off, there is only one.
+        m.runtime->save_screenshot(m.beforeTaken ? "After" : nullptr);
+        m.screenshotRequested = m.beforeAfterRequested = m.beforeTaken = false;
+    }
     if (m.presetStep)
     {
         const fs::path current = CurrentPreset();
@@ -1786,6 +1852,15 @@ void CarryOutRequests()
         if (!SamePath(target, current))
             ShowToast(SwitchNow(target) ? Utf8(target.stem().wstring())
                                         : "Save or discard the changes to " + Utf8(current.stem().wstring()) + " first");
+    }
+}
+
+void OnBeginEffects(effect_runtime* runtime, command_list*, resource_view, resource_view)
+{
+    if (runtime == m.runtime && m.beforeAfterRequested && !m.beforeTaken)
+    {
+        runtime->save_screenshot("Before");
+        m.beforeTaken = true;
     }
 }
 
@@ -1866,6 +1941,7 @@ void InitMenu()
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
     reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
     reshade::register_event<reshade::addon_event::reshade_set_effects_state>(OnSetEffectsState);
+    reshade::register_event<reshade::addon_event::reshade_begin_effects>(OnBeginEffects);
     reshade::register_event<reshade::addon_event::reshade_overlay>(OnOverlay);
 }
 
@@ -1876,6 +1952,17 @@ void ShowStartHint()
         return;
     m.hintShown = true;
     ShowToast("opens the RobloxShadeHost menu", Utf8(g.inputHotkey), kHintDuration);
+}
+
+void RequestScreenshot(bool beforeAfter)
+{
+    // ReShade names screenshots by the second, so a second one within it would replace the first.
+    if (!m.runtime || !g.overlayVisible || GetTickCount64() - m.lastScreenshot < 1000)
+        return;
+    m.lastScreenshot = GetTickCount64();
+    m.screenshotRequested = true;
+    m.beforeAfterRequested = beforeAfter;
+    m.beforeTaken = false;
 }
 
 void RequestPresetStep(int step)

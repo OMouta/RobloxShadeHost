@@ -5,6 +5,7 @@
 #include "theme.h"
 
 #include <windows.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -132,6 +133,14 @@ void PrepareReShadeConfig()
         wchar_t windows[MAX_PATH]{};
         GetWindowsDirectoryW(windows, MAX_PATH);
         ini.Set("STYLE", "Font", Utf8(windows) + "\\Fonts\\segoeui.ttf");
+    }
+    // ReShade saves screenshots beside the exe unless told otherwise, where nobody looks for them.
+    if (!ini.Get("SCREENSHOT", "SavePath", value) || value.empty() || value == ".\\")
+    {
+        PWSTR pictures = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, 0, nullptr, &pictures)))
+            ini.Set("SCREENSHOT", "SavePath", Utf8(std::wstring(pictures) + L"\\RobloxShadeHost\\"));
+        CoTaskMemFree(pictures);
     }
     if (!ini.Get("STYLE", "StyleIndex", value))
         ApplyTheme(ini);

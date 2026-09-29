@@ -33,6 +33,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 SetForegroundWindow(hwnd);
             }
             break;
+        case kScreenshotHotkey:
+        case kBeforeAfterHotkey:
+            RequestScreenshot(wParam == kBeforeAfterHotkey);
+            break;
         case kNextPresetHotkey:
         case kPreviousPresetHotkey:
             RequestPresetStep(wParam == kNextPresetHotkey ? 1 : -1);
