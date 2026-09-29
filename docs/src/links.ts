@@ -1,10 +1,11 @@
 export const links = {
-  download: 'https://github.com/OMouta/RobloxShadeHost/releases/latest',
+  download: 'https://unishade.me/download',
+  release: 'https://github.com/OMouta/Unishade/releases/latest',
   discord: 'https://discord.gg/wVbVUdENas',
-  github: 'https://github.com/OMouta/RobloxShadeHost',
-  license: 'https://github.com/OMouta/RobloxShadeHost/blob/main/LICENSE',
+  github: 'https://github.com/OMouta/Unishade',
+  license: 'https://github.com/OMouta/Unishade/blob/main/LICENSE',
   reshade: 'https://reshade.me',
 };
 
-// A page of this site, under the base path GitHub Pages serves it from.
+// A page of the canonical site.
 export const page = (path = '') => `${import.meta.env.BASE_URL.replace(/\/?$/, '/')}${path}`;
