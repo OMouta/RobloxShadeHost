@@ -1,63 +1,15 @@
 <p align="center">
-  <img src="assets/unishade-banner1.png" alt="Unishade banner"/>
-  <p align="center">Formerly RobloxShadeHost</p>
+  <img src="assets/unishade-banner1.png" alt="Unishade"/>
 </p>
 
 <p align="center">
-  <a href="https://unishade.me/download">Download for Windows</a>
+  <a href="https://unishade.me/download/">Download</a>
   &nbsp;·&nbsp;
-  <a href="https://unishade.me">Website</a>
+  <a href="https://unishade.me/docs/">Docs</a>
   &nbsp;·&nbsp;
-  <a href="https://unishade.me/docs">Installation guide</a>
-  &nbsp;·&nbsp;
-  <a href="https://discord.gg/wVbVUdENas">Discord &amp; community presets</a>
+  <a href="https://discord.gg/wVbVUdENas">Discord</a>
 </p>
 
-Unishade applies post-processing externally to supported games. It runs outside the game process, captures its picture through Windows Graphics Capture, and draws ReShade effects in an overlay. It does not inject DLLs into the game or modify game files as part of its normal architecture. ReShade runs inside Unishade's own process.
+Use ReShade on games that won't let you install it. Formerly RobloxShadeHost.
 
-Unishade is intended for supported games where traditional ReShade injection is unavailable or undesirable. Use normal ReShade where it already works for you. Support depends on the game's compatibility with external capture and overlays.
-
-Roblox is detected automatically. Add other games through **Auto-detect games → Add game** while they're running.
-
-This is the same project, repository and release history as RobloxShadeHost. Existing installations upgrade in place and keep their presets, configuration and shortcuts.
-
-#### *If you like this project, please consider starring to support development and help others find it.*
-
-<a href="https://www.star-history.com/?repos=omouta%2Funishade&type=date&releases=&legend=bottom-right">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=omouta/unishade&type=date&theme=dark&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=omouta/unishade&type=date&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=omouta/unishade&type=date&legend=bottom-right" />
- </picture>
-</a>
-
-## Press Home, pick a look
-
-The menu opens right over the game. Switch presets, turn effects on, and drag their sliders while you watch the result. Hold **Compare** to see the game without effects for a second.
-
-![The Unishade menu over Roblox](assets/docs/menu-effects.jpg)
-
-- **Every ReShade effect.** Setup installs every package on ReShade's official list, plus presets made for Roblox.
-- **Depth effects.** Roblox keeps its depth buffer to itself, so the optional depth add-on estimates depth from the picture with an AI model. Ambient occlusion, depth of field and fog work from that.
-- **DLSS5.** An optional add-on for NVIDIA RTX cards, through RenoDX.
-- **One installer.** Setup downloads ReShade, the effects and the presets, and updates them later without touching your presets.
-
-Effects cost frame rate. The host copies the game's picture every frame and runs the effects on your GPU next to the game.
-
-## Get started
-
-Download **Unishade-Setup** from the [download page](https://unishade.me/download) and follow the [installation guide](https://unishade.me/docs). You need 64-bit Windows 10 version 1903 or newer, or Windows 11.
-
-## Help and updates
-
-Ask on [Discord](https://discord.gg/wVbVUdENas). That is also where people share presets.
-
-We only support the newest version, so update before asking. The host tells you when a new one is out. Run the new Setup and it keeps your presets and settings.
-
-## Build from source
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for building, presets and code changes.
-
-## License
-
-[MIT](LICENSE).
+Downloads, docs and presets are on [unishade.me](https://unishade.me) and [Discord](https://discord.gg/wVbVUdENas). To build it or send a preset, see [CONTRIBUTING.md](CONTRIBUTING.md). [MIT license](LICENSE).
