@@ -15,18 +15,22 @@
 #include "update.h"
 #include "../installer/text.h"
 
+#include <shobjidl.h>
 #include <wincodec.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -198,6 +202,16 @@ struct Menu
     int logoSize = 0;
 };
 Menu m;
+
+// The import dialog runs on a thread of its own, so the menu keeps drawing. Never destroyed, since the dialog may
+// still be open when the host exits.
+struct ImportDialog
+{
+    std::mutex mutex;
+    std::vector<fs::path> files;
+    std::atomic<bool> open = false;
+};
+ImportDialog& importDialog = *new ImportDialog;
 
 // Settings lists the shortcuts in the order of kShortcuts.
 constexpr struct
@@ -587,6 +601,84 @@ bool SwitchNow(const fs::path& target)
     return true;
 }
 
+// Copies presets picked in the import dialog beside the others and switches to the first, asking about unsaved
+// changes like any other switch.
+void ImportPresets(const std::vector<fs::path>& files)
+{
+    const fs::path current = CurrentPreset();
+    for (const fs::path& file : files)
+    {
+        const std::string name = Utf8(file.filename().wstring());
+        if (!IsPreset(file))
+        {
+            ShowToast(name + " is not a ReShade preset");
+            continue;
+        }
+        fs::path target = current.parent_path() / (file.stem().wstring() + L".ini");
+        std::error_code error;
+        // A preset picked from the presets folder is already there.
+        if (!SamePath(file, target))
+        {
+            for (int copy = 2; fs::exists(target, error); ++copy)
+                target = current.parent_path() / (file.stem().wstring() + L" (" + std::to_wstring(copy) + L").ini");
+            if (!fs::copy_file(file, target, error))
+            {
+                ShowToast("Windows could not copy " + name);
+                continue;
+            }
+        }
+        if (m.pendingPreset.empty() && !SamePath(target, current))
+            m.pendingPreset = target;
+    }
+    m.tab = Tab::Presets;
+    m.presetsScanned = 0;
+}
+
+std::vector<fs::path> PickPresets()
+{
+    std::vector<fs::path> files;
+    winrt::com_ptr<IFileOpenDialog> dialog;
+    winrt::com_ptr<IShellItemArray> items;
+    FILEOPENDIALOGOPTIONS options = 0;
+    const COMDLG_FILTERSPEC types[] = { { L"ReShade presets", L"*.ini" } };
+    DWORD count = 0;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dialog.put()))) ||
+        FAILED(dialog->GetOptions(&options)) ||
+        FAILED(dialog->SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST)) ||
+        FAILED(dialog->SetFileTypes(1, types)) || FAILED(dialog->SetTitle(L"Import presets")) || FAILED(dialog->Show(nullptr)) ||
+        FAILED(dialog->GetResults(items.put())) || FAILED(items->GetCount(&count)))
+        return files;
+    for (DWORD i = 0; i < count; ++i)
+    {
+        winrt::com_ptr<IShellItem> item;
+        PWSTR path = nullptr;
+        if (SUCCEEDED(items->GetItemAt(i, item.put())) && SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+            files.emplace_back(path);
+        CoTaskMemFree(path);
+    }
+    return files;
+}
+
+// The dialog takes focus from the menu, which closes it, so the menu opens again when the dialog closes.
+void OpenImportDialog()
+{
+    if (importDialog.open.exchange(true))
+        return;
+    std::thread([] {
+        // The main thread's apartment is multithreaded, and the shell's dialogs need a single-threaded one.
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        std::vector<fs::path> files = PickPresets();
+        if (SUCCEEDED(com))
+            CoUninitialize();
+        {
+            std::lock_guard lock(importDialog.mutex);
+            importDialog.files.insert(importDialog.files.end(), files.begin(), files.end());
+        }
+        importDialog.open = false;
+        PostMessageW(g.overlay, kOpenMenuMessage, 0, 0);
+    }).detach();
+}
+
 void ScanPresets(const fs::path& current)
 {
     m.presets.clear();
@@ -875,14 +967,14 @@ void PresetsTab()
     if (Button("New preset", ImVec2(S(130), S(32)), true))
         OpenNamePopup(NameAction::New, {});
     ImGui::SameLine(0, S(8));
+    if (Button("Import", ImVec2(S(90), S(32)), false, !importDialog.open))
+        OpenImportDialog();
     if (!m.autoSave)
     {
+        ImGui::SameLine(0, S(8));
         if (Button("Save as new", ImVec2(S(120), S(32))))
             OpenNamePopup(NameAction::SaveAsNew, current);
-        ImGui::SameLine(0, S(8));
     }
-    if (Button("Open folder", ImVec2(S(120), S(32))))
-        ShellOpen(current.parent_path().wstring());
     ImGui::Dummy(ImVec2(0, S(2)));
 
     for (const fs::path& preset : m.presets)
@@ -892,6 +984,10 @@ void PresetsTab()
     Text(m.autoSave ? "Changes save to the active preset as you make them."
                     : "Changes apply right away. Save them with the icon at the top.",
          kDim, 13);
+    PushSize(13.5f);
+    if (Link("Open presets folder"))
+        ShellOpen(current.parent_path().wstring());
+    ImGui::PopFont();
     NamePopup(current);
     DeletePopup();
     UnsavedPopup(current);
@@ -1799,6 +1895,13 @@ void DrawMenuFrame()
             m.unsaved = true;
         m.presetChanged = false;
     }
+    std::vector<fs::path> imported;
+    {
+        std::lock_guard lock(importDialog.mutex);
+        imported.swap(importDialog.files);
+    }
+    if (!imported.empty())
+        ImportPresets(imported);
     if (!m.pendingPreset.empty())
     {
         if (m.unsaved && !m.pendingKeepsEdits && m.unsavedChoice == UnsavedChoice::Ask)

@@ -22,6 +22,8 @@ constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 // Posted by the menu to give input back to Roblox. The menu runs inside ReShade's present, so window
 // changes wait for the message loop.
 constexpr UINT kLeaveMenuMessage = WM_APP + 1;
+// Posted when the menu's import dialog closes, since opening it closed the menu.
+constexpr UINT kOpenMenuMessage = WM_APP + 2;
 
 struct State
 {

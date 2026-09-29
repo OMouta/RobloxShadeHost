@@ -13,6 +13,15 @@ namespace
 constexpr DWORD kPassThroughStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
 constexpr DWORD kEditStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
 
+void OpenMenu()
+{
+    if (g.editMode || !g.captureEnabled || !g.target || IsIconic(g.target))
+        return;
+    SetEditMode(true);
+    UpdateOverlay();
+    SetForegroundWindow(g.overlay);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -26,12 +35,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         case kEditModeHotkey:
             if (g.editMode)
                 ReturnToRoblox();
-            else if (g.captureEnabled && g.target && !IsIconic(g.target))
-            {
-                SetEditMode(true);
-                UpdateOverlay();
-                SetForegroundWindow(hwnd);
-            }
+            else
+                OpenMenu();
             break;
         case kCompareHotkey:
             StartHeldCompare(g.hotkeys.compare.key);
@@ -49,6 +54,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case kLeaveMenuMessage:
         if (g.editMode)
             ReturnToRoblox();
+        return 0;
+    case kOpenMenuMessage:
+        OpenMenu();
         return 0;
     case WM_ACTIVATE:
         if (LOWORD(wParam) == WA_INACTIVE)
