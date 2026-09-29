@@ -4,14 +4,14 @@ Bug reports, presets, and code changes are welcome. Open an issue before startin
 
 ## Report a bug
 
-Use the bug report form. Include the host version, how you installed it, your Windows version, and `RobloxShadeHost.log` from the host's folder. Installer problems need the setup log, `%TEMP%\RobloxShadeHost-Setup.log`.
+Use the bug report form. Include the host version, how you installed it, your Windows version, and `Unishade.log` from the host's folder. Installer problems need the setup log, `%TEMP%\Unishade-Setup.log`.
 
 ## Add a preset
 
 Presets live in `presets/`. Every effect a preset uses must come from [ReShade's official package list](https://github.com/crosire/reshade-shaders/blob/list/EffectPackages.ini); the installer downloads all of those and nothing else. Do not reference shaders from other sources.
 
 1. Save the preset from ReShade and copy the `.ini` into `presets/`.
-2. Test it with the host on a Roblox experience. Remember that Roblox provides no depth buffer, so depth-based effects do nothing.
+2. Test it with the host on a supported game and name the game in your submission. Roblox provides no depth buffer; depth effects require the optional depth estimation add-on.
 3. Add its filename and SHA-256 to `presets/downloads.ini`:
 
    ```powershell
@@ -32,13 +32,15 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The EXE is at `build\Release\RobloxShadeHost.exe`. See `installer/README.md` for building and testing the installer.
+The EXE is at `build\Release\Unishade.exe`. See `installer/README.md` for building and testing the installer.
 
-GitHub Actions builds and tests the EXE for pushes and pull requests. You can also run **Build and release** manually from the Actions tab. Successful builds provide a `RobloxShadeHost-windows-x64` artifact containing the EXE and the installer.
+GitHub Actions builds and tests the EXE for pushes and pull requests. You can also run **Build and release** manually from the Actions tab. Successful builds provide a `Unishade-windows-x64` artifact containing the EXE and the installer.
 
 To publish a release, push a version tag such as `v0.1.0`. After the build and tests pass, the workflow creates a GitHub release with the EXE attached. Branch pushes and manual builds do not publish releases.
 
 ## Code changes
+
+Game discovery lives in `src/game_integration.cpp`. `FindGameTarget()` uses a manual window selection or the executable list saved in `games.ini`, with Roblox enabled by default. Custom games match their full executable path; Roblox matches its filename because its install folder changes with updates. Discovery queries executable metadata without reading game memory or injecting code.
 
 - The host is C++20.
 - Builds use `/W4`. Fix warnings rather than suppressing them.
