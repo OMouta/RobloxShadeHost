@@ -1,5 +1,116 @@
 ---
+import Base from '../layouts/Base.astro';
 import { links } from '../links';
+import { megabytes, release } from '../release';
 
-return Astro.redirect(links.release);
+const released = release.date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 ---
+
+<Base title="Download | Unishade" description={`Download Unishade ${release.version} Setup for Windows 10 and 11.`}>
+  <main class="download-page">
+    <section class="main">
+      <h1>Download Unishade</h1>
+      <p>Unishade, ReShade and every official effect in one installer. Depth estimation and DLSS5 are optional.</p>
+      <a class="button button-primary" href={release.setup.url}>Download Setup {release.version}</a>
+      <dl>
+        <div>
+          <dt>Version</dt>
+          <dd>{release.version}, released {released}</dd>
+        </div>
+        <div>
+          <dt>Size</dt>
+          <dd>{megabytes(release.setup.size)}. ReShade and the effects download during install.</dd>
+        </div>
+        <div>
+          <dt>Needs</dt>
+          <dd>64-bit Windows 10 version 1903 or newer, or Windows 11</dd>
+        </div>
+      </dl>
+      <p>
+        <a href={release.notes}>What's new in {release.version}</a> · <a href={links.releases}>Older versions</a>
+      </p>
+    </section>
+
+    <section>
+      <h2>After downloading</h2>
+      <ol>
+        <li>Run Setup and pick your add-ons.</li>
+        <li>Open your game and add it in Unishade.</li>
+        <li>Press Home in the game.</li>
+      </ol>
+      <a class="button button-secondary" href="/docs/">Read the install guide</a>
+    </section>
+
+    <section>
+      <h2>Updating</h2>
+      <p>
+        Run the new Setup. Your presets, settings and games stay. Coming from RobloxShadeHost? Setup upgrades it the same
+        way.
+      </p>
+    </section>
+
+    {
+      release.host && (
+        <section>
+          <h2>Without Setup</h2>
+          <p>
+            <a href={release.host.url}>Unishade.exe</a> on its own ({megabytes(release.host.size)}), if you'd rather install ReShade yourself. The add-ons
+            need Setup. <a href="/docs/#installing-without-setup">How to install it</a>
+          </p>
+        </section>
+      )
+    }
+  </main>
+</Base>
+
+<style>
+  .download-page {
+    display: grid;
+    gap: clamp(56px, 8vw, 88px);
+    width: min(760px, 100% - 2 * var(--gutter));
+    margin: clamp(40px, 7vw, 80px) auto 0;
+  }
+
+  section {
+    display: grid;
+    gap: 20px;
+    justify-items: start;
+  }
+
+  .main p:first-of-type {
+    max-width: 52ch;
+    font-size: 1.15rem;
+  }
+
+  dl {
+    display: grid;
+    gap: 10px;
+    margin: 8px 0 0;
+  }
+
+  dl div {
+    display: grid;
+    grid-template-columns: 90px minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  dt {
+    color: var(--haze);
+  }
+
+  dd {
+    margin: 0;
+  }
+
+  ol {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding-left: 1.4em;
+  }
+
+  li::marker {
+    color: var(--accent);
+    font-weight: 700;
+  }
+</style>

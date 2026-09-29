@@ -38,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # To start the website workflow.
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,3 +61,10 @@ jobs:
           fi
           git log --format='- %s (%h)' "$range" > release-notes.md
           gh release create "$RELEASE_TAG" release/build/Release/Unishade.exe release/build/installer/Unishade-Setup-*.exe release/LICENSE --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
+      # A release made with the workflow's token doesn't start other workflows, so the website is started by hand
+      # to point its download buttons at the new Setup.
+      - name: Update the website
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run pages.yml

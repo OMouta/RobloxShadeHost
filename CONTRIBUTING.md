@@ -38,6 +38,18 @@ GitHub Actions builds and tests the EXE for pushes and pull requests. You can al
 
 To publish a release, push a version tag such as `v0.1.0`. After the build and tests pass, the workflow creates a GitHub release with the EXE attached. Branch pushes and manual builds do not publish releases.
 
+## Website
+
+[unishade.me](https://unishade.me) is built from `website/` with Astro. The docs are the Markdown files in `website/src/content/docs/`.
+
+```powershell
+cd website
+pnpm install
+pnpm dev
+```
+
+The download buttons link to the newest release's Setup, which the build looks up on GitHub. Set `GITHUB_REPOSITORY` to build against another repository. A push to main that changes the site deploys it, and publishing a release deploys it again so the buttons point at the new Setup.
+
 ## Code changes
 
 Game discovery lives in `src/game_integration.cpp`. `FindGameTarget()` uses a manual window selection or the executable list saved in `games.ini`, with Roblox enabled by default. Custom games match their full executable path; Roblox matches its filename because its install folder changes with updates. Discovery queries executable metadata without reading game memory or injecting code.

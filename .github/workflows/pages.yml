@@ -1,6 +1,6 @@
 name: Website
 
-# Only when the site changes, or when started from the Actions tab.
+# When the site changes, when the release workflow publishes a release, or when started from the Actions tab.
 on:
   push:
     branches: [main]
@@ -39,6 +39,9 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build
         run: pnpm build
+        env:
+          # The download buttons read the newest release from the API.
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: website/dist
