@@ -1,128 +1,68 @@
 ---
 import { Image } from 'astro:assets';
 import Base from '../layouts/Base.astro';
-import Compare from '../components/Compare.astro';
+import DownloadButton from '../components/DownloadButton.astro';
+import banner from '../../../assets/unishade-banner.png';
 import menu from '../assets/menu-effects-crop.jpg';
-import { links, page } from '../links';
+import launcher from '../content/docs/images/launcher.png';
+import setup from '../content/docs/images/setup-addons.png';
 ---
 
 <Base
   title="Unishade | Universal post-processing without injection."
-  description="External post-processing for games where ReShade injection is unavailable or undesirable. Choose a game window and apply ReShade effects."
+  description="Use ReShade on games that won't let you install it. Every official effect, ready-made presets and a menu right over the game."
   overlay
 >
   <main>
     <section class="hero">
       <div class="stage">
-        <Compare />
+        <Image src={banner} widths={[900, 1800]} sizes="100vw" alt="Six games with Unishade effects" class="banner" loading="eager" />
       </div>
       <div class="lede">
         <h1>Universal post-processing without injection.</h1>
-        <p>Choose your game window and apply ReShade effects. Formerly RobloxShadeHost.</p>
-        <div class="actions">
-          <a class="button button-primary" href={links.download}>Download for Windows</a>
-          <span class="dim">Free for Windows 10 and 11</span>
-        </div>
+        <p>Use ReShade on games that won't let you install it. Formerly RobloxShadeHost.</p>
+        <DownloadButton />
       </div>
+    </section>
+
+    <section class="games">
+      <div class="games-text">
+        <h2>Add your game in two clicks</h2>
+        <p>Open your game, click Add game and pick its window. Next time you play, your effects are already on.</p>
+        <p class="dim">Works with games in windowed or borderless mode.</p>
+        <a href="/docs/games/">More about games</a>
+      </div>
+      <Image src={launcher} widths={[620, 1240]} sizes="(max-width: 900px) 100vw, 620px" alt="The Unishade window with three saved games" class="shot" />
     </section>
 
     <section class="menu">
       <div class="menu-text">
         <h2>Press Home and pick a look</h2>
-        <p>
-          The menu opens over the game while it keeps running. Switch presets, turn effects on and drag their settings while you watch
-          the result, then press Home again to keep playing.
-        </p>
+        <p>The menu opens right over the game. Switch presets, turn effects on and tweak them while you watch.</p>
         <ul>
-          <li>Save your own presets, or duplicate one to start from.</li>
-          <li>Search every installed effect and change its settings.</li>
-          <li>Hold Compare to see the game without effects for a moment.</li>
-          <li>Change the shortcuts without restarting.</li>
+          <li>Save your own presets or import shared ones</li>
+          <li>Every ReShade effect, searchable</li>
+          <li>Hold F7 to compare with the original</li>
+          <li>Before and after screenshots from the same frame</li>
         </ul>
       </div>
-      <Image
-        src={menu}
-        widths={[640, 1000]}
-        sizes="(max-width: 900px) 100vw, 60vw"
-        alt="The Unishade menu over Roblox, with an effect's settings open"
-        class="menu-shot"
-      />
-    </section>
-
-    <section class="included">
-      <h2>What Setup installs</h2>
-      <dl>
-        <div>
-          <dt>Every ReShade effect</dt>
-          <dd>Every package on ReShade's official list.</dd>
-        </div>
-        <div>
-          <dt>Presets for Roblox</dt>
-          <dd>Ready-made looks to start from. People share more on Discord.</dd>
-        </div>
-        <div>
-          <dt>Depth estimation, optional</dt>
-          <dd>Roblox keeps its depth to itself, so an AI model estimates it from the picture. Ambient occlusion, depth of field and fog work from that.</dd>
-        </div>
-        <div>
-          <dt>DLSS5, optional</dt>
-          <dd>NVIDIA's DLSS5 through RenoDX's add-on, for RTX graphics cards. <a href={page('dlss5/')}>DLSS5 setup</a></dd>
-        </div>
-      </dl>
-    </section>
-
-    <section class="outside">
-      <div class="outside-text">
-        <h2>Effects outside the game process</h2>
-        <p>
-          Windows gives Unishade a copy of the game's picture. ReShade runs in Unishade's own process, draws effects on that copy,
-          and Unishade shows the result over the game window. It does not inject DLLs into the game or modify game files during normal operation.
-        </p>
-        <p>For games where traditional ReShade injection is unavailable or undesirable. Use normal ReShade where it already works for you.</p>
-        <p class="dim">Copying and processing every frame costs some frame rate.</p>
-      </div>
-      <svg class="flow" viewBox="0 0 560 150" role="img" aria-label="The game's picture goes to Unishade, which draws the effects and shows the result over the game">
-        <defs>
-          <linearGradient id="spectrum" x1="0" x2="1">
-            <stop offset="0" stop-color="#ff4860" />
-            <stop offset="0.17" stop-color="#ff9e36" />
-            <stop offset="0.33" stop-color="#f8e44c" />
-            <stop offset="0.5" stop-color="#54de7a" />
-            <stop offset="0.67" stop-color="#3ec6ff" />
-            <stop offset="0.83" stop-color="#546eff" />
-            <stop offset="1" stop-color="#ba5cff" />
-          </linearGradient>
-          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-            <path d="M0 0 L10 5 L0 10" fill="none" stroke="#a3a6c8" stroke-width="1.5" />
-          </marker>
-        </defs>
-        <rect x="2" y="40" width="130" height="70" rx="12" fill="none" stroke="#2a2d52" stroke-width="2" />
-        <text x="67" y="80" text-anchor="middle">Game</text>
-        <line x1="138" y1="75" x2="206" y2="75" stroke="#a3a6c8" stroke-width="1.5" marker-end="url(#arrow)" />
-        <text x="172" y="62" text-anchor="middle" class="small">picture</text>
-        <rect x="214" y="30" width="170" height="90" rx="12" fill="#161834" stroke="url(#spectrum)" stroke-width="2.5" />
-        <text x="299" y="70" text-anchor="middle">Unishade</text>
-        <text x="299" y="92" text-anchor="middle" class="small">+ ReShade</text>
-        <line x1="390" y1="75" x2="420" y2="75" stroke="#a3a6c8" stroke-width="1.5" marker-end="url(#arrow)" />
-        <rect x="428" y="40" width="130" height="70" rx="12" fill="none" stroke="#2a2d52" stroke-width="2" />
-        <text x="493" y="72" text-anchor="middle">Over the</text>
-        <text x="493" y="92" text-anchor="middle">game</text>
-      </svg>
+      <Image src={menu} widths={[640, 900]} sizes="(max-width: 900px) 100vw, 60vw" alt="The Unishade menu with an effect's settings open" class="shot" />
     </section>
 
     <section class="install">
-      <h2>Set it up in a few minutes</h2>
-      <ol>
-        <li>Download Unishade Setup and run it.</li>
-        <li>Pick the add-ons you want. Setup downloads ReShade, the effects and the presets.</li>
-        <li>Start Unishade. Roblox is detected automatically; add other games in Auto-detect games.</li>
-        <li>Return to the game and press Home.</li>
-      </ol>
-      <div class="actions">
-        <a class="button button-primary" href={links.download}>Download for Windows</a>
-        <a class="button button-secondary" href={page('docs/')}>Read the install guide</a>
+      <div class="install-text">
+        <h2>One installer, a few minutes</h2>
+        <p>Setup brings ReShade, every official effect and a set of presets. Depth estimation and DLSS5 are there if you want them.</p>
+        <ol>
+          <li>Download Setup and run it.</li>
+          <li>Pick your add-ons.</li>
+          <li>Open your game and add it in Unishade.</li>
+          <li>Press Home in the game.</li>
+        </ol>
+        <DownloadButton />
+        <a href="/docs/">Read the install guide</a>
       </div>
-      <p class="dim">Needs 64-bit Windows 10 version 1903 or newer, or Windows 11.</p>
+      <Image src={setup} widths={[900, 1800]} sizes="(max-width: 900px) 100vw, 55vw" alt="Setup's add-ons page" class="shot" />
     </section>
   </main>
 </Base>
@@ -131,8 +71,22 @@ import { links, page } from '../links';
   /* The picture stays clear of text. The headline sits under it. */
   .stage {
     position: relative;
-    height: clamp(380px, 60svh, 720px);
-    isolation: isolate;
+    height: clamp(320px, 55svh, 640px);
+  }
+
+  .banner {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  /* Fades the picture into the page above the headline. */
+  .stage::after {
+    content: '';
+    position: absolute;
+    inset: auto 0 0;
+    height: 35%;
+    background: linear-gradient(to bottom, transparent, var(--night));
   }
 
   .lede {
@@ -147,28 +101,31 @@ import { links, page } from '../links';
     font-size: clamp(1.9rem, 3.9vw, 3.5rem);
   }
 
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 14px 20px;
-  }
-
   section:not(.hero) {
     width: var(--page);
     margin: clamp(96px, 13vw, 160px) auto 0;
   }
 
-  .menu {
+  .games,
+  .menu,
+  .install {
     display: grid;
     grid-template-columns: minmax(0, 5fr) minmax(0, 8fr);
     gap: clamp(32px, 5vw, 64px);
     align-items: center;
   }
 
-  .menu-text {
+  /* The launcher is a small window, so it gets less room than the text. */
+  .games {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 620px);
+  }
+
+  .games-text,
+  .menu-text,
+  .install-text {
     display: grid;
     gap: 20px;
+    justify-items: start;
     max-width: 42ch;
   }
 
@@ -183,79 +140,11 @@ import { links, page } from '../links';
     color: var(--accent);
   }
 
-  .menu-shot {
-    width: 100%;
-    border-radius: var(--radius);
-    border: 1px solid var(--line);
-  }
-
-  .included h2 {
-    margin-bottom: 36px;
-  }
-
-  dl {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 36px clamp(32px, 6vw, 88px);
-    margin: 0;
-  }
-
-  dt {
-    font-size: 1.2rem;
-    font-weight: 700;
-    font-stretch: 112%;
-  }
-
-  dd {
-    margin: 6px 0 0;
-    max-width: 46ch;
-    color: var(--haze);
-  }
-
-  .outside {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: clamp(32px, 6vw, 88px);
-    align-items: center;
-  }
-
-  .outside-text {
-    display: grid;
-    gap: 18px;
-    max-width: 48ch;
-  }
-
-  .flow {
-    width: 100%;
-    height: auto;
-  }
-
-  .flow text {
-    fill: var(--ink);
-    font-family: inherit;
-    font-size: 16px;
-    font-weight: 600;
-  }
-
-  .flow text.small {
-    fill: var(--haze);
-    font-size: 13px;
-    font-weight: 400;
-  }
-
-  .install {
-    display: grid;
-    gap: 24px;
-    justify-items: start;
-  }
-
   .install ol {
     display: grid;
-    gap: 12px;
-    max-width: 60ch;
+    gap: 10px;
     margin: 0;
     padding-left: 1.4em;
-    font-size: 1.1rem;
   }
 
   .install li::marker {
@@ -263,10 +152,16 @@ import { links, page } from '../links';
     font-weight: 700;
   }
 
+  .shot {
+    width: 100%;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+  }
+
   @media (max-width: 900px) {
+    .games,
     .menu,
-    .outside,
-    dl {
+    .install {
       grid-template-columns: minmax(0, 1fr);
     }
   }

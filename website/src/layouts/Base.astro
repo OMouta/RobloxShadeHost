@@ -3,7 +3,8 @@ import '../styles/global.css';
 import { Image } from 'astro:assets';
 import logo from '../../../assets/UnishadeSmall.png';
 import icon from '../../../assets/Unishade.ico?url';
-import { links, page } from '../links';
+import banner from '../../../assets/unishade-banner1.png';
+import { links } from '../links';
 
 interface Props {
   title: string;
@@ -29,18 +30,20 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={new URL(banner.src, Astro.site)} />
+    <meta name="twitter:card" content="summary_large_image" />
   </head>
   <body>
     <header class:list={['nav', { overlay }]}>
-      <a class="brand" href={page()} aria-label="Unishade home">
+      <a class="brand" href="/" aria-label="Unishade home">
         <Image src={logo} alt="" width={52} class="brand-logo" />
         <span class="brand-name">Unishade</span>
       </a>
       <nav aria-label="Main">
-        <a href={page('docs/')}>Docs</a>
+        <a href="/docs/">Docs</a>
         <a href={links.discord}>Discord</a>
         <a href={links.github}>GitHub</a>
-        <a class="button button-primary" href={links.download}>Download</a>
+        <a class="button button-primary" href="/download/">Download</a>
       </nav>
     </header>
 
@@ -52,7 +55,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
           Need help? Ask on <a href={links.discord}>Discord</a>. Only the newest version is supported, and updating keeps your presets.
         </p>
         <p class="dim">
-          Effects run on <a href={links.reshade}>ReShade</a> by crosire. Unishade is not affiliated with Roblox.{' '}
+          Effects run on <a href={links.reshade}>ReShade</a> by crosire. Unishade isn't affiliated with the games it runs on.{' '}
           <a href={links.github}>Source on GitHub</a>, <a href={links.license}>MIT license</a>.
         </p>
       </div>

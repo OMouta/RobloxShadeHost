@@ -1,0 +1,17 @@
+---
+import { megabytes, release } from '../release';
+---
+
+<div class="download">
+  <a class="button button-primary" href={release.setup.url}>Download for Windows</a>
+  <span class="dim">Version {release.version} · {megabytes(release.setup.size)} · Windows 10 and 11</span>
+</div>
+
+<style>
+  .download {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px 20px;
+  }
+</style>
