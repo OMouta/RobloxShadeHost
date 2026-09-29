@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'docs/**'
+      - 'website/**'
       - 'INSTALLATION.md'
       - 'DLSS5-README.md'
       - 'assets/**'
@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: docs
+        working-directory: website
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -36,14 +36,14 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: docs/pnpm-lock.yaml
+          cache-dependency-path: website/pnpm-lock.yaml
       - name: Install
         run: pnpm install --frozen-lockfile
       - name: Build
         run: pnpm build
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/dist
+          path: website/dist
 
   deploy:
     needs: build
