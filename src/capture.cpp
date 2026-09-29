@@ -53,7 +53,7 @@ void StartCapture(HWND target)
 
     g.session.StartCapture();
     g.target = target;
-    Log(LogLevel::Info, L"Capturing Roblox (%dx%d)", g.poolSize.Width, g.poolSize.Height);
+    Log(LogLevel::Info, L"Capturing %ls (%dx%d)", g.activeGame->name.c_str(), g.poolSize.Width, g.poolSize.Height);
     ShowStartHint();
 }
 
@@ -62,11 +62,14 @@ void StopCapture()
     SetEditMode(false);
     g.frameArrived.revoke();
     g.latestFrame = nullptr;
-    g.session.Close();
+    if (g.session)
+        g.session.Close();
     g.session = nullptr;
-    g.pool.Close();
+    if (g.pool)
+        g.pool.Close();
     g.pool = nullptr;
     g.target = nullptr;
+    g.activeGame.reset();
 }
 
 void PresentLatestFrame()

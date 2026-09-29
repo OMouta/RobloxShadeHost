@@ -1,15 +1,15 @@
 #pragma once
 
-// Creates the overlay window that hosts the swapchain over Roblox.
+// Creates the overlay window that hosts the swapchain over the game.
 void CreateOverlayWindow();
 
-// Switches the overlay between passing clicks through to Roblox and receiving them itself, for the menu.
+// Switches the overlay between passing clicks through to the game and receiving them itself, for the menu.
 void SetEditMode(bool enabled);
 
-// Leaves edit mode and brings Roblox back to the front.
-void ReturnToRoblox();
+// Leaves edit mode and brings the game back to the front.
+void ReturnToGame();
 
-// Keeps the overlay exactly over Roblox while Roblox is the foreground window (or while editing).
+// Keeps the overlay exactly over the game while the game is the foreground window (or while editing).
 void UpdateOverlay();
 
 // Turns capture and the overlay off or on, like the overlay shortcut.

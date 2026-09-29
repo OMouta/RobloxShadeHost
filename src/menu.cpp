@@ -226,9 +226,9 @@ constexpr struct
     const char* title;
     const char* description;
 } kShortcutText[] = {
-    { "Open the menu", "Press it again, or Escape, to go back to Roblox." },
-    { "Overlay off and on", "Shows Roblox without effects and stops capturing it." },
-    { "Compare while held", "Shows Roblox without effects for as long as you hold it." },
+    { "Open the menu", "Press it again, or Escape, to go back to the game." },
+    { "Overlay off and on", "Shows the game without effects and stops capturing it." },
+    { "Compare while held", "Shows the game without effects for as long as you hold it." },
     { "Screenshot", "Saves what you see, without the menu." },
     { "Before and after screenshots", "Saves the same moment with and without effects." },
     { "Next preset", "Switches to the next preset in the Presets tab." },
@@ -1589,7 +1589,7 @@ void SettingsTab()
         if (shortcut.always)
             Text("Other programs will not receive " + key + " while Unishade runs.", kWarning, 13.5f);
         else if (typing)
-            Text("Roblox will not receive " + key + " while Unishade runs.", kWarning, 13.5f);
+            Text("The game will not receive " + key + " while Unishade runs.", kWarning, 13.5f);
     }
     if (Link("Reset to defaults", kDim))
     {
@@ -1822,7 +1822,7 @@ void Footer(ImVec2 origin, ImVec2 size)
     Button("Compare", ImVec2(S(100), S(34)));
     Compare(ImGui::IsItemActive());
     if (ImGui::IsItemHovered() && !m.comparing)
-        ImGui::SetTooltip("Hold to see Roblox without effects");
+        ImGui::SetTooltip("Hold to see the game without effects");
     ImGui::SameLine(0, S(8));
     if (Button("ReShade", ImVec2(S(90), S(34))))
         m.openReShade = true;
@@ -1864,7 +1864,7 @@ void Footer(ImVec2 origin, ImVec2 size)
 
     // The menu shortcut, which also leaves.
     PushSize(13.5f);
-    const char* label = "Back to Roblox";
+    const char* label = "Back to the game";
     const std::string key = Utf8(g.inputHotkey);
     const ImVec2 labelSize = ImGui::CalcTextSize(label);
     ImGui::PopFont();

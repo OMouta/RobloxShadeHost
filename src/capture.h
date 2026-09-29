@@ -5,7 +5,7 @@
 // D3D11 device shared by the capture pool and the overlay swapchain.
 void CreateDevice();
 
-// Starts Windows.Graphics.Capture on the Roblox window and records it as the target.
+// Starts Windows.Graphics.Capture on the target game window and records it as the target.
 void StartCapture(HWND target);
 
 // Ends capture, releases input, and clears the target.

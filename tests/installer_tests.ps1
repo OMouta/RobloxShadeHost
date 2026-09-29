@@ -66,9 +66,10 @@ Set-Content "$legacy/RobloxShadeHost-Setup.exe" 'old setup'
 Set-Content "$legacy/legacy-component.txt" 'previously installed component'
 Set-Content "$legacy/RobloxShadeHost-Setup.files" "RobloxShadeHost.exe`nRobloxShadeHost-Setup.exe`nlegacy-component.txt"
 Set-Content "$legacy/RobloxShadeHost.ini" "[Input]`nToggleKey=F8`n[Menu]`nAutoSavePreset=0"
+Set-Content "$legacy/games.ini" "[Games]`nCount=0"
 Set-Content "$legacy/ReShade.ini" "[GENERAL]`nPresetPath=.\presets\Custom.ini"
 Set-Content "$legacy/presets/Custom.ini" 'Techniques=Custom@Custom.fx'
-$userFiles = @('RobloxShadeHost.ini', 'ReShade.ini', 'presets/Custom.ini')
+$userFiles = @('RobloxShadeHost.ini', 'ReShade.ini', 'presets/Custom.ini', 'games.ini')
 $userHashes = @{}
 foreach ($file in $userFiles) { $userHashes[$file] = (Get-FileHash "$legacy/$file").Hash }
 $null = Invoke-TestInstaller 'legacy' 'host'

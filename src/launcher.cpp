@@ -155,19 +155,19 @@ void Describe()
     if (!g.captureEnabled)
     {
         l.statusTitle = L"Overlay off";
-        l.statusDetail = g.hotkeys.overlay.key ? L"Press " + g.overlayHotkey + L" in Roblox to turn it back on." : L"";
+        l.statusDetail = g.hotkeys.overlay.key ? L"Press " + g.overlayHotkey + L" in the game to turn it back on." : L"";
         l.statusColor = theme::kDim;
     }
     else if (g.target)
     {
-        l.statusTitle = L"Running on Roblox";
-        l.statusDetail = AddonRegistered() ? L"Press " + g.inputHotkey + L" in Roblox to open the menu." : L"The menu is off. See below.";
+        l.statusTitle = L"Running on " + g.activeGame->name;
+        l.statusDetail = AddonRegistered() ? L"Press " + g.inputHotkey + L" in the game to open the menu." : L"The menu is off. See below.";
         l.statusColor = theme::kSuccess;
     }
     else
     {
-        l.statusTitle = L"Waiting for Roblox";
-        l.statusDetail = L"Open a Roblox experience. The overlay starts by itself.";
+        l.statusTitle = L"Waiting for a game";
+        l.statusDetail = L"Open one of your saved games. The overlay starts by itself.";
         l.statusColor = theme::kAccent;
     }
     l.update = AvailableUpdate();
@@ -536,7 +536,8 @@ void UpdateLauncher()
     if (!g.launcher)
         return;
     const Update update = AvailableUpdate();
-    const std::wstring shown = std::to_wstring(g.captureEnabled) + L"|" + std::to_wstring(g.target != nullptr) + L"|" +
+    const std::wstring shown = std::to_wstring(g.captureEnabled) + L"|" + (g.activeGame ? g.activeGame->name : L"") + L"|" +
+                               std::to_wstring(g.target != nullptr) + L"|" +
                                std::to_wstring(NoticeVersion()) + L"|" + update.version + L"|" + g.inputHotkey + L"|" + g.overlayHotkey;
     if (shown == l.shown)
         return;

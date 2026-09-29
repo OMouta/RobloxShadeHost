@@ -101,7 +101,7 @@ void DepthModel::Load(const std::wstring& directory, const std::wstring& modelFi
     check(api->SetSessionExecutionMode(options, ORT_SEQUENTIAL));
     check(api->DisableMemPattern(options));
     check(api->SetSessionGraphOptimizationLevel(options, ORT_ENABLE_ALL));
-    // Otherwise idle worker threads spin and take CPU time from Roblox.
+    // Otherwise idle worker threads spin and take CPU time from the game.
     check(api->AddSessionConfigEntry(options, "session.intra_op.allow_spinning", "0"));
     // DirectML compiles the graph for fixed shapes. Left dynamic, the model runs many times slower.
     check(api->AddFreeDimensionOverrideByName(options, "batch_size", 1));

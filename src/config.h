@@ -33,7 +33,7 @@ struct Shortcut
     int id;
     const wchar_t* name; // the entry in RobloxShadeHost.ini
     const wchar_t* fallback;
-    // Held for as long as the host runs. The others only while Roblox or the menu is in front, so other
+    // Held for as long as the host runs. The others only while the game or the menu is in front, so other
     // programs keep the keys.
     bool always;
 };
@@ -57,7 +57,7 @@ void LoadInputHotkeys();
 void RegisterHotkeys();
 
 // Holding a bare key such as Home all the time would break it in every other program, so most shortcuts are
-// only registered while Roblox or the menu is in front. Called every loop.
+// only registered while the game or the menu is in front. Called every loop.
 void UpdateInputHotkey();
 
 // Unregisters every shortcut until called with false, so the menu can read them as ordinary keys.

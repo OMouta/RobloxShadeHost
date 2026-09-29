@@ -110,7 +110,7 @@ void LoadInputHotkeys()
 
 void RegisterHotkeys()
 {
-    // Reports taken shortcuts now rather than on the first press in Roblox.
+    // Reports taken shortcuts now rather than on the first press in the game.
     for (const Shortcut& shortcut : kShortcuts)
     {
         if (Register(shortcut, g.hotkeys))

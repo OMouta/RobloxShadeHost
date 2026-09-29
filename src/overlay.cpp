@@ -8,7 +8,7 @@
 
 namespace
 {
-// WS_EX_LAYERED + WS_EX_TRANSPARENT is what makes clicks reach Roblox. Returning HTTRANSPARENT from
+// WS_EX_LAYERED + WS_EX_TRANSPARENT is what makes clicks reach the game. Returning HTTRANSPARENT from
 // WM_NCHITTEST only passes input to windows owned by the same thread.
 constexpr DWORD kPassThroughStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
 constexpr DWORD kEditStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
@@ -34,7 +34,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             break;
         case kEditModeHotkey:
             if (g.editMode)
-                ReturnToRoblox();
+                ReturnToGame();
             else
                 OpenMenu();
             break;
@@ -53,7 +53,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case kLeaveMenuMessage:
         if (g.editMode)
-            ReturnToRoblox();
+            ReturnToGame();
         return 0;
     case kOpenMenuMessage:
         OpenMenu();
@@ -105,10 +105,10 @@ void SetEditMode(bool enabled)
         OpenReShadeMenu(false);
         ResetMenu();
     }
-    Log(LogLevel::Info, !enabled ? L"Input returned to Roblox." : AddonRegistered() ? L"Menu opened." : L"Input captured.");
+    Log(LogLevel::Info, !enabled ? L"Input returned to the game." : AddonRegistered() ? L"Menu opened." : L"Input captured.");
 }
 
-void ReturnToRoblox()
+void ReturnToGame()
 {
     SetEditMode(false);
     SetForegroundWindow(g.target);
@@ -118,7 +118,7 @@ void ToggleOverlay()
 {
     g.captureEnabled = !g.captureEnabled;
     if (!g.captureEnabled && g.editMode)
-        ReturnToRoblox();
+        ReturnToGame();
     UpdateOverlay();
     Log(LogLevel::Info, g.captureEnabled ? L"Overlay on." : L"Overlay off. Frame capture stopped.");
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-// The host's window outside the game. It shows whether the host is waiting for Roblox or running on it, and
+// The host's window outside the game. It shows whether the host is waiting for a game or running on one, and
 // what needs attention. Closing it quits the host. Drawn with GDI+, since ReShade would draw its effects on
 // any Direct3D window in this process.
 void CreateLauncher();

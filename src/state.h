@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "game_integration.h"
 
 #include <unknwn.h>
 #include <windows.h>
@@ -19,7 +20,7 @@ using winrt::Windows::Graphics::DirectX::DirectXPixelFormat;
 using winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 
 constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
-// Posted by the menu to give input back to Roblox. The menu runs inside ReShade's present, so window
+// Posted by the menu to give input back to the game. The menu runs inside ReShade's present, so window
 // changes wait for the message loop.
 constexpr UINT kLeaveMenuMessage = WM_APP + 1;
 // Posted when the menu's import dialog closes, since opening it closed the menu.
@@ -29,13 +30,16 @@ struct State
 {
     HWND overlay = nullptr;
     HWND target = nullptr;
+    std::optional<GameWindow> selectedGame;
+    std::optional<GameWindow> activeGame;
+    std::vector<AutoGame> autoGames;
     HWND launcher = nullptr;
     InputHotkeys hotkeys;
     // The shortcuts as shown to the user, such as Ctrl+F8.
     std::wstring inputHotkey;
     std::wstring overlayHotkey;
     bool editMode = false;
-    // The shortcuts that are only held while Roblox or the menu is in front.
+    // The shortcuts that are only held while the game or the menu is in front.
     bool gameHotkeysRegistered = false;
     // While the menu waits for a new shortcut, so the current ones arrive as ordinary keys.
     bool hotkeysSuspended = false;

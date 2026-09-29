@@ -1,6 +1,6 @@
-// Unishade: redraws the Roblox window in a D3D11 swapchain of its own, so ReShade can be
-// installed on this exe instead of Roblox. Roblox is only observed from outside, through window
-// enumeration and Windows.Graphics.Capture. Nothing is opened, read or loaded into its process.
+// Unishade redraws the target game window in its own D3D11 swapchain, so ReShade can be
+// installed on this exe. The game is only observed from outside, through window
+// enumeration, executable metadata and Windows.Graphics.Capture. No game memory is read or code injected.
 
 #include "addon.h"
 #include "capture.h"
@@ -11,7 +11,7 @@
 #include "menu.h"
 #include "overlay.h"
 #include "reshade_config.h"
-#include "roblox_window.h"
+#include "game_integration.h"
 #include "setup_check.h"
 #include "state.h"
 #include "update.h"
@@ -29,7 +29,7 @@ int Run()
 {
     if (!GraphicsCaptureSession::IsSupported())
     {
-        const wchar_t* message = L"Windows Graphics Capture is not available, and Unishade needs it to copy Roblox's picture. "
+        const wchar_t* message = L"Windows Graphics Capture is not available, and Unishade needs it to copy the game's picture. "
                                  L"Update Windows and your graphics driver.";
         Log(LogLevel::Error, L"%ls", message);
         ShowError(message);
@@ -37,6 +37,14 @@ int Run()
     }
 
     LoadInputHotkeys();
+    try
+    {
+        g.autoGames = LoadAutoGames(ExeDirectory() + L"games.ini");
+    }
+    catch (const std::exception& e)
+    {
+        Log(LogLevel::Warning, L"Could not load games.ini: %hs", e.what());
+    }
     if (ReShadeLoaded())
         PrepareReShadeConfig();
     CreateOverlayWindow();
@@ -49,7 +57,7 @@ int Run()
     RegisterHotkeys();
     CheckForUpdate();
     CreateLauncher();
-    Log(LogLevel::Info, L"Waiting for Roblox...");
+    Log(LogLevel::Info, L"Waiting for a supported game...");
 
     ULONGLONG nextSearch = 0;
     for (;;)
@@ -71,24 +79,30 @@ int Run()
         if (!g.captureEnabled && g.target)
             StopCapture();
 
-        if (g.target && !IsWindow(g.target))
+        if (g.target && !GameWindowExists(*g.activeGame))
         {
+            Log(LogLevel::Info, L"%ls closed.", g.activeGame->name.c_str());
             StopCapture();
-            Log(LogLevel::Info, L"Roblox closed. Waiting for Roblox...");
         }
 
-        if (g.captureEnabled && !g.target && GetTickCount64() >= nextSearch)
+        if (g.captureEnabled && (!g.target || (!g.selectedGame && !g.editMode)) && GetTickCount64() >= nextSearch)
         {
             nextSearch = GetTickCount64() + 500;
-            if (HWND roblox = FindRobloxWindow())
+            const HWND foreground = GetForegroundWindow();
+            if (const auto game = FindGameTarget(g.selectedGame, g.autoGames, foreground);
+                game && game->window != g.target && (!g.target || game->window == foreground))
             {
+                if (g.target)
+                    StopCapture();
+                g.activeGame = game;
                 try
                 {
-                    StartCapture(roblox);
+                    StartCapture(game->window);
                 }
                 catch (const winrt::hresult_error& e)
                 {
-                    Log(LogLevel::Error, L"Could not capture Roblox: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
+                    Log(LogLevel::Error, L"Could not capture %ls: %ls (0x%08X)", game->name.c_str(), e.message().c_str(), static_cast<unsigned>(e.code()));
+                    StopCapture();
                 }
             }
         }
@@ -112,11 +126,11 @@ int Run()
                     g.latestFrame = nullptr;
                     g.poolSize = size;
                     g.pool.Recreate(g.captureDevice, kPixelFormat, 2, size);
-                    Log(LogLevel::Info, L"Roblox resized to %dx%d", size.Width, size.Height);
+                    Log(LogLevel::Info, L"%ls resized to %dx%d", g.activeGame->name.c_str(), size.Width, size.Height);
                 }
             }
 
-            // Also re-presents on timeout, so the menu stays responsive if Roblox stops drawing.
+            // Also re-presents on timeout, so the menu stays responsive if the game stops drawing.
             if (g.overlayVisible && g.latestFrame)
                 PresentLatestFrame();
         }

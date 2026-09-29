@@ -741,9 +741,9 @@ void FailedPage()
 void FinishedPage()
 {
     Title("Unishade is ready");
-    Text("Open a Roblox experience and start Unishade from the Start menu, in either order.", kDim, 15);
+    Text("Start Unishade and open your game. Roblox is detected automatically.", kDim, 15);
     Spacing(14);
-    KeyLine(app.toggleKey, "opens the Unishade menu in Roblox. Press it again to go back to playing.");
+    KeyLine(app.toggleKey, "opens the Unishade menu over the game. Press it again to go back to playing.");
     if (app.overlayToggleKey.key)
         KeyLine(app.overlayToggleKey, "turns the overlay off and on.");
     Spacing(4);

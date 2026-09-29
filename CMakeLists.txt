@@ -47,6 +47,7 @@ add_executable(Unishade WIN32
     src/addon.cpp
     src/capture.cpp
     src/config.cpp
+    src/game_integration.cpp
     src/launcher.cpp
     src/log.cpp
     src/menu.cpp
@@ -54,7 +55,6 @@ add_executable(Unishade WIN32
     src/depth/depth_model.cpp
     src/overlay.cpp
     src/reshade_config.cpp
-    src/roblox_window.cpp
     src/setup_check.cpp
     src/update.cpp
     installer/net.cpp)
@@ -132,4 +132,11 @@ if(BUILD_TESTING)
     add_executable(ini_text_tests tests/ini_text_tests.cpp)
     target_compile_options(ini_text_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME ini_text_tests COMMAND ini_text_tests)
+
+    add_executable(game_window_tests tests/game_window_tests.cpp src/game_integration.cpp)
+    target_compile_definitions(game_window_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(game_window_tests PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(game_window_tests PRIVATE dwmapi)
+    add_test(NAME game_window_tests COMMAND game_window_tests)
+    set_tests_properties(game_window_tests PROPERTIES TIMEOUT 30)
 endif()
