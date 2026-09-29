@@ -658,7 +658,7 @@ void AddonsPage()
     Title("Choose what to install");
     Spacing(6);
     Card("reshade", "ReShade and effects", "Included", kDim, "ReShade from reshade.me and every effect package on ReShade's official list.", CardKind::Static);
-    if (Card("presets", "Presets", nullptr, 0, "Ready-made looks for Roblox. Pick one in the Unishade menu.", CardKind::Toggle, app.presets))
+    if (Card("presets", "Presets", nullptr, 0, "Ready-made looks to start from. Pick one in the Unishade menu.", CardKind::Toggle, app.presets))
         app.presets = !app.presets;
     Spacing(8);
     Text("Optional add-ons", kText, 15, ui.semibold);
