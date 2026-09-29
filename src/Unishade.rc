@@ -1,10 +1,6 @@
 #include "resource.h"
 
 1 ICON "../assets/Unishade.ico"
-// Found through the include path, which CMake points at the host's build folder.
-IDR_HOST RCDATA "Unishade.exe"
-IDR_LICENSE RCDATA "../LICENSE"
-IDR_CREDITS RCDATA "CREDITS.txt"
 IDR_LOGO RCDATA "../assets/Unishade.png"
 
 #include <winver.h>
@@ -22,10 +18,10 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "Unishade contributors\0"
-            VALUE "FileDescription", "Unishade Setup\0"
+            VALUE "FileDescription", "Unishade\0"
             VALUE "FileVersion", UNISHADE_VERSION "\0"
-            VALUE "InternalName", "Unishade Setup\0"
-            VALUE "OriginalFilename", "Unishade-Setup.exe\0"
+            VALUE "InternalName", "Unishade\0"
+            VALUE "OriginalFilename", "Unishade.exe\0"
             VALUE "ProductName", "Unishade\0"
             VALUE "ProductVersion", UNISHADE_VERSION "\0"
         END

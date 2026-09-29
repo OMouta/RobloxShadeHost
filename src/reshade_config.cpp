@@ -120,7 +120,8 @@ void PrepareReShadeConfig()
             const size_t end = std::min(value.find(',', start), value.size());
             const std::string name = value.substr(start, end - start);
             start = end + 1;
-            if (!name.empty() && name != "RobloxShadeHost" && name.rfind("RobloxShadeHost@", 0) != 0)
+            if (!name.empty() && name != "Unishade" && name.rfind("Unishade@", 0) != 0 &&
+                name != "RobloxShadeHost" && name.rfind("RobloxShadeHost@", 0) != 0)
                 kept += (kept.empty() ? "" : ",") + name;
         }
         if (kept != value)
@@ -139,7 +140,7 @@ void PrepareReShadeConfig()
     {
         PWSTR pictures = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, 0, nullptr, &pictures)))
-            ini.Set("SCREENSHOT", "SavePath", Utf8(std::wstring(pictures) + L"\\RobloxShadeHost\\"));
+            ini.Set("SCREENSHOT", "SavePath", Utf8(std::wstring(pictures) + L"\\Unishade\\"));
         CoTaskMemFree(pictures);
     }
     if (!ini.Get("STYLE", "StyleIndex", value))

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(RobloxShadeHost VERSION 0.5.1 LANGUAGES C CXX RC)
+project(Unishade VERSION 0.5.1 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,8 +41,8 @@ set(RESHADE_IMGUI_INCLUDE "${CMAKE_BINARY_DIR}/reshade-imgui")
 fetch_file("https://raw.githubusercontent.com/ocornut/imgui/v1.92.5-docking/imgui.h" 07562842049eaca4e47c3fcdcc9d8eafd442695b9856d6f6639e92e1bb6c737e "${RESHADE_IMGUI_INCLUDE}/imgui.h")
 fetch_file("https://raw.githubusercontent.com/ocornut/imgui/v1.92.5-docking/imconfig.h" 6e5687893594ebfaf8569280cfea83d025904a8a4e23bec073086f6c5bc8f7fb "${RESHADE_IMGUI_INCLUDE}/imconfig.h")
 
-add_executable(RobloxShadeHost WIN32
-    src/RobloxShadeHost.rc
+add_executable(Unishade WIN32
+    src/Unishade.rc
     src/main.cpp
     src/addon.cpp
     src/capture.cpp
@@ -58,11 +58,12 @@ add_executable(RobloxShadeHost WIN32
     src/setup_check.cpp
     src/update.cpp
     installer/net.cpp)
-target_include_directories(RobloxShadeHost PRIVATE "${RESHADE_INCLUDE}" "${RESHADE_IMGUI_INCLUDE}" "${ONNXRUNTIME_INCLUDE}")
-target_compile_definitions(RobloxShadeHost PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_definitions(RobloxShadeHost PRIVATE ROBLOX_SHADE_HOST_VERSION="${PROJECT_VERSION}")
-target_compile_options(RobloxShadeHost PRIVATE /W4 /permissive- /EHsc /bigobj)
-target_link_libraries(RobloxShadeHost PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi windowsapp gdi32 gdiplus version winhttp bcrypt shlwapi windowscodecs)
+target_include_directories(Unishade PRIVATE "${RESHADE_INCLUDE}" "${RESHADE_IMGUI_INCLUDE}" "${ONNXRUNTIME_INCLUDE}")
+target_compile_definitions(Unishade PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(Unishade PRIVATE UNISHADE_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(Unishade PRIVATE UNISHADE_VERSION_RESOURCE=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0)
+target_compile_options(Unishade PRIVATE /W4 /permissive- /EHsc /bigobj)
+target_link_libraries(Unishade PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi windowsapp gdi32 gdiplus version winhttp bcrypt shlwapi windowscodecs)
 
 # Setup draws its window with Dear ImGui and unpacks effect packages with miniz.
 set(IMGUI_DIR "${CMAKE_BINARY_DIR}/imgui")
@@ -106,18 +107,19 @@ add_executable(installer WIN32 EXCLUDE_FROM_ALL
     installer/install.cpp
     installer/net.cpp
     installer/setup.rc)
-# setup.rc embeds RobloxShadeHost.exe, found through the include path.
-target_include_directories(installer PRIVATE "$<TARGET_FILE_DIR:RobloxShadeHost>")
+# setup.rc embeds Unishade.exe, found through the include path.
+target_include_directories(installer PRIVATE "$<TARGET_FILE_DIR:Unishade>")
 target_compile_definitions(installer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_definitions(installer PRIVATE ROBLOX_SHADE_HOST_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(installer PRIVATE UNISHADE_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(installer PRIVATE UNISHADE_VERSION_RESOURCE=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0)
 target_compile_options(installer PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(installer PRIVATE setup_libraries d3d11 dxgi d3dcompiler dwmapi windowscodecs winhttp bcrypt imm32 delayimp)
 # Loaded from System32 at startup instead, see wWinMain.
 target_link_options(installer PRIVATE /DELAYLOAD:d3d11.dll)
-add_dependencies(installer RobloxShadeHost)
+add_dependencies(installer Unishade)
 # The generator expression keeps multi-config generators from adding a Release folder.
 set_target_properties(installer PROPERTIES
-    OUTPUT_NAME "RobloxShadeHost-Setup-${PROJECT_VERSION}"
+    OUTPUT_NAME "Unishade-Setup-${PROJECT_VERSION}"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/installer$<0:>")
 
 include(CTest)

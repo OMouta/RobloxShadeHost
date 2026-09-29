@@ -53,12 +53,12 @@ void Check()
 {
     std::array<int, 3> current{};
     std::array<int, 3> newest{};
-    ParseVersion(ROBLOX_SHADE_HOST_VERSION, current);
+    ParseVersion(UNISHADE_VERSION, current);
     newest = current;
     std::string url;
 
     const std::atomic<bool> cancel = false;
-    const std::string json = Fetch(L"https://api.github.com/repos/OMouta/RobloxShadeHost/releases?per_page=30", cancel);
+    const std::string json = Fetch(L"https://api.github.com/repos/OMouta/Unishade/releases?per_page=30", cancel);
     // Each release object starts with its "url" and lists "html_url", "tag_name" and "prerelease" after it.
     for (size_t position = json.find("\"tag_name\""); position != std::string::npos; position = json.find("\"tag_name\"", position + 1))
     {
@@ -69,17 +69,17 @@ void Check()
         if (tag.size() > 1 && tag[0] == 'v' && ParseVersion(tag.substr(1), version) && stable && version > newest)
         {
             newest = version;
-            url = "https://github.com/OMouta/RobloxShadeHost/releases/tag/" + std::string(tag);
+            url = "https://github.com/OMouta/Unishade/releases/tag/" + std::string(tag);
         }
     }
     if (newest == current)
     {
-        Log(LogLevel::Info, L"RobloxShadeHost is up to date.");
+        Log(LogLevel::Info, L"Unishade is up to date.");
         return;
     }
     const std::wstring version =
         std::to_wstring(newest[0]) + L"." + std::to_wstring(newest[1]) + L"." + std::to_wstring(newest[2]);
-    Log(LogLevel::Info, L"RobloxShadeHost %ls is available.", version.c_str());
+    Log(LogLevel::Info, L"Unishade %ls is available.", version.c_str());
     std::lock_guard lock(shared.mutex);
     shared.available = { version, Wide(url) };
 }

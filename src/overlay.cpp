@@ -83,11 +83,11 @@ void CreateOverlayWindow()
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    // Setup finds the running host by this class and closes it with WM_CLOSE.
+    // Keep the class name so existing installers can find and close the host.
     wc.lpszClassName = L"RobloxShadeHost";
     RegisterClassW(&wc);
 
-    g.overlay = CreateWindowExW(kPassThroughStyle, wc.lpszClassName, L"RobloxShadeHost", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr,
+    g.overlay = CreateWindowExW(kPassThroughStyle, wc.lpszClassName, L"Unishade", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr,
                                 wc.hInstance, nullptr);
     winrt::check_bool(g.overlay != nullptr);
     SetLayeredWindowAttributes(g.overlay, 0, 255, LWA_ALPHA);

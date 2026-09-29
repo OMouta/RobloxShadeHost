@@ -3,9 +3,9 @@
 #include "state.h"
 
 // Shown in ReShade's add-on list.
-extern "C" __declspec(dllexport) const char* NAME = "RobloxShadeHost";
+extern "C" __declspec(dllexport) const char* NAME = "Unishade";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Draws the RobloxShadeHost menu and supplies estimated depth when depth estimation is installed.";
+    "Draws the Unishade menu and supplies estimated depth when depth estimation is installed.";
 
 namespace
 {

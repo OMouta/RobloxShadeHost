@@ -68,8 +68,8 @@ void Write(LogLevel level, bool notice, const wchar_t* format, va_list args)
 
 void InitLog()
 {
-    path = ExeDirectory() + L"RobloxShadeHost.log";
-    MoveFileExW(path.c_str(), (ExeDirectory() + L"RobloxShadeHost.old.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    path = ExeDirectory() + L"Unishade.log";
+    MoveFileExW(path.c_str(), (ExeDirectory() + L"Unishade.old.log").c_str(), MOVEFILE_REPLACE_EXISTING);
     file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 
     // GetVersionEx reports Windows 8 to programs without a compatibility manifest.
@@ -78,7 +78,7 @@ void InitLog()
     if (auto get = reinterpret_cast<RtlGetVersion>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")))
         get(&version);
     char header[512];
-    snprintf(header, sizeof(header), "RobloxShadeHost %s on Windows %lu.%lu.%lu\r\n", ROBLOX_SHADE_HOST_VERSION,
+    snprintf(header, sizeof(header), "Unishade %s on Windows %lu.%lu.%lu\r\n", UNISHADE_VERSION,
              version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber);
     WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory().c_str()) + "\r\n\r\n");
 

@@ -31,9 +31,9 @@ struct InstallOptions
 struct Sources
 {
     std::wstring effects = L"https://raw.githubusercontent.com/crosire/reshade-shaders/list/EffectPackages.ini";
-    std::wstring presets = L"https://raw.githubusercontent.com/OMouta/RobloxShadeHost/main/presets";
-    std::wstring dlss5 = L"https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/downloads.ini";
-    std::wstring depth = L"https://github.com/OMouta/RobloxShadeHost/releases/download/depth-assets/downloads.ini";
+    std::wstring presets = L"https://raw.githubusercontent.com/OMouta/Unishade/main/presets";
+    std::wstring dlss5 = L"https://github.com/OMouta/Unishade/releases/download/dlss5-assets/downloads.ini";
+    std::wstring depth = L"https://github.com/OMouta/Unishade/releases/download/depth-assets/downloads.ini";
 };
 inline Sources sources;
 

@@ -1,4 +1,4 @@
-// RobloxShadeHost: redraws the Roblox window in a D3D11 swapchain of its own, so ReShade can be
+// Unishade: redraws the Roblox window in a D3D11 swapchain of its own, so ReShade can be
 // installed on this exe instead of Roblox. Roblox is only observed from outside, through window
 // enumeration and Windows.Graphics.Capture. Nothing is opened, read or loaded into its process.
 
@@ -22,14 +22,14 @@ namespace
 {
 void ShowError(const std::wstring& message)
 {
-    MessageBoxW(g.launcher, (message + L"\n\nMore details are in " + LogPath() + L".").c_str(), L"RobloxShadeHost", MB_ICONERROR);
+    MessageBoxW(g.launcher, (message + L"\n\nMore details are in " + LogPath() + L".").c_str(), L"Unishade", MB_ICONERROR);
 }
 
 int Run()
 {
     if (!GraphicsCaptureSession::IsSupported())
     {
-        const wchar_t* message = L"Windows Graphics Capture is not available, and RobloxShadeHost needs it to copy Roblox's picture. "
+        const wchar_t* message = L"Windows Graphics Capture is not available, and Unishade needs it to copy Roblox's picture. "
                                  L"Update Windows and your graphics driver.";
         Log(LogLevel::Error, L"%ls", message);
         ShowError(message);
@@ -128,7 +128,7 @@ int Run()
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
-    // A second copy would fight the first over Roblox and the shortcuts, so it shows the first one instead.
+    // Keep the original mutex name so old and new hosts cannot run together.
     const HANDLE instance = CreateMutexW(nullptr, TRUE, L"Local\\RobloxShadeHost");
     if (GetLastError() == ERROR_ALREADY_EXISTS)
     {
@@ -150,13 +150,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     }
     catch (const winrt::hresult_error& e)
     {
-        Log(LogLevel::Error, L"RobloxShadeHost stopped: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
-        ShowError(L"RobloxShadeHost stopped because of an error: " + std::wstring(e.message()));
+        Log(LogLevel::Error, L"Unishade stopped: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
+        ShowError(L"Unishade stopped because of an error: " + std::wstring(e.message()));
     }
     catch (const std::exception& e)
     {
-        Log(LogLevel::Error, L"RobloxShadeHost stopped: %hs", e.what());
-        ShowError(L"RobloxShadeHost stopped because of an error.");
+        Log(LogLevel::Error, L"Unishade stopped: %hs", e.what());
+        ShowError(L"Unishade stopped because of an error.");
     }
     CloseHandle(instance);
     // Releasing the swapchain makes ReShade wait for the effects it is still compiling, which can take minutes

@@ -1,13 +1,13 @@
 # Installer
 
-RobloxShadeHost Setup is a single native EXE built with the rest of the project. It embeds RobloxShadeHost.exe and downloads ReShade with full add-on support, every effect package from ReShade's official list, the presets from `presets/`, and optionally the DLSS5 or depth estimation add-on. Its window is drawn with [Dear ImGui](https://github.com/ocornut/imgui), and [miniz](https://github.com/richgel999/miniz) unpacks the effect packages. CMake downloads both at configure time and checks their hashes.
+Unishade Setup is a single native EXE built with the rest of the project. It embeds Unishade.exe and downloads ReShade with full add-on support, every effect package from ReShade's official list, the presets from `presets/`, and optionally the DLSS5 or depth estimation add-on. Its window is drawn with [Dear ImGui](https://github.com/ocornut/imgui), and [miniz](https://github.com/richgel999/miniz) unpacks the effect packages. CMake downloads both at configure time and checks their hashes.
 
 ```powershell
 cmake -S . -B build -A x64 -DBUILD_TESTING=ON
 cmake --build build --config Release --target installer
 ```
 
-Output: `build/installer/RobloxShadeHost-Setup-<version>.exe`.
+Output: `build/installer/Unishade-Setup-<version>.exe`.
 
 ## What it does
 
@@ -23,11 +23,13 @@ The DLSS5 component reads `downloads.ini` from the `dlss5-assets` release, and d
 
 DLSS5 and depth estimation do not work together, so the add-ons page allows only one. Installing removes the files of the add-on that is not selected.
 
-Reinstalling keeps `ReShade.ini`, presets and `RobloxShadeHost.ini`. The host writes `RobloxShadeHost.ini` on its first start and when shortcuts change in its menu.
+Reinstalling keeps `ReShade.ini`, presets and `RobloxShadeHost.ini`. The configuration and `RobloxShadeHost-Setup.files` manifest retain their original filenames to preserve existing install state without conversion. The host writes `RobloxShadeHost.ini` on its first start and when shortcuts change in its menu.
 
-Setup copies itself into the installation folder as `RobloxShadeHost-Setup.exe`, adds **RobloxShadeHost** and **RobloxShadeHost Setup** to the Start menu, and registers in Windows' app list under the key earlier Inno Setup versions used, so an update replaces their entry. Running it again from the Start menu offers updating and uninstalling. `RobloxShadeHost-Setup.files` lists the installed files for uninstalling. Uninstalling keeps `ReShade.ini`, presets and `RobloxShadeHost.ini` unless the user asks to delete them.
+Setup copies itself into the installation folder as `Unishade-Setup.exe`, adds **Unishade** and **Unishade Setup** to the Start menu, and registers in Windows' app list under the key earlier Inno Setup versions used, so an update replaces their entry. Running it again from the Start menu offers updating and uninstalling. `RobloxShadeHost-Setup.files` lists the installed files for uninstalling. Uninstalling keeps `ReShade.ini`, presets and `RobloxShadeHost.ini` unless the user asks to delete them.
 
 Credits open from the sidebar and are installed as `CREDITS.txt`. Removal requests go to **tiago@mouta.me**.
+
+The uninstall identity remains `{77125AF5-DF0A-485A-A633-E64FBD50E90C}_is1`. Upgrading RobloxShadeHost reuses its registered folder, replaces the old executables and Start menu shortcuts with Unishade entries, and keeps user data. New installations default to `%LOCALAPPDATA%\Programs\Unishade`. The host's original window classes and single-instance mutex remain stable for installer compatibility.
 
 ## Maintaining the downloads
 
@@ -37,12 +39,12 @@ To withdraw an add-on, remove its binary assets or upload a manifest with `enabl
 
 ## Command line
 
-Setup writes its log to `%TEMP%\RobloxShadeHost-Setup.log`, or to the file given with `--log`.
+Setup writes its log to `%TEMP%\Unishade-Setup.log`, or to the file given with `--log`.
 
 Unattended installation of the host only:
 
 ```powershell
-.\RobloxShadeHost-Setup-0.3.6.exe --silent --components host
+.\Unishade-Setup-0.3.6.exe --silent --components host
 ```
 
 To install ReShade unattended, first read its license and pass `--accept-reshade-license`. `--components` takes a comma-separated list of `reshade`, `presets`, `depth` and `dlss5`; without it, Setup installs `reshade,presets`. Setup stops if both add-ons are selected. The exit code is 0 on success and 1 on failure.
@@ -50,7 +52,7 @@ To install ReShade unattended, first read its license and pass `--accept-reshade
 | Option | Effect |
 | --- | --- |
 | `--silent` | Installs or uninstalls without a window. |
-| `--dir <folder>` | Installation folder. Defaults to the registered installation or `%LOCALAPPDATA%\Programs\RobloxShadeHost`. |
+| `--dir <folder>` | Installation folder. Defaults to the registered installation or `%LOCALAPPDATA%\Programs\Unishade`. |
 | `--components <list>` | What to install with `--silent`. |
 | `--accept-reshade-license` | Required with `--silent` when installing ReShade. |
 | `--portable` | Leaves out the Start menu shortcuts, the app list entry and the copy of Setup. |

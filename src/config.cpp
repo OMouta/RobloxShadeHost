@@ -8,6 +8,7 @@ namespace
 {
 std::wstring IniPath()
 {
+    // Keep the existing filename so upgrades retain shortcuts and menu settings.
     return ExeDirectory() + L"RobloxShadeHost.ini";
 }
 
@@ -117,7 +118,7 @@ void RegisterHotkeys()
         const std::wstring key = FormatHotkey(g.hotkeys.*shortcut.member);
         if (shortcut.member == &InputHotkeys::input)
             Log(LogLevel::Warning, L"%ls is in use by another program, so it cannot open the menu. Close that program, or change "
-                                   L"ToggleKey in RobloxShadeHost.ini and restart RobloxShadeHost.",
+                                   L"ToggleKey in RobloxShadeHost.ini and restart Unishade.",
                 key.c_str());
         else
             Log(LogLevel::Warning, L"%ls is in use by another program, so %ls is off. Pick another one in the menu's Settings.", key.c_str(),
@@ -160,7 +161,7 @@ bool AutoSavePresets()
 void SetAutoSavePresets(bool enabled)
 {
     if (!WritePrivateProfileStringW(L"Menu", L"AutoSavePresets", enabled ? L"1" : L"0", IniPath().c_str()))
-        Log(LogLevel::Warning, L"Could not save the auto-save setting to RobloxShadeHost.ini. It applies until RobloxShadeHost closes.");
+        Log(LogLevel::Warning, L"Could not save the auto-save setting to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys)

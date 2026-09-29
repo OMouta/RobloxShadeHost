@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/RobloxShadeHostSmall.png" alt="RobloxShadeHost logo" width="280">
+  <img src="assets/UnishadeSmall.png" alt="RobloxShadeHost logo" width="280">
 </p>
 
 <h1 align="center">RobloxShadeHost</h1>

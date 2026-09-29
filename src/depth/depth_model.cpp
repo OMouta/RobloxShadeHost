@@ -95,7 +95,7 @@ void DepthModel::Load(const std::wstring& directory, const std::wstring& modelFi
     if (FAILED(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue))))
         throw std::runtime_error("The GPU command queue could not be created.");
 
-    check(api->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "RobloxShadeHost", &env));
+    check(api->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "Unishade", &env));
     check(api->CreateSessionOptions(&options));
     // DirectML requires sequential execution without memory patterns.
     check(api->SetSessionExecutionMode(options, ORT_SEQUENTIAL));

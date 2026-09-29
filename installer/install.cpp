@@ -27,7 +27,7 @@ namespace
 constexpr wchar_t kUninstallKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{77125AF5-DF0A-485A-A633-E64FBD50E90C}_is1";
 // Lists the files Setup installed, relative to the installation folder, for uninstalling.
 constexpr wchar_t kManifest[] = L"RobloxShadeHost-Setup.files";
-constexpr wchar_t kSetupExe[] = L"RobloxShadeHost-Setup.exe";
+constexpr wchar_t kSetupExe[] = L"Unishade-Setup.exe";
 
 struct AddonInfo
 {
@@ -46,8 +46,8 @@ const struct
     const wchar_t* link;
     const wchar_t* target;
 } kShortcuts[] = {
-    { L"RobloxShadeHost.lnk", L"RobloxShadeHost.exe" },
-    { L"RobloxShadeHost Setup.lnk", kSetupExe },
+    { L"Unishade.lnk", L"Unishade.exe" },
+    { L"Unishade Setup.lnk", kSetupExe },
 };
 
 std::mutex logMutex;
@@ -328,8 +328,8 @@ void InstallReShade(const fs::path& work, const fs::path& files, const ReShadeRe
     progress.Status("Setting up ReShade");
     const fs::path folder = work / L"reshade";
     fs::create_directories(folder);
-    fs::copy_file(files / L"RobloxShadeHost.exe", folder / L"RobloxShadeHost.exe");
-    const DWORD code = RunHidden(L"\"" + setup.wstring() + L"\" --headless --api dxgi \"" + (folder / L"RobloxShadeHost.exe").wstring() + L"\"", work);
+    fs::copy_file(files / L"Unishade.exe", folder / L"Unishade.exe");
+    const DWORD code = RunHidden(L"\"" + setup.wstring() + L"\" --headless --api dxgi \"" + (folder / L"Unishade.exe").wstring() + L"\"", work);
     if (code != 0 || !fs::exists(folder / L"dxgi.dll") || !fs::exists(folder / L"ReShade.ini"))
         throw std::runtime_error(Format("ReShade's installer failed (exit code %lu).", code));
     fs::copy_file(folder / L"dxgi.dll", files / L"dxgi.dll");
@@ -446,9 +446,13 @@ bool DownloadAddon(const fs::path& work, const fs::path& files, const AddonInfo&
         for (size_t index = 0; index < addon.files.size(); ++index)
         {
             const wchar_t* file = addon.files[index];
-            const std::wstring url = IniString(manifest, file, L"url");
+            std::wstring url = IniString(manifest, file, L"url");
+            // Existing asset releases may still contain manifests published before the rename.
+            constexpr std::wstring_view legacy = L"https://github.com/OMouta/RobloxShadeHost/releases/download/";
+            if (url.rfind(legacy, 0) == 0)
+                url.replace(0, legacy.size(), L"https://github.com/OMouta/Unishade/releases/download/");
             const std::string hash = Lowercase(Utf8(IniString(manifest, file, L"sha256")));
-            if ((url.rfind(L"https://github.com/OMouta/RobloxShadeHost/releases/download/", 0) != 0 &&
+            if ((url.rfind(L"https://github.com/OMouta/Unishade/releases/download/", 0) != 0 &&
                  url.rfind(L"https://huggingface.co/", 0) != 0) ||
                 !IsSha256(hash))
                 throw std::runtime_error(std::string("The ") + addon.name + " download list is invalid.");
@@ -524,7 +528,7 @@ void Register(const fs::path& directory, const std::set<std::wstring>& files)
     RegDeleteTreeW(HKEY_CURRENT_USER, kUninstallKey);
     HKEY key = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kUninstallKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
-        throw std::runtime_error("Could not add RobloxShadeHost to Windows' list of apps.");
+        throw std::runtime_error("Could not add Unishade to Windows' list of apps.");
     const auto text = [&](const wchar_t* name, const std::wstring& value) {
         RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
     };
@@ -532,16 +536,16 @@ void Register(const fs::path& directory, const std::set<std::wstring>& files)
         RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
     };
     const std::wstring setup = L"\"" + (directory / kSetupExe).wstring() + L"\"";
-    text(L"DisplayName", L"RobloxShadeHost");
-    text(L"DisplayVersion", Wide(ROBLOX_SHADE_HOST_VERSION));
-    text(L"Publisher", L"RobloxShadeHost contributors");
-    text(L"DisplayIcon", (directory / L"RobloxShadeHost.exe").wstring());
+    text(L"DisplayName", L"Unishade");
+    text(L"DisplayVersion", Wide(UNISHADE_VERSION));
+    text(L"Publisher", L"Unishade contributors");
+    text(L"DisplayIcon", (directory / L"Unishade.exe").wstring());
     text(L"InstallLocation", directory.wstring());
     text(L"UninstallString", setup + L" --uninstall");
     text(L"QuietUninstallString", setup + L" --uninstall --silent");
     text(L"ModifyPath", setup);
-    text(L"URLInfoAbout", L"https://github.com/OMouta/RobloxShadeHost");
-    text(L"HelpLink", L"https://github.com/OMouta/RobloxShadeHost/issues");
+    text(L"URLInfoAbout", L"https://github.com/OMouta/Unishade");
+    text(L"HelpLink", L"https://github.com/OMouta/Unishade/issues");
     number(L"EstimatedSize", static_cast<DWORD>(bytes / 1024));
     number(L"NoRepair", 1);
     RegCloseKey(key);
@@ -582,10 +586,10 @@ void ForEachHost(const fs::path& directory, Callback callback)
 void CloseHost(const fs::path& directory)
 {
     ForEachHost(directory, [](HWND window, HANDLE process) {
-        SetupLog("Closing RobloxShadeHost");
+        SetupLog("Closing Unishade");
         PostMessageW(window, WM_CLOSE, 0, 0);
         if (WaitForSingleObject(process, 10000) != WAIT_OBJECT_0)
-            throw std::runtime_error("RobloxShadeHost is still running. Close it and try again.");
+            throw std::runtime_error("Unishade is still running. Close it and try again.");
         return true;
     });
 }
@@ -631,6 +635,13 @@ void Commit(const fs::path& files, const InstallOptions& options, Progress& prog
         fs::remove(directory / L"unins000.exe");
         fs::remove(directory / L"unins000.dat");
 
+        // Replace the old binaries in place; settings and the manifest keep their original names.
+        for (const wchar_t* legacy : { L"RobloxShadeHost.exe", L"RobloxShadeHost-Setup.exe" })
+        {
+            fs::remove(directory / legacy);
+            installed.erase(legacy);
+        }
+
         if (!options.portable)
         {
             const fs::path copy = directory / kSetupExe;
@@ -641,6 +652,8 @@ void Commit(const fs::path& files, const InstallOptions& options, Progress& prog
             const fs::path startMenu = StartMenuFolder();
             for (const auto& shortcut : kShortcuts)
                 CreateShortcut(startMenu / shortcut.link, directory / shortcut.target);
+            fs::remove(startMenu / L"RobloxShadeHost.lnk");
+            fs::remove(startMenu / L"RobloxShadeHost Setup.lnk");
             Register(directory, installed);
         }
         WriteManifest(directory, installed);
@@ -737,8 +750,8 @@ ReShadeRelease FetchReShadeRelease(const std::atomic<bool>& cancel)
 
 void Install(const InstallOptions& options, const ReShadeRelease& release, Progress& progress)
 {
-    SetupLog("Installing RobloxShadeHost " ROBLOX_SHADE_HOST_VERSION " to " + PathText(options.directory));
-    const fs::path work = fs::temp_directory_path() / (L"RobloxShadeHost-Setup-" + std::to_wstring(GetCurrentProcessId()));
+    SetupLog("Installing Unishade " UNISHADE_VERSION " to " + PathText(options.directory));
+    const fs::path work = fs::temp_directory_path() / (L"Unishade-Setup-" + std::to_wstring(GetCurrentProcessId()));
     struct Cleanup
     {
         fs::path path;
@@ -759,7 +772,7 @@ void Install(const InstallOptions& options, const ReShadeRelease& release, Progr
         throw std::runtime_error("Could not prepare " + PathText(work) + ": " + SystemError(e.code().value()) + ".");
     }
 
-    WriteFile(files / L"RobloxShadeHost.exe", Resource(IDR_HOST));
+    WriteFile(files / L"Unishade.exe", Resource(IDR_HOST));
     WriteFile(files / L"LICENSE", Resource(IDR_LICENSE));
     WriteFile(files / L"CREDITS.txt", Resource(IDR_CREDITS));
     if (options.reshade)
@@ -785,7 +798,7 @@ void Uninstall(const fs::path& directory, bool deleteUserFiles)
     const fs::path self = ModulePath();
     if (IsInside(self, directory))
     {
-        const std::wstring name = L"RobloxShadeHost-Setup-" + std::to_wstring(GetCurrentProcessId()) + L".exe";
+        const std::wstring name = L"Unishade-Setup-" + std::to_wstring(GetCurrentProcessId()) + L".exe";
         for (const fs::path& target : { fs::temp_directory_path() / name, directory.parent_path() / name })
             if (MoveFileExW(self.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING))
             {
@@ -802,6 +815,8 @@ void Uninstall(const fs::path& directory, bool deleteUserFiles)
         const fs::path startMenu = StartMenuFolder();
         for (const auto& shortcut : kShortcuts)
             fs::remove(startMenu / shortcut.link, ignored);
+        fs::remove(startMenu / L"RobloxShadeHost.lnk", ignored);
+        fs::remove(startMenu / L"RobloxShadeHost Setup.lnk", ignored);
         RegDeleteTreeW(HKEY_CURRENT_USER, kUninstallKey);
     }
 
@@ -822,7 +837,7 @@ void Uninstall(const fs::path& directory, bool deleteUserFiles)
         if (error)
             SetupLog("Could not delete " + Utf8(file) + ": " + SystemError(error.value()));
     }
-    for (const wchar_t* file : { kManifest, L"RobloxShadeHost.log", L"RobloxShadeHost.old.log" })
+    for (const wchar_t* file : { kManifest, L"Unishade.log", L"Unishade.old.log", L"RobloxShadeHost.log", L"RobloxShadeHost.old.log" })
         fs::remove(directory / file, ignored);
 
     // Deepest folders first, so parents are empty by the time they are tried. Folders with user files stay.
@@ -858,7 +873,7 @@ std::optional<Installation> FindInstallation()
 {
     const fs::path directory = RegisteredDirectory();
     std::error_code ignored;
-    if (directory.empty() || !fs::exists(directory / L"RobloxShadeHost.exe", ignored))
+    if (directory.empty() || (!fs::exists(directory / L"Unishade.exe", ignored) && !fs::exists(directory / L"RobloxShadeHost.exe", ignored)))
         return std::nullopt;
     wchar_t version[64]{};
     DWORD size = sizeof(version);
@@ -895,5 +910,5 @@ bool HostRunning(const fs::path& directory)
 
 void LaunchHost(const fs::path& directory)
 {
-    ShellExecuteW(nullptr, L"open", (directory / L"RobloxShadeHost.exe").c_str(), nullptr, directory.c_str(), SW_SHOWNORMAL);
+    ShellExecuteW(nullptr, L"open", (directory / L"Unishade.exe").c_str(), nullptr, directory.c_str(), SW_SHOWNORMAL);
 }

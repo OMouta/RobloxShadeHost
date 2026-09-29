@@ -7,7 +7,7 @@
 #include <string>
 #include <thread>
 
-// Help is given on the RobloxShadeHost Discord server.
+// Help is given on the Unishade Discord server.
 inline constexpr wchar_t kHelpUrl[] = L"https://discord.gg/wVbVUdENas";
 
 // Opens a file, folder or web page the way Explorer would. Runs on its own thread, since the host's thread is in

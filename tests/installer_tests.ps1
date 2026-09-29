@@ -1,5 +1,5 @@
 param(
-    [string]$Setup = (Get-ChildItem "$PSScriptRoot/../build/installer/RobloxShadeHost-Setup-*.exe" |
+    [string]$Setup = (Get-ChildItem "$PSScriptRoot/../build/installer/Unishade-Setup-*.exe" |
         Sort-Object LastWriteTime | Select-Object -Last 1).FullName,
     [switch]$DownloadDLSS,
     [switch]$DownloadDepth,
@@ -16,7 +16,7 @@ New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 function Invoke-Setup([string]$Name, [string[]]$Arguments) {
     $arguments = @('--silent', '--log', "`"$testRoot/$Name.log`"") + $Arguments
     if ($PresetsBaseUrl) { $arguments += @('--presets-url', $PresetsBaseUrl) }
-    return (Start-Process $Setup -ArgumentList $arguments -Wait -PassThru).ExitCode
+    return (Start-Process $Setup -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru).ExitCode
 }
 
 function Invoke-TestInstaller(
@@ -43,12 +43,54 @@ function Assert-File([string]$Directory, [string]$Name, [bool]$Expected = $true)
 }
 
 $hostOnly = Invoke-TestInstaller 'host-only' 'host'
-Assert-File $hostOnly 'RobloxShadeHost.exe'
+Assert-File $hostOnly 'Unishade.exe'
 Assert-File $hostOnly 'CREDITS.txt'
 Assert-File $hostOnly 'dxgi.dll' $false
 Assert-File $hostOnly 'nvngx_dlssnr.dll' $false
 Assert-File $hostOnly 'depth-anything-v2-small.onnx' $false
-Assert-File $hostOnly 'RobloxShadeHost-Setup.exe' $false
+Assert-File $hostOnly 'Unishade-Setup.exe' $false
+
+$hostMetadata = [Diagnostics.FileVersionInfo]::GetVersionInfo("$hostOnly/Unishade.exe")
+$setupMetadata = [Diagnostics.FileVersionInfo]::GetVersionInfo($Setup)
+if ($hostMetadata.ProductName -ne 'Unishade' -or $hostMetadata.FileDescription -ne 'Unishade' -or
+    $hostMetadata.OriginalFilename -ne 'Unishade.exe' -or $setupMetadata.ProductName -ne 'Unishade' -or
+    $setupMetadata.FileDescription -ne 'Unishade Setup') {
+    throw 'The executable or installer still has incorrect product metadata.'
+}
+
+# Upgrade an old installation in place without touching the real app registration or Start menu.
+$legacy = Join-Path $testRoot 'legacy'
+New-Item -ItemType Directory -Path "$legacy/presets" -Force | Out-Null
+Set-Content "$legacy/RobloxShadeHost.exe" 'old host'
+Set-Content "$legacy/RobloxShadeHost-Setup.exe" 'old setup'
+Set-Content "$legacy/legacy-component.txt" 'previously installed component'
+Set-Content "$legacy/RobloxShadeHost-Setup.files" "RobloxShadeHost.exe`nRobloxShadeHost-Setup.exe`nlegacy-component.txt"
+Set-Content "$legacy/RobloxShadeHost.ini" "[Input]`nToggleKey=F8`n[Menu]`nAutoSavePreset=0"
+Set-Content "$legacy/ReShade.ini" "[GENERAL]`nPresetPath=.\presets\Custom.ini"
+Set-Content "$legacy/presets/Custom.ini" 'Techniques=Custom@Custom.fx'
+$userFiles = @('RobloxShadeHost.ini', 'ReShade.ini', 'presets/Custom.ini')
+$userHashes = @{}
+foreach ($file in $userFiles) { $userHashes[$file] = (Get-FileHash "$legacy/$file").Hash }
+$null = Invoke-TestInstaller 'legacy' 'host'
+Assert-File $legacy 'Unishade.exe'
+Assert-File $legacy 'RobloxShadeHost.exe' $false
+Assert-File $legacy 'RobloxShadeHost-Setup.exe' $false
+foreach ($file in $userFiles) {
+    if ((Get-FileHash "$legacy/$file").Hash -ne $userHashes[$file]) {
+        throw "Upgrade changed the user's $file."
+    }
+}
+$legacyManifest = Get-Content "$legacy/RobloxShadeHost-Setup.files"
+if ($legacyManifest -notcontains 'Unishade.exe' -or $legacyManifest -notcontains 'legacy-component.txt' -or
+    $legacyManifest -contains 'RobloxShadeHost.exe' -or $legacyManifest -contains 'RobloxShadeHost-Setup.exe') {
+    throw 'Upgrade did not preserve and update the install manifest.'
+}
+if ((Invoke-Setup 'uninstall-legacy' @('--uninstall', '--dir', "`"$legacy`"")) -ne 0) {
+    throw "Uninstall after upgrade failed. See $testRoot/uninstall-legacy.log"
+}
+Assert-File $legacy 'Unishade.exe' $false
+Assert-File $legacy 'legacy-component.txt' $false
+foreach ($file in $userFiles) { Assert-File $legacy $file }
 
 $null = Invoke-TestInstaller 'no-license' 'reshade' $false
 $null = Invoke-TestInstaller 'dlss5-and-depth' 'reshade,dlss5,depth' -ExpectSuccess $false
@@ -124,10 +166,10 @@ if ((Get-Content "$reshade/presets/GenericPreset1.ini" -Raw) -notmatch 'Edited')
 }
 
 $missingManifests = @(
-    '--dlss5-manifest', 'https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/not-present.ini',
-    '--depth-manifest', 'https://github.com/OMouta/RobloxShadeHost/releases/download/depth-assets/not-present.ini')
+    '--dlss5-manifest', 'https://github.com/OMouta/Unishade/releases/download/dlss5-assets/not-present.ini',
+    '--depth-manifest', 'https://github.com/OMouta/Unishade/releases/download/depth-assets/not-present.ini')
 $missing = Invoke-TestInstaller 'missing-dlss5' 'reshade,dlss5' -Extra $missingManifests
-Assert-File $missing 'RobloxShadeHost.exe'
+Assert-File $missing 'Unishade.exe'
 Assert-File $missing 'dxgi.dll'
 Assert-File $missing 'nvngx_dlssnr.dll' $false
 Assert-File $missing 'renodx-dlss.addon64' $false
@@ -182,7 +224,7 @@ if ($DownloadDepth) {
 if ((Invoke-Setup 'uninstall' @('--uninstall', '--dir', "`"$reshade`"")) -ne 0) {
     throw "Uninstall failed. See $testRoot/uninstall.log"
 }
-foreach ($file in @('RobloxShadeHost.exe', 'dxgi.dll', 'CREDITS.txt', 'reshade-shaders')) { Assert-File $reshade $file $false }
+foreach ($file in @('Unishade.exe', 'dxgi.dll', 'CREDITS.txt', 'reshade-shaders')) { Assert-File $reshade $file $false }
 Assert-File $reshade 'ReShade.ini'
 Assert-File $reshade 'presets/GenericPreset1.ini'
 if ((Invoke-Setup 'uninstall-all' @('--uninstall', '--delete-user-files', '--dir', "`"$reshade`"")) -ne 0 -or (Test-Path $reshade)) {

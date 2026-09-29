@@ -1587,9 +1587,9 @@ void SettingsTab()
         const std::string key = Utf8(FormatHotkey(hotkey));
         const bool typing = hotkey.key == VK_SPACE || hotkey.key == VK_TAB || (hotkey.key >= '0' && hotkey.key <= 'Z');
         if (shortcut.always)
-            Text("Other programs will not receive " + key + " while RobloxShadeHost runs.", kWarning, 13.5f);
+            Text("Other programs will not receive " + key + " while Unishade runs.", kWarning, 13.5f);
         else if (typing)
-            Text("Roblox will not receive " + key + " while RobloxShadeHost runs.", kWarning, 13.5f);
+            Text("Roblox will not receive " + key + " while Unishade runs.", kWarning, 13.5f);
     }
     if (Link("Reset to defaults", kDim))
     {
@@ -1628,7 +1628,7 @@ void StatusTab()
         ImGui::PushStyleColor(ImGuiCol_Border, Color(theme::kAccent, 120));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(14), S(12)));
         ImGui::BeginChild("update", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
-        Text("RobloxShadeHost " + Utf8(update.version) + " is available", kText, 14.5f);
+        Text("Unishade " + Utf8(update.version) + " is available", kText, 14.5f);
         Text("Download the new Setup and run it. Your presets and settings stay.", kDim, 13);
         if (Button("Download", ImVec2(S(110), S(30)), true))
             ShellOpen(update.url);
@@ -1662,7 +1662,7 @@ void StatusTab()
         ShellOpen(kHelpUrl);
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0, S(6)));
-    Text("RobloxShadeHost " ROBLOX_SHADE_HOST_VERSION ". Effects run on ReShade by crosire.", kDim, 12.5f);
+    Text("Unishade " UNISHADE_VERSION ". Effects run on ReShade by crosire.", kDim, 12.5f);
 }
 
 // Frame
@@ -1677,8 +1677,8 @@ void Header(ImVec2 origin, float width)
         draw->AddImage(ImTextureRef(m.logoView.handle), logoPosition, logoPosition + ImVec2(logo, logo));
     const float textX = S(kPadding) + logo + S(12);
     PushSize(16.5f);
-    draw->AddText(origin + ImVec2(textX, S(17)), kText, "RobloxShadeHost");
-    const float titleWidth = ImGui::CalcTextSize("RobloxShadeHost").x;
+    draw->AddText(origin + ImVec2(textX, S(17)), kText, "Unishade");
+    const float titleWidth = ImGui::CalcTextSize("Unishade").x;
     ImGui::PopFont();
     // The right side holds the effects switch, its label and, with auto-save off, the save icon.
     PushSize(13);
@@ -1892,7 +1892,7 @@ void DrawMenu()
     const ImVec2 size(width, io.DisplaySize.y - S(kMargin) * 2);
     ImGui::SetNextWindowPos(ImVec2(S(kMargin), S(kMargin)));
     ImGui::SetNextWindowSize(size);
-    ImGui::Begin("RobloxShadeHost##menu", nullptr,
+    ImGui::Begin("Unishade##menu", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
                      ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 origin = ImGui::GetWindowPos();
@@ -2127,7 +2127,7 @@ void ShowStartHint()
     if (!AddonRegistered() || m.hintShown)
         return;
     m.hintShown = true;
-    ShowToast("opens the RobloxShadeHost menu", Utf8(g.inputHotkey), kHintDuration);
+    ShowToast("opens the Unishade menu", Utf8(g.inputHotkey), kHintDuration);
 }
 
 void RequestScreenshot(bool beforeAfter)

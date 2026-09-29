@@ -171,7 +171,7 @@ void Describe()
         l.statusColor = theme::kAccent;
     }
     l.update = AvailableUpdate();
-    const std::wstring setup = ExeDirectory() + L"RobloxShadeHost-Setup.exe";
+    const std::wstring setup = ExeDirectory() + L"Unishade-Setup.exe";
     l.setup = GetFileAttributesW(setup.c_str()) != INVALID_FILE_ATTRIBUTES ? setup : L"";
 }
 
@@ -363,14 +363,14 @@ void Paint(HDC target)
     }
 
     SetBkMode(dc, TRANSPARENT);
-    PaintText(dc, l.title, theme::kText, L"RobloxShadeHost",
+    PaintText(dc, l.title, theme::kText, L"Unishade",
              { l.logoRect.right + P(14), l.logoRect.top + P(4), width, l.logoRect.top + P(32) }, DT_SINGLELINE);
-    PaintText(dc, l.body, theme::kDim, L"Version " ROBLOX_SHADE_HOST_VERSION,
+    PaintText(dc, l.body, theme::kDim, L"Version " UNISHADE_VERSION,
              { l.logoRect.right + P(14), l.logoRect.top + P(30), width, l.logoRect.bottom }, DT_SINGLELINE);
     PaintText(dc, l.semibold, theme::kText, l.statusTitle, l.statusTitleRect);
     PaintText(dc, l.body, theme::kDim, l.statusDetail, l.statusDetailRect);
     if (!l.update.version.empty())
-        PaintText(dc, l.body, theme::kText, L"RobloxShadeHost " + l.update.version + L" is available.", l.updateText,
+        PaintText(dc, l.body, theme::kText, L"Unishade " + l.update.version + L" is available.", l.updateText,
                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     for (const Row& row : l.rows)
         PaintText(dc, l.body, theme::kText, row.text, row.rect);
@@ -506,7 +506,7 @@ void CreateLauncher()
     wc.lpszClassName = kLauncherClass;
     RegisterClassExW(&wc);
     constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    g.launcher = CreateWindowExW(0, kLauncherClass, L"RobloxShadeHost", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr,
+    g.launcher = CreateWindowExW(0, kLauncherClass, L"Unishade", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr,
                                  wc.hInstance, nullptr);
     winrt::check_bool(g.launcher != nullptr);
     const BOOL dark = TRUE;

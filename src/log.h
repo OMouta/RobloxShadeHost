@@ -17,8 +17,8 @@ struct Notice
     std::wstring text;
 };
 
-// Opens RobloxShadeHost.log beside the exe and writes a header with the version and system. The previous
-// run's log is kept as RobloxShadeHost.old.log.
+// Opens Unishade.log beside the exe and writes a header with the version and system. The previous
+// run's log is kept as Unishade.old.log.
 void InitLog();
 
 // Writes a timestamped line to the log file. Warnings and errors are also shown in the launcher and the

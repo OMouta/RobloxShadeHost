@@ -311,7 +311,7 @@ bool InitDepth()
         return false;
     if (!AddonRegistered())
     {
-        Log(LogLevel::Warning, L"Depth estimation is off because ReShade did not load the RobloxShadeHost add-on.");
+        Log(LogLevel::Warning, L"Depth estimation is off because ReShade did not load the Unishade add-on.");
         return false;
     }
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);

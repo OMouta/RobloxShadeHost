@@ -85,7 +85,7 @@ void Get(const std::wstring& url, const std::function<void(const char*, size_t)>
     const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
     const std::wstring path = std::wstring(parts.lpszUrlPath, parts.dwUrlPathLength) + std::wstring(parts.lpszExtraInfo, parts.dwExtraInfoLength);
 
-    const std::wstring agent = L"RobloxShadeHost-Setup/" + Wide(ROBLOX_SHADE_HOST_VERSION);
+    const std::wstring agent = L"Unishade-Setup/" + Wide(UNISHADE_VERSION);
     InternetHandle session(WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session)
         fail(ErrorText(GetLastError()));
