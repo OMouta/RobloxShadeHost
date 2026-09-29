@@ -62,6 +62,7 @@ constexpr float kHeader = 74;
 constexpr float kTabs = 42;
 constexpr float kFooter = 64;
 constexpr ULONGLONG kHintDuration = 6000;
+constexpr ULONGLONG kToastDuration = 3000;
 
 // The DLSS5 add-on as ReShade loads it, and the title of its window in ReShade's menu.
 constexpr wchar_t kDlssModule[] = L"renodx-dlss.addon64";
@@ -129,9 +130,17 @@ struct Menu
     effect_runtime* runtime = nullptr;
     float scale = 1;
     ImGuiMouseCursor cursor = ImGuiMouseCursor_Arrow;
-    ULONGLONG hintStart = 0;
-    bool hintShown = false;
     Tab tab = Tab::Presets;
+
+    // A short message at the bottom of the screen, with an optional key before it.
+    std::string toastText;
+    std::string toastKey;
+    ULONGLONG toastStart = 0;
+    ULONGLONG toastDuration = 0;
+    bool hintShown = false;
+
+    // Shortcut requests, carried out on the next frame the overlay draws.
+    int presetStep = 0;
 
     // Handles become invalid when ReShade reloads effects, so everything is read again after a reload.
     bool techniquesDirty = true;
@@ -183,6 +192,19 @@ struct Menu
     int logoSize = 0;
 };
 Menu m;
+
+// Settings lists the shortcuts in the order of kShortcuts.
+constexpr struct
+{
+    const char* title;
+    const char* description;
+} kShortcutText[] = {
+    { "Open the menu", "Press it again, or Escape, to go back to Roblox." },
+    { "Overlay off and on", "Shows Roblox without effects and stops capturing it." },
+    { "Next preset", "Switches to the next preset in the Presets tab." },
+    { "Previous preset", "Switches to the preset before it." },
+};
+static_assert(std::size(kShortcutText) == std::size(kShortcuts));
 
 float S(float value)
 {
@@ -470,6 +492,14 @@ bool HasProblems()
     return std::any_of(notices.begin(), notices.end(), [](const Notice& notice) { return notice.level >= LogLevel::Warning; });
 }
 
+void ShowToast(std::string text, std::string key = {}, ULONGLONG duration = kToastDuration)
+{
+    m.toastText = std::move(text);
+    m.toastKey = std::move(key);
+    m.toastStart = GetTickCount64();
+    m.toastDuration = duration;
+}
+
 // Presets
 
 fs::path CurrentPreset()
@@ -511,6 +541,20 @@ bool IsPreset(const fs::path& path)
 bool SamePath(const fs::path& a, const fs::path& b)
 {
     return _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+// Switches presets right away, for shortcuts, which cannot ask about unsaved changes. Returns false when there
+// are some.
+bool SwitchNow(const fs::path& target)
+{
+    if (m.unsaved || (m.presetChanged && !m.autoSave))
+        return false;
+    if (m.presetChanged)
+        SavePreset();
+    m.runtime->set_current_preset_path(Utf8(target.wstring()).c_str());
+    m.presetsScanned = 0;
+    m.active.clear();
+    return true;
 }
 
 void ScanPresets(const fs::path& current)
@@ -1226,10 +1270,21 @@ void StopCapture()
 
 void ApplyHotkeys(const InputHotkeys& hotkeys)
 {
-    if (hotkeys.overlay.key == hotkeys.input.key && hotkeys.overlay.modifiers == hotkeys.input.modifiers)
-        m.shortcutError = L"Pick two different shortcuts.";
-    else
-        m.shortcutError = ChangeHotkeys(hotkeys);
+    for (size_t i = 1; i < std::size(kShortcuts); ++i)
+        for (size_t j = 0; j < i; ++j)
+        {
+            const Hotkey& a = hotkeys.*kShortcuts[i].member;
+            const Hotkey& b = hotkeys.*kShortcuts[j].member;
+            if (a.key && a.key == b.key && a.modifiers == b.modifiers)
+            {
+                // Names the shortcut that already had these keys, not the one just changed.
+                const Hotkey& before = g.hotkeys.*kShortcuts[i].member;
+                const bool changed = a.key != before.key || a.modifiers != before.modifiers;
+                m.shortcutError = FormatHotkey(a) + L" is already used by \"" + Wide(kShortcutText[changed ? j : i].title) + L"\".";
+                return;
+            }
+        }
+    m.shortcutError = ChangeHotkeys(hotkeys);
 }
 
 // While the menu waits for a shortcut, the next key pressed with any modifiers becomes it.
@@ -1263,13 +1318,19 @@ void CaptureShortcut()
         return;
     }
     InputHotkeys hotkeys = g.hotkeys;
-    (m.capturing == 0 ? hotkeys.input : hotkeys.overlay) = hotkey;
+    hotkeys.*kShortcuts[m.capturing].member = hotkey;
     StopCapture();
     ApplyHotkeys(hotkeys);
 }
 
-void ShortcutRow(int index, const char* title, const char* description, const Hotkey& hotkey, bool clearable)
+void ShortcutRow(int index)
 {
+    const Shortcut& shortcut = kShortcuts[index];
+    const char* title = kShortcutText[index].title;
+    const char* description = kShortcutText[index].description;
+    const Hotkey& hotkey = g.hotkeys.*shortcut.member;
+    // Without the menu shortcut there would be no way back into the menu.
+    const bool clearable = shortcut.member != &InputHotkeys::input;
     ImGui::PushID(index);
     const float x = ImGui::GetCursorPosX();
     const float top = ImGui::GetCursorPosY();
@@ -1305,7 +1366,7 @@ void ShortcutRow(int index, const char* title, const char* description, const Ho
         if (Button("x", ImVec2(S(32), S(32)), false, hotkey.key != 0))
         {
             InputHotkeys hotkeys = g.hotkeys;
-            hotkeys.overlay = {};
+            hotkeys.*shortcut.member = {};
             StopCapture();
             ApplyHotkeys(hotkeys);
         }
@@ -1322,23 +1383,28 @@ void SettingsTab()
     Heading("SHORTCUTS");
     Text("Click a shortcut, then press the keys you want. They work right away.", kDim, 13);
     ImGui::Dummy(ImVec2(0, S(4)));
-    ShortcutRow(0, "Open the menu", "Press it again, or Escape, to go back to Roblox.", g.hotkeys.input, false);
-    ShortcutRow(1, "Overlay off and on", "Shows Roblox without effects and stops capturing it.", g.hotkeys.overlay, true);
+    for (int i = 0; i < static_cast<int>(std::size(kShortcuts)); ++i)
+        ShortcutRow(i);
 
-    const auto bare = [](const Hotkey& hotkey) { return hotkey.key && !(hotkey.modifiers & (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN)); };
-    const UINT key = g.hotkeys.input.key;
-    const bool typing = key == VK_SPACE || key == VK_TAB || (key >= '0' && key <= 'Z');
     if (!m.shortcutError.empty())
         Text(Utf8(m.shortcutError), kError, 13.5f);
-    if (bare(g.hotkeys.input) && typing)
-        Text("Roblox will not receive " + Utf8(g.inputHotkey) + " while RobloxShadeHost runs.", kWarning, 13.5f);
-    if (bare(g.hotkeys.overlay))
-        Text("Other programs will not receive " + Utf8(g.overlayHotkey) + " while RobloxShadeHost runs.", kWarning, 13.5f);
+    for (const Shortcut& shortcut : kShortcuts)
+    {
+        const Hotkey& hotkey = g.hotkeys.*shortcut.member;
+        if (!hotkey.key || (hotkey.modifiers & (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN)))
+            continue;
+        const std::string key = Utf8(FormatHotkey(hotkey));
+        const bool typing = hotkey.key == VK_SPACE || hotkey.key == VK_TAB || (hotkey.key >= '0' && hotkey.key <= 'Z');
+        if (shortcut.always)
+            Text("Other programs will not receive " + key + " while RobloxShadeHost runs.", kWarning, 13.5f);
+        else if (typing)
+            Text("Roblox will not receive " + key + " while RobloxShadeHost runs.", kWarning, 13.5f);
+    }
     if (Link("Reset to defaults", kDim))
     {
         InputHotkeys hotkeys;
-        ParseHotkey(kDefaultToggleKey, hotkeys.input);
-        ParseHotkey(kDefaultOverlayToggleKey, hotkeys.overlay);
+        for (const Shortcut& shortcut : kShortcuts)
+            ParseHotkey(shortcut.fallback, hotkeys.*shortcut.member);
         StopCapture();
         ApplyHotkeys(hotkeys);
     }
@@ -1626,21 +1692,24 @@ void DrawMenu()
     ImGui::End();
 }
 
-void DrawHint(ULONGLONG elapsed)
+void DrawToast(ULONGLONG elapsed)
 {
     const float seconds = elapsed / 1000.0f;
-    const float alpha = std::clamp(std::min(seconds / 0.25f, (kHintDuration / 1000.0f - seconds) / 0.6f), 0.0f, 1.0f);
+    const float alpha = std::clamp(std::min(seconds / 0.25f, (m.toastDuration / 1000.0f - seconds) / 0.6f), 0.0f, 1.0f);
     const ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y - S(48)), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(14), S(10)));
-    ImGui::Begin("##hint", nullptr,
+    ImGui::Begin("##toast", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize);
-    KeyCap(Utf8(g.inputHotkey), 14);
-    ImGui::SameLine(0, S(10));
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(3));
-    Text("opens the RobloxShadeHost menu", kText, 14.5f, -1.0f);
+    if (!m.toastKey.empty())
+    {
+        KeyCap(m.toastKey, 14);
+        ImGui::SameLine(0, S(10));
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(3));
+    }
+    Text(m.toastText, kText, 14.5f, -1.0f);
     ImGui::End();
     ImGui::PopStyleVar(2);
 }
@@ -1703,6 +1772,23 @@ void DrawMenuFrame()
     }
 }
 
+void CarryOutRequests()
+{
+    if (m.presetStep)
+    {
+        const fs::path current = CurrentPreset();
+        ScanPresets(current);
+        const int count = static_cast<int>(m.presets.size());
+        const int index = static_cast<int>(
+            std::find_if(m.presets.begin(), m.presets.end(), [&](const fs::path& preset) { return SamePath(preset, current); }) - m.presets.begin());
+        const fs::path& target = m.presets[((index + m.presetStep) % count + count) % count];
+        m.presetStep = 0;
+        if (!SamePath(target, current))
+            ShowToast(SwitchNow(target) ? Utf8(target.stem().wstring())
+                                        : "Save or discard the changes to " + Utf8(current.stem().wstring()) + " first");
+    }
+}
+
 void OnOverlay(effect_runtime* runtime)
 {
     if (runtime != m.runtime)
@@ -1713,10 +1799,14 @@ void OnOverlay(effect_runtime* runtime)
         ImGui::SetWindowFocus(kDlssWindow);
         m.focusDlss = false;
     }
+    CarryOutRequests();
     const bool menu = g.editMode && !ReShadeMenuOpen();
-    const ULONGLONG elapsed = GetTickCount64() - m.hintStart;
-    const bool hint = !g.editMode && m.hintStart && elapsed < kHintDuration;
-    if (!menu && !hint)
+    // The start hint, the only toast with a key, has done its job once the menu opens.
+    if (menu && !m.toastKey.empty())
+        m.toastStart = 0;
+    const ULONGLONG elapsed = GetTickCount64() - m.toastStart;
+    const bool toast = m.toastStart && elapsed < m.toastDuration;
+    if (!menu && !toast)
         return;
 
     // Small windows get a smaller menu, so it still fits.
@@ -1728,8 +1818,8 @@ void OnOverlay(effect_runtime* runtime)
     PushSize(14.5f);
     if (menu)
         DrawMenuFrame();
-    else
-        DrawHint(elapsed);
+    if (toast)
+        DrawToast(elapsed);
     ImGui::PopFont();
     m.cursor = menu ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
     style = saved;
@@ -1785,7 +1875,13 @@ void ShowStartHint()
     if (!AddonRegistered() || m.hintShown)
         return;
     m.hintShown = true;
-    m.hintStart = GetTickCount64();
+    ShowToast("opens the RobloxShadeHost menu", Utf8(g.inputHotkey), kHintDuration);
+}
+
+void RequestPresetStep(int step)
+{
+    if (m.runtime && g.overlayVisible)
+        m.presetStep += step;
 }
 
 void ResetMenu()

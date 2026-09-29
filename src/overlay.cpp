@@ -18,15 +18,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     switch (message)
     {
     case WM_HOTKEY:
-        if (wParam == kOverlayToggleHotkey)
-            ToggleOverlay();
-        else if (wParam == kEditModeHotkey && g.editMode)
-            ReturnToRoblox();
-        else if (wParam == kEditModeHotkey && g.captureEnabled && g.target && !IsIconic(g.target))
+        switch (wParam)
         {
-            SetEditMode(true);
-            UpdateOverlay();
-            SetForegroundWindow(hwnd);
+        case kOverlayToggleHotkey:
+            ToggleOverlay();
+            break;
+        case kEditModeHotkey:
+            if (g.editMode)
+                ReturnToRoblox();
+            else if (g.captureEnabled && g.target && !IsIconic(g.target))
+            {
+                SetEditMode(true);
+                UpdateOverlay();
+                SetForegroundWindow(hwnd);
+            }
+            break;
+        case kNextPresetHotkey:
+        case kPreviousPresetHotkey:
+            RequestPresetStep(wParam == kNextPresetHotkey ? 1 : -1);
+            break;
         }
         return 0;
     case kLeaveMenuMessage:

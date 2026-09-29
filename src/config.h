@@ -6,25 +6,52 @@
 
 struct InputHotkeys
 {
-    Hotkey input;
+    Hotkey input; // opens and closes the menu
     Hotkey overlay;
+    Hotkey nextPreset;
+    Hotkey previousPreset;
 };
 
-inline constexpr wchar_t kDefaultToggleKey[] = L"Home";
-inline constexpr wchar_t kDefaultOverlayToggleKey[] = L"Ctrl+F8";
+// What WM_HOTKEY reports for each shortcut.
+enum HotkeyId
+{
+    kEditModeHotkey = 1,
+    kOverlayToggleHotkey,
+    kNextPresetHotkey,
+    kPreviousPresetHotkey,
+};
+
+struct Shortcut
+{
+    Hotkey InputHotkeys::*member;
+    int id;
+    const wchar_t* name; // the entry in RobloxShadeHost.ini
+    const wchar_t* fallback;
+    // Held for as long as the host runs. The others only while Roblox or the menu is in front, so other
+    // programs keep the keys.
+    bool always;
+};
+
+// Every shortcut, in the order the menu's Settings lists them.
+inline constexpr Shortcut kShortcuts[] = {
+    { &InputHotkeys::input, kEditModeHotkey, L"ToggleKey", L"Home", false },
+    { &InputHotkeys::overlay, kOverlayToggleHotkey, L"OverlayToggleKey", L"Ctrl+F8", true },
+    { &InputHotkeys::nextPreset, kNextPresetHotkey, L"NextPresetKey", L"Ctrl+PageDown", false },
+    { &InputHotkeys::previousPreset, kPreviousPresetHotkey, L"PreviousPresetKey", L"Ctrl+PageUp", false },
+};
 
 // Reads shortcuts from RobloxShadeHost.ini beside the exe into g.hotkeys, creating the file on first run.
 // Invalid values are reported and replaced by the defaults.
 void LoadInputHotkeys();
 
-// Registers the overlay shortcut and reports a menu shortcut another program already holds.
+// Registers the shortcuts held all the time and reports shortcuts another program already holds.
 void RegisterHotkeys();
 
-// Holding a bare key such as Home all the time would break it in every other program, so the menu shortcut is
+// Holding a bare key such as Home all the time would break it in every other program, so most shortcuts are
 // only registered while Roblox or the menu is in front. Called every loop.
 void UpdateInputHotkey();
 
-// Unregisters both shortcuts until called with false, so the menu can read them as ordinary keys.
+// Unregisters every shortcut until called with false, so the menu can read them as ordinary keys.
 void SuspendHotkeys(bool suspended);
 
 // Switches to new shortcuts and saves them. Returns what went wrong, and keeps the current shortcuts, when

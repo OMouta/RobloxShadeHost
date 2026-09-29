@@ -38,17 +38,34 @@ void UseHotkeys(const InputHotkeys& hotkeys)
     g.overlayHotkey = FormatHotkey(hotkeys.overlay);
 }
 
-void UnregisterHotkeys()
+bool Register(const Shortcut& shortcut, const InputHotkeys& hotkeys)
 {
-    if (g.inputHotkeyRegistered)
-        UnregisterHotKey(g.overlay, kEditModeHotkey);
-    g.inputHotkeyRegistered = false;
-    UnregisterHotKey(g.overlay, kOverlayToggleHotkey);
+    const Hotkey& hotkey = hotkeys.*shortcut.member;
+    return !hotkey.key || RegisterHotKey(g.overlay, shortcut.id, hotkey.modifiers, hotkey.key);
 }
 
-bool RegisterOverlayHotkey()
+// Returns the first shortcut that another program holds, or nullptr.
+const Shortcut* RegisterSet(bool always, const InputHotkeys& hotkeys)
 {
-    return !g.hotkeys.overlay.key || RegisterHotKey(g.overlay, kOverlayToggleHotkey, g.hotkeys.overlay.modifiers, g.hotkeys.overlay.key);
+    const Shortcut* taken = nullptr;
+    for (const Shortcut& shortcut : kShortcuts)
+        if (shortcut.always == always && !Register(shortcut, hotkeys) && !taken)
+            taken = &shortcut;
+    return taken;
+}
+
+void UnregisterSet(bool always)
+{
+    for (const Shortcut& shortcut : kShortcuts)
+        if (shortcut.always == always)
+            UnregisterHotKey(g.overlay, shortcut.id);
+}
+
+void UnregisterAll()
+{
+    UnregisterSet(true);
+    UnregisterSet(false);
+    g.gameHotkeysRegistered = false;
 }
 } // namespace
 
@@ -63,51 +80,62 @@ std::wstring ExeDirectory()
 void LoadInputHotkeys()
 {
     const std::wstring path = IniPath();
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
-        !(WritePrivateProfileStringW(L"Input", L"ToggleKey", kDefaultToggleKey, path.c_str()) &&
-          WritePrivateProfileStringW(L"Input", L"OverlayToggleKey", kDefaultOverlayToggleKey, path.c_str())))
-        Log(LogLevel::Warning, L"Could not create %ls. Using the default shortcuts.", path.c_str());
-
-    InputHotkeys hotkeys{ ReadHotkey(path, L"ToggleKey", kDefaultToggleKey, false),
-                          ReadHotkey(path, L"OverlayToggleKey", kDefaultOverlayToggleKey, true) };
-    if (Same(hotkeys.overlay, hotkeys.input))
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
-        Log(LogLevel::Warning, L"The menu and overlay shortcuts are both %ls, so the overlay shortcut is off. Pick another one in the menu's Settings.",
-            FormatHotkey(hotkeys.input).c_str());
-        hotkeys.overlay = {};
+        bool written = true;
+        for (const Shortcut& shortcut : kShortcuts)
+            written &= WritePrivateProfileStringW(L"Input", shortcut.name, shortcut.fallback, path.c_str()) != FALSE;
+        if (!written)
+            Log(LogLevel::Warning, L"Could not create %ls. Using the default shortcuts.", path.c_str());
     }
+
+    InputHotkeys hotkeys;
+    for (const Shortcut& shortcut : kShortcuts)
+        hotkeys.*shortcut.member = ReadHotkey(path, shortcut.name, shortcut.fallback, shortcut.member != &InputHotkeys::input);
+    // A key can only do one thing, so a later shortcut on the same key is turned off.
+    for (size_t i = 1; i < std::size(kShortcuts); ++i)
+        for (size_t j = 0; j < i; ++j)
+        {
+            Hotkey& later = hotkeys.*kShortcuts[i].member;
+            if (later.key && Same(later, hotkeys.*kShortcuts[j].member))
+            {
+                Log(LogLevel::Warning, L"%ls and %ls in RobloxShadeHost.ini are both %ls, so %ls is off. Pick another one in the menu's Settings.",
+                    kShortcuts[j].name, kShortcuts[i].name, FormatHotkey(later).c_str(), kShortcuts[i].name);
+                later = {};
+            }
+        }
     UseHotkeys(hotkeys);
 }
 
 void RegisterHotkeys()
 {
-    // Reports a taken shortcut now rather than on the first press in Roblox.
-    if (RegisterHotKey(g.overlay, kEditModeHotkey, g.hotkeys.input.modifiers, g.hotkeys.input.key))
-        UnregisterHotKey(g.overlay, kEditModeHotkey);
-    else
-        Log(LogLevel::Warning, L"%ls is in use by another program, so it cannot open the menu. Close that program, or change "
-                               L"ToggleKey in RobloxShadeHost.ini and restart RobloxShadeHost.",
-            g.inputHotkey.c_str());
-    if (!RegisterOverlayHotkey())
-        Log(LogLevel::Warning, L"%ls is in use by another program, so the overlay shortcut is off. Pick another one in the menu's Settings.",
-            g.overlayHotkey.c_str());
+    // Reports taken shortcuts now rather than on the first press in Roblox.
+    for (const Shortcut& shortcut : kShortcuts)
+    {
+        if (Register(shortcut, g.hotkeys))
+            continue;
+        const std::wstring key = FormatHotkey(g.hotkeys.*shortcut.member);
+        if (shortcut.member == &InputHotkeys::input)
+            Log(LogLevel::Warning, L"%ls is in use by another program, so it cannot open the menu. Close that program, or change "
+                                   L"ToggleKey in RobloxShadeHost.ini and restart RobloxShadeHost.",
+                key.c_str());
+        else
+            Log(LogLevel::Warning, L"%ls is in use by another program, so %ls is off. Pick another one in the menu's Settings.", key.c_str(),
+                shortcut.name);
+    }
+    UnregisterSet(false);
 }
 
 void UpdateInputHotkey()
 {
     const bool wanted = g.target && !g.hotkeysSuspended && (g.editMode || GetForegroundWindow() == g.target);
-    if (wanted == g.inputHotkeyRegistered)
+    if (wanted == g.gameHotkeysRegistered)
         return;
     if (wanted)
-    {
-        // Retried while wanted, in case the other program lets go of the key.
-        g.inputHotkeyRegistered = RegisterHotKey(g.overlay, kEditModeHotkey, g.hotkeys.input.modifiers, g.hotkeys.input.key);
-    }
+        RegisterSet(false, g.hotkeys);
     else
-    {
-        UnregisterHotKey(g.overlay, kEditModeHotkey);
-        g.inputHotkeyRegistered = false;
-    }
+        UnregisterSet(false);
+    g.gameHotkeysRegistered = wanted;
 }
 
 void SuspendHotkeys(bool suspended)
@@ -116,10 +144,10 @@ void SuspendHotkeys(bool suspended)
         return;
     g.hotkeysSuspended = suspended;
     if (suspended)
-        UnregisterHotkeys();
+        UnregisterAll();
     else
     {
-        RegisterOverlayHotkey();
+        RegisterSet(true, g.hotkeys);
         UpdateInputHotkey();
     }
 }
@@ -138,29 +166,25 @@ void SetAutoSavePresets(bool enabled)
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys)
 {
     const InputHotkeys previous = g.hotkeys;
-    UnregisterHotkeys();
+    UnregisterAll();
 
+    // Registering each new shortcut once shows whether another program holds it.
     std::wstring error;
-    if (!RegisterHotKey(g.overlay, kEditModeHotkey, hotkeys.input.modifiers, hotkeys.input.key))
-        error = FormatHotkey(hotkeys.input) + L" is in use by another program.";
+    const Shortcut* taken = RegisterSet(true, hotkeys);
+    if (!taken)
+        taken = RegisterSet(false, hotkeys);
+    UnregisterAll();
+    if (taken)
+        error = FormatHotkey(hotkeys.*taken->member) + L" is in use by another program.";
     else
-    {
-        UnregisterHotKey(g.overlay, kEditModeHotkey);
-        if (hotkeys.overlay.key && !RegisterHotKey(g.overlay, kOverlayToggleHotkey, hotkeys.overlay.modifiers, hotkeys.overlay.key))
-            error = FormatHotkey(hotkeys.overlay) + L" is in use by another program.";
-        else if (!WritePrivateProfileStringW(L"Input", L"ToggleKey", FormatHotkey(hotkeys.input).c_str(), IniPath().c_str()) ||
-                 !WritePrivateProfileStringW(L"Input", L"OverlayToggleKey", FormatHotkey(hotkeys.overlay).c_str(), IniPath().c_str()))
-        {
-            error = L"Could not save RobloxShadeHost.ini.";
-            UnregisterHotKey(g.overlay, kOverlayToggleHotkey);
-        }
-    }
+        for (const Shortcut& shortcut : kShortcuts)
+            if (!WritePrivateProfileStringW(L"Input", shortcut.name, FormatHotkey(hotkeys.*shortcut.member).c_str(), IniPath().c_str()))
+                error = L"Could not save RobloxShadeHost.ini.";
 
     UseHotkeys(error.empty() ? hotkeys : previous);
     if (error.empty())
-        Log(LogLevel::Info, L"Shortcuts changed: menu %ls, overlay %ls", g.inputHotkey.c_str(), g.overlayHotkey.empty() ? L"none" : g.overlayHotkey.c_str());
-    else
-        RegisterOverlayHotkey();
+        Log(LogLevel::Info, L"Shortcuts changed.");
+    RegisterSet(true, g.hotkeys);
     UpdateInputHotkey();
     return error;
 }

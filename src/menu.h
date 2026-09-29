@@ -10,6 +10,9 @@ void InitMenu();
 // launches.
 void ShowStartHint();
 
+// Shortcut actions from the overlay window. They happen on the next frame the overlay shows.
+void RequestPresetStep(int step);
+
 // Ends what only lasts while the menu is open, such as waiting for a shortcut or comparing with Roblox's
 // own picture. Called when input goes back to Roblox.
 void ResetMenu();

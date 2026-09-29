@@ -19,8 +19,6 @@ using winrt::Windows::Graphics::DirectX::DirectXPixelFormat;
 using winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 
 constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
-constexpr int kEditModeHotkey = 1;
-constexpr int kOverlayToggleHotkey = 2;
 // Posted by the menu to give input back to Roblox. The menu runs inside ReShade's present, so window
 // changes wait for the message loop.
 constexpr UINT kLeaveMenuMessage = WM_APP + 1;
@@ -35,7 +33,8 @@ struct State
     std::wstring inputHotkey;
     std::wstring overlayHotkey;
     bool editMode = false;
-    bool inputHotkeyRegistered = false;
+    // The shortcuts that are only held while Roblox or the menu is in front.
+    bool gameHotkeysRegistered = false;
     // While the menu waits for a new shortcut, so the current ones arrive as ordinary keys.
     bool hotkeysSuspended = false;
     bool overlayVisible = false;
