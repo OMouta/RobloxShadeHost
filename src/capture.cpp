@@ -37,7 +37,12 @@ void StartCapture(HWND target)
 
     g.poolSize = item.Size();
     g.pool = Direct3D11CaptureFramePool::CreateFreeThreaded(g.captureDevice, kPixelFormat, 2, g.poolSize);
-    g.frameArrived = g.pool.FrameArrived(winrt::auto_revoke, [](auto&&, auto&&) { SetEvent(g.frameEvent); });
+    g.capturedFrames.store(0, std::memory_order_relaxed);
+    g.frameStatistics.Reset(FrameStatistics::Clock::now(), 0);
+    g.frameArrived = g.pool.FrameArrived(winrt::auto_revoke, [](auto&&, auto&&) {
+        g.capturedFrames.fetch_add(1, std::memory_order_relaxed);
+        SetEvent(g.frameEvent);
+    });
     g.session = g.pool.CreateCaptureSession(item);
 
     // The real cursor is already drawn on top of the overlay.
@@ -70,10 +75,13 @@ void StopCapture()
     g.pool = nullptr;
     g.target = nullptr;
     g.activeGame.reset();
+    g.frameStatistics.Reset(FrameStatistics::Clock::now(), g.capturedFrames.load(std::memory_order_relaxed));
 }
 
 void PresentLatestFrame()
 {
+    const auto started = FrameStatistics::Clock::now();
+    const int64_t frameTimestamp = g.latestFrame.SystemRelativeTime().count();
     winrt::com_ptr<ID3D11Texture2D> surface;
     auto access = g.latestFrame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     winrt::check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), surface.put_void()));
@@ -113,4 +121,7 @@ void PresentLatestFrame()
     g.context->CopyResource(backBuffer.get(), surface.get());
     UpdateDepth(surface.get());
     winrt::check_hresult(g.swapchain->Present(0, 0));
+    const auto finished = FrameStatistics::Clock::now();
+    g.frameStatistics.RecordPresent(frameTimestamp, std::chrono::duration<double, std::milli>(finished - started).count());
+    g.frameStatistics.Update(finished, g.capturedFrames.load(std::memory_order_relaxed));
 }

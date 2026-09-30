@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "frame_statistics.h"
 #include "game_integration.h"
 
 #include <unknwn.h>
@@ -13,6 +14,7 @@
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
 #include <string>
+#include <atomic>
 
 using namespace winrt::Windows::Graphics::Capture;
 using winrt::Windows::Graphics::SizeInt32;
@@ -58,6 +60,9 @@ struct State
     Direct3D11CaptureFrame latestFrame{ nullptr };
     SizeInt32 poolSize{};
     HANDLE frameEvent = nullptr;
+    // FrameArrived runs on the capture worker; statistics are sampled on the host thread.
+    std::atomic<uint64_t> capturedFrames = 0;
+    FrameStatistics frameStatistics;
 };
 
 extern State g;

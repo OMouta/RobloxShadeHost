@@ -137,6 +137,10 @@ set_target_properties(installer PROPERTIES
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(frame_statistics_tests tests/frame_statistics_tests.cpp)
+    target_compile_options(frame_statistics_tests PRIVATE /W4 /permissive- /EHsc)
+    add_test(NAME frame_statistics_tests COMMAND frame_statistics_tests)
+
     add_executable(menu_layout_tests tests/menu_layout_tests.cpp)
     target_compile_options(menu_layout_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME menu_layout_tests COMMAND menu_layout_tests)

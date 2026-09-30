@@ -25,6 +25,7 @@
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -137,6 +138,7 @@ struct Menu
     float scale = 1;
     ImGuiMouseCursor cursor = ImGuiMouseCursor_Arrow;
     Tab tab = Tab::Presets;
+    bool debugInfo = false;
 
     // A short message at the bottom of the screen, with an optional key before it.
     std::string toastText;
@@ -1595,6 +1597,19 @@ void SettingsTab()
     Text("Save changes automatically", kText, 14.5f);
     Text("Turn off to try changes first and save them with the icon at the top.", kDim, 13);
     ImGui::EndGroup();
+
+    ImGui::Dummy(ImVec2(0, S(14)));
+    Heading("DEBUG");
+    if (Switch("debug_info", m.debugInfo))
+    {
+        m.debugInfo = !m.debugInfo;
+        SetDebugInfoEnabled(m.debugInfo);
+    }
+    ImGui::SameLine(0, S(12));
+    ImGui::BeginGroup();
+    Text("Show debug info", kText, 14.5f);
+    Text("Captured game FPS, output FPS and frame loss.", kDim, 13);
+    ImGui::EndGroup();
 }
 
 // Status
@@ -1918,6 +1933,122 @@ void DrawToast(ULONGLONG elapsed)
     ImGui::PopStyleVar(2);
 }
 
+void DrawFpsGraph(const FrameStatistics& stats)
+{
+    Text("Game capture", kAccent, 11.5f, -1);
+    ImGui::SameLine(0, S(14));
+    Text("Unishade", kWarning, 11.5f, -1);
+    ImGui::SameLine(0, S(14));
+    Text("Fresh output", kSuccess, 11.5f, -1);
+
+    const auto now = FrameStatistics::Clock::now();
+    constexpr double seconds = 60;
+    double maximum = 60;
+    for (size_t i = 0; i < stats.HistorySize(); ++i)
+    {
+        const auto& sample = stats.HistoryAt(i);
+        if (std::chrono::duration<double>(now - sample.at).count() <= seconds)
+            maximum = std::max({ maximum, sample.captureFps, sample.programFps, sample.freshFps });
+    }
+    maximum = std::ceil(maximum / 30) * 30;
+
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 size(ImGui::GetContentRegionAvail().x, S(112));
+    ImGui::Dummy(size);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(origin, origin + size, kInset, S(6));
+    const ImVec2 min = origin + ImVec2(S(8), S(10));
+    const ImVec2 max = origin + size - ImVec2(S(38), S(22));
+    PushSize(10.5f);
+    for (int i = 0; i <= 2; ++i)
+    {
+        const float y = min.y + (max.y - min.y) * i / 2;
+        draw->AddLine(ImVec2(min.x, y), ImVec2(max.x, y), kBorder);
+        char label[32];
+        snprintf(label, sizeof(label), "%.0f", maximum * (2 - i) / 2);
+        draw->AddText(ImVec2(max.x + S(6), y - S(5)), kDim, label);
+    }
+    draw->AddText(ImVec2(min.x, max.y + S(6)), kDim, "60s ago");
+    const ImVec2 nowSize = ImGui::CalcTextSize("Now");
+    draw->AddText(ImVec2(max.x - nowSize.x, max.y + S(6)), kDim, "Now");
+    ImGui::PopFont();
+
+    const auto line = [&](double FrameStatistics::Sample::*rate, ImU32 color) {
+        ImVec2 points[60];
+        int count = 0;
+        for (size_t i = 0; i < stats.HistorySize(); ++i)
+        {
+            const auto& sample = stats.HistoryAt(i);
+            const double age = std::chrono::duration<double>(now - sample.at).count();
+            if (age > seconds)
+                continue;
+            points[count++] = ImVec2(min.x + (max.x - min.x) * static_cast<float>(1 - age / seconds),
+                                    max.y - (max.y - min.y) * static_cast<float>(sample.*rate / maximum));
+        }
+        if (count > 1)
+            draw->AddPolyline(points, count, color, 0, S(1.5f));
+        if (count)
+            draw->AddCircleFilled(points[count - 1], S(2), color);
+    };
+    // The fresh-output line stays visible when it overlaps the presentation rate.
+    line(&FrameStatistics::Sample::captureFps, kAccent);
+    line(&FrameStatistics::Sample::programFps, kWarning);
+    line(&FrameStatistics::Sample::freshFps, kSuccess);
+}
+
+void DrawDebugInfo()
+{
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(display.x - S(kMargin), S(kMargin)), ImGuiCond_Always, ImVec2(1, 0));
+    ImGui::SetNextWindowSize(ImVec2(S(350), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(14), S(10)));
+    ImGui::Begin("##debug_info", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize);
+    PushSize(13.5f);
+    const FrameStatistics& stats = g.frameStatistics;
+    Text("Performance", kText, 14.5f, -1);
+    ImGui::SameLine();
+    const std::string resolution = std::to_string(g.poolSize.Width) + " x " + std::to_string(g.poolSize.Height);
+    ImGui::SetCursorPosX(ImGui::GetWindowSize().x - S(14) - ImGui::CalcTextSize(resolution.c_str()).x);
+    ImGui::TextDisabled("%s", resolution.c_str());
+    DrawFpsGraph(stats);
+    if (stats.ready)
+    {
+        if (ImGui::BeginTable("debug_metrics", 2, ImGuiTableFlags_SizingStretchProp))
+        {
+            ImGui::TableSetupColumn("Metric", ImGuiTableColumnFlags_WidthStretch, 1);
+            ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+            const auto row = [](const char* label) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("%s", label);
+                ImGui::TableNextColumn();
+            };
+            row("Game capture");
+            ImGui::Text("%.1f FPS", stats.captureFps);
+            row("Unishade");
+            ImGui::Text("%.1f FPS", stats.programFps);
+            row("Fresh output");
+            ImGui::Text("%.1f FPS", stats.freshFps);
+            row("Frame loss");
+            ImGui::Text("%.1f FPS / %.1f%%", stats.LostFps(), stats.LossPercent());
+            row("Repeated frames");
+            ImGui::Text("%.1f FPS", stats.RepeatedFps());
+            row("Processing avg");
+            ImGui::Text("%.2f ms", stats.processingMs);
+            row("Processing peak");
+            ImGui::Text("%.2f ms", stats.peakProcessingMs);
+            ImGui::EndTable();
+        }
+    }
+    else
+        ImGui::TextUnformatted("Measuring FPS...");
+    ImGui::PopFont();
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
 void DrawMenuFrame()
 {
     // Escape leaves the menu, unless it closes a popup, ends typing or cancels waiting for a shortcut.
@@ -2034,7 +2165,7 @@ void OnOverlay(effect_runtime* runtime)
         m.toastStart = 0;
     const ULONGLONG elapsed = GetTickCount64() - m.toastStart;
     const bool toast = m.toastStart && elapsed < m.toastDuration;
-    if (!menu && !toast)
+    if (!menu && !toast && !m.debugInfo)
         return;
 
     const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -2050,6 +2181,8 @@ void OnOverlay(effect_runtime* runtime)
         DrawMenuFrame();
     if (toast)
         DrawToast(elapsed);
+    if (m.debugInfo)
+        DrawDebugInfo();
     ImGui::PopFont();
     m.cursor = menu ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
     style = saved;
@@ -2095,6 +2228,7 @@ void InitMenu()
     if (!AddonRegistered())
         return;
     m.autoSave = AutoSavePresets();
+    m.debugInfo = DebugInfoEnabled();
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
     reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);

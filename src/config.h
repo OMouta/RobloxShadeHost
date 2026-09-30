@@ -71,5 +71,8 @@ std::wstring ChangeHotkeys(const InputHotkeys& hotkeys);
 bool AutoSavePresets();
 void SetAutoSavePresets(bool enabled);
 
+bool DebugInfoEnabled();
+void SetDebugInfoEnabled(bool enabled);
+
 // Folder of Unishade.exe, with a trailing backslash.
 std::wstring ExeDirectory();

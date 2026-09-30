@@ -164,6 +164,17 @@ void SetAutoSavePresets(bool enabled)
         Log(LogLevel::Warning, L"Could not save the auto-save setting to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
+bool DebugInfoEnabled()
+{
+    return GetPrivateProfileIntW(L"Menu", L"ShowDebugInfo", 0, IniPath().c_str()) != 0;
+}
+
+void SetDebugInfoEnabled(bool enabled)
+{
+    if (!WritePrivateProfileStringW(L"Menu", L"ShowDebugInfo", enabled ? L"1" : L"0", IniPath().c_str()))
+        Log(LogLevel::Warning, L"Could not save the debug info setting to RobloxShadeHost.ini. It applies until Unishade closes.");
+}
+
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys)
 {
     const InputHotkeys previous = g.hotkeys;

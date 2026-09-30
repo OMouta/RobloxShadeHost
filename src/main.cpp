@@ -108,6 +108,8 @@ int Run()
         }
 
         UpdateOverlay();
+        if (!g.overlayVisible)
+            g.frameStatistics.Reset(FrameStatistics::Clock::now(), g.capturedFrames.load(std::memory_order_relaxed));
         UpdateInputHotkey();
         UpdateHeldCompare();
         UpdateLauncher();
