@@ -26,13 +26,16 @@ void Usage()
     printf("Unishade %s\n\n"
            "  unishade                      Starts the launcher.\n"
            "  unishade --install-effects    Downloads effects and presets into %s.\n"
-           "  unishade --render IN.png PRESET.ini OUT.png\n"
-           "                                Applies a preset to an image without a window, to check effects.\n",
+           "  unishade --render IN.png PRESET.ini OUT.png [--gpu-source]\n"
+           "                                Applies a preset to an image without a window, to check effects.\n"
+           "                                --gpu-source hands the image over on the graphics card, as zero-copy\n"
+           "                                capture does.\n",
            UNISHADE_VERSION, DataDirectory().c_str());
 }
 
-// Applies a preset to an image with the same code the overlay uses, without any window.
-int Render(const char* input, const char* preset, const char* output)
+// Applies a preset to an image with the same code the overlay uses, without any window. gpuSource hands the
+// picture over the way zero-copy capture does: from an image on the graphics card, at an offset inside it.
+int Render(const char* input, const char* preset, const char* output, bool gpuSource)
 {
     std::string error;
     if (!gpu.Init(true, error))
@@ -69,12 +72,52 @@ int Render(const char* input, const char* preset, const char* output)
         fprintf(stderr, "Missing: %s\n", missing.c_str());
         ++failed;
     }
+    fx::Runtime::Source source{ pixels.data() };
+    GpuImage sourceImage;
+    GpuBuffer upload;
+    if (gpuSource)
+    {
+        constexpr uint32_t kX = 7, kY = 3;
+        if (!gpu.CreateImage(sourceImage, width + 16, height + 8, 1, VK_FORMAT_B8G8R8A8_UNORM,
+                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+            !gpu.CreateBuffer(upload, pixels.size() * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true))
+            return 1;
+        std::memcpy(upload.mapped, pixels.data(), pixels.size() * 4);
+        VkCommandBuffer commands = gpu.BeginCommands();
+        InitLayout(commands, sourceImage);
+        // Something else around the picture, which must not end up in it.
+        VkClearColorValue magenta{};
+        magenta.float32[0] = magenta.float32[2] = magenta.float32[3] = 1.0f;
+        const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(commands, sourceImage.image, VK_IMAGE_LAYOUT_GENERAL, &magenta, 1, &range);
+        FullBarrier(commands);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.imageOffset = { int32_t(kX), int32_t(kY), 0 };
+        copy.imageExtent = { uint32_t(width), uint32_t(height), 1 };
+        vkCmdCopyBufferToImage(commands, upload.buffer, sourceImage.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        gpu.SubmitAndWait(commands);
+        source = { nullptr, sourceImage.image, kX, kY, false };
+    }
     // A few frames, so effects that build on earlier frames settle.
     for (int frame = 0; frame < 3; ++frame)
     {
         VkCommandBuffer commands = gpu.BeginCommands();
-        runtime.Render(commands, pixels.data(), true);
+        runtime.Render(commands, source, true);
         gpu.SubmitAndWait(commands);
+    }
+    if (gpuSource)
+    {
+        // The picture read back from the source image must be the input, exactly.
+        const std::vector<uint8_t> original = runtime.ReadSource(source);
+        for (size_t i = 0; i < pixels.size(); ++i)
+            if (original[i * 4] != ((pixels[i] >> 16) & 0xFF) || original[i * 4 + 1] != ((pixels[i] >> 8) & 0xFF) ||
+                original[i * 4 + 2] != (pixels[i] & 0xFF))
+            {
+                fprintf(stderr, "The picture read from the source image differs from the input.\n");
+                ++failed;
+                break;
+            }
     }
     for (const fx::Technique& technique : runtime.Techniques())
         if (technique.enabled && (!runtime.Effects()[technique.effect].gpu || runtime.Effects()[technique.effect].gpuFailed))
@@ -84,6 +127,8 @@ int Render(const char* input, const char* preset, const char* output)
         }
     const std::vector<uint8_t> result = runtime.ReadOutput();
     const bool written = stbi_write_png(output, width, height, 4, result.data(), width * 4);
+    gpu.DestroyImage(sourceImage);
+    gpu.DestroyBuffer(upload);
     runtime.Shutdown();
     gpu.Shutdown();
     if (!written)
@@ -127,7 +172,8 @@ int main(int argc, char** argv)
                 return 2;
             }
             InitLog();
-            return Render(argv[i + 1], argv[i + 2], argv[i + 3]);
+            const bool gpuSource = i + 4 < argc && !strcmp(argv[i + 4], "--gpu-source");
+            return Render(argv[i + 1], argv[i + 2], argv[i + 3], gpuSource);
         }
     }
 

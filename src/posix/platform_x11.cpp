@@ -3,6 +3,7 @@
 // window's picture even where other windows cover it, and shortcuts from passive key grabs on the root window.
 
 #include "platform.h"
+#include "gpu.h"
 #include "log.h"
 
 #define GLFW_EXPOSE_NATIVE_X11
@@ -18,8 +19,13 @@
 #include <X11/keysym.h>
 #ifdef UNISHADE_HAVE_XRES
 #include <X11/extensions/XRes.h>
-#include <dlfcn.h>
 #endif
+#ifdef UNISHADE_HAVE_DRI3
+#include <X11/Xlib-xcb.h>
+#include <xcb/dri3.h>
+#endif
+#include <dlfcn.h>
+#include <sys/stat.h>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -192,11 +198,112 @@ std::string ReadLink(const std::string& path)
 
 // Capture
 
+// The window's picture as the X server keeps it on the graphics card, from DRI3. Closes its file descriptors when
+// the last frame using it is gone.
+struct DmaBuffer
+{
+    std::vector<int> fds;
+    std::vector<uint32_t> strides;
+    std::vector<uint32_t> offsets;
+    uint64_t modifier = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    ~DmaBuffer()
+    {
+        for (int fd : fds)
+            close(fd);
+    }
+};
+
+#ifdef UNISHADE_HAVE_DRI3
+// DRI3 through XCB, loaded when present rather than linked, so the host starts where it is missing.
+struct Dri3Functions
+{
+    decltype(&XGetXCBConnection) getConnection = nullptr;
+    decltype(&xcb_get_extension_data) extensionData = nullptr;
+    xcb_extension_t* extension = nullptr;
+    decltype(&xcb_dri3_query_version) queryVersion = nullptr;
+    decltype(&xcb_dri3_query_version_reply) queryVersionReply = nullptr;
+    decltype(&xcb_dri3_buffers_from_pixmap) buffersFromPixmap = nullptr;
+    decltype(&xcb_dri3_buffers_from_pixmap_reply) buffersFromPixmapReply = nullptr;
+    decltype(&xcb_dri3_buffers_from_pixmap_strides) strides = nullptr;
+    decltype(&xcb_dri3_buffers_from_pixmap_offsets) offsets = nullptr;
+    decltype(&xcb_dri3_buffers_from_pixmap_buffers) buffers = nullptr;
+
+    bool Load()
+    {
+        void* xlibXcb = dlopen("libX11-xcb.so.1", RTLD_NOW | RTLD_LOCAL);
+        void* xcb = dlopen("libxcb.so.1", RTLD_NOW | RTLD_LOCAL);
+        void* dri3 = dlopen("libxcb-dri3.so.0", RTLD_NOW | RTLD_LOCAL);
+        if (!xlibXcb || !xcb || !dri3)
+            return false;
+        getConnection = reinterpret_cast<decltype(getConnection)>(dlsym(xlibXcb, "XGetXCBConnection"));
+        extensionData = reinterpret_cast<decltype(extensionData)>(dlsym(xcb, "xcb_get_extension_data"));
+        extension = static_cast<xcb_extension_t*>(dlsym(dri3, "xcb_dri3_id"));
+        queryVersion = reinterpret_cast<decltype(queryVersion)>(dlsym(dri3, "xcb_dri3_query_version"));
+        queryVersionReply = reinterpret_cast<decltype(queryVersionReply)>(dlsym(dri3, "xcb_dri3_query_version_reply"));
+        buffersFromPixmap = reinterpret_cast<decltype(buffersFromPixmap)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap"));
+        buffersFromPixmapReply = reinterpret_cast<decltype(buffersFromPixmapReply)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_reply"));
+        strides = reinterpret_cast<decltype(strides)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_strides"));
+        offsets = reinterpret_cast<decltype(offsets)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_offsets"));
+        buffers = reinterpret_cast<decltype(buffers)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_buffers"));
+        return getConnection && extensionData && extension && queryVersion && queryVersionReply && buffersFromPixmap && buffersFromPixmapReply &&
+               strides && offsets && buffers;
+    }
+};
+
+// The pixmap's buffers, with DRI3 1.2's modifiers. Empty where the X server cannot share them, such as without
+// a GPU or with drivers that do not support DRI3.
+std::shared_ptr<DmaBuffer> BuffersFromPixmap(Display* d, Pixmap pixmap)
+{
+    static Dri3Functions dri3;
+    static const bool loaded = dri3.Load();
+    if (!loaded)
+        return nullptr;
+    xcb_connection_t* connection = dri3.getConnection(d);
+    const xcb_query_extension_reply_t* present = dri3.extensionData(connection, dri3.extension);
+    if (!present || !present->present)
+        return nullptr;
+    xcb_dri3_query_version_reply_t* version = dri3.queryVersionReply(connection, dri3.queryVersion(connection, 1, 2), nullptr);
+    const bool modifiers = version && (version->major_version > 1 || version->minor_version >= 2);
+    free(version);
+    if (!modifiers)
+        return nullptr;
+    xcb_dri3_buffers_from_pixmap_reply_t* reply = dri3.buffersFromPixmapReply(connection, dri3.buffersFromPixmap(connection, pixmap), nullptr);
+    if (!reply)
+        return nullptr;
+    auto buffer = std::make_shared<DmaBuffer>();
+    const int32_t* fds = dri3.buffers(reply);
+    for (int i = 0; i < reply->nfd; ++i)
+    {
+        buffer->fds.push_back(fds[i]);
+        buffer->strides.push_back(dri3.strides(reply)[i]);
+        buffer->offsets.push_back(dri3.offsets(reply)[i]);
+    }
+    buffer->modifier = reply->modifier;
+    buffer->width = reply->width;
+    buffer->height = reply->height;
+    const bool usable = reply->nfd > 0 && reply->bpp == 32 && (reply->depth == 24 || reply->depth == 32);
+    free(reply);
+    return usable ? buffer : nullptr;
+}
+#else
+std::shared_ptr<DmaBuffer> BuffersFromPixmap(Display*, Pixmap)
+{
+    return nullptr;
+}
+#endif
+
+// Frees the dma-buf imported into Vulkan. Defined with TakeFrame.
+void ReleaseImported();
+
 struct Capture
 {
     std::thread thread;
     std::atomic<bool> stop = false;
     std::atomic<bool> running = false;
+    std::atomic<bool> onGpu = false; // frames go to the main thread as dma-bufs instead of pixels
+    std::atomic<bool> reset = false; // the capture thread names the pixmap again, to change how it copies
     std::mutex mutex;
     Frame ready;
     std::string error;
@@ -224,6 +331,7 @@ void CaptureThread(::Window target, int refresh)
     const auto interval = std::chrono::nanoseconds(1'000'000'000 / refresh);
 
     Pixmap pixmap = 0;
+    std::shared_ptr<DmaBuffer> buffer;
     XImage* image = nullptr;
     XShmSegmentInfo segment{};
     int width = 0, height = 0;
@@ -246,6 +354,7 @@ void CaptureThread(::Window target, int refresh)
         if (pixmap)
             XFreePixmap(d, pixmap);
         pixmap = 0;
+        buffer.reset();
     };
 
     auto next = std::chrono::steady_clock::now();
@@ -269,7 +378,7 @@ void CaptureThread(::Window target, int refresh)
             next = std::chrono::steady_clock::now();
             continue;
         }
-        if (attributes.width != width || attributes.height != height || !pixmap)
+        if (attributes.width != width || attributes.height != height || !pixmap || capture.reset.exchange(false))
         {
             release();
             width = attributes.width;
@@ -282,7 +391,17 @@ void CaptureThread(::Window target, int refresh)
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
-            if (shm)
+            if (capture.onGpu)
+            {
+                buffer = BuffersFromPixmap(d, pixmap);
+                if (!buffer || buffer->width != unsigned(width) || buffer->height != unsigned(height))
+                {
+                    buffer.reset();
+                    capture.onGpu = false;
+                    Log(LogLevel::Info, "The X server cannot share the game's picture on the graphics card. Copying it instead.");
+                }
+            }
+            if (shm && !buffer)
             {
                 image = XShmCreateImage(d, attributes.visual, attributes.depth, ZPixmap, nullptr, &segment, width, height);
                 if (image)
@@ -300,6 +419,26 @@ void CaptureThread(::Window target, int refresh)
                 failure = "The game's window uses a pixel format Unishade cannot read.";
                 break;
             }
+        }
+
+        if (buffer)
+        {
+            // The X server keeps drawing into the same buffer, so each frame only says it is there to use.
+            back.pixels.clear();
+            back.width = width;
+            back.height = height;
+            back.hold = buffer;
+            {
+                std::lock_guard lock(capture.mutex);
+                back.serial = ++serial;
+                std::swap(back, capture.ready);
+            }
+            back.hold.reset();
+            glfwPostEmptyEvent();
+            std::this_thread::sleep_until(next);
+            if (std::chrono::steady_clock::now() > next + interval)
+                next = std::chrono::steady_clock::now();
+            continue;
         }
 
         XImage* got = nullptr;
@@ -328,6 +467,7 @@ void CaptureThread(::Window target, int refresh)
 
         back.width = width;
         back.height = height;
+        back.hold.reset();
         back.pixels.resize(size_t(width) * height);
         for (int y = 0; y < height; ++y)
         {
@@ -685,6 +825,8 @@ bool StartCapture(const Window& window, std::string& error)
         refresh = std::clamp(mode->refreshRate, 30, 360);
     capture.stop = false;
     capture.running = true;
+    capture.onGpu = gpu.dmaBuf;
+    capture.reset = false;
     capture.thread = std::thread(CaptureThread, static_cast<::Window>(window.id), refresh);
     return true;
 }
@@ -695,6 +837,10 @@ void StopCapture()
     if (capture.thread.joinable())
         capture.thread.join();
     capture.running = false;
+    // The host waited for the graphics card before stopping.
+    std::lock_guard lock(capture.mutex);
+    capture.ready = {};
+    ReleaseImported();
 }
 
 bool Capturing()
@@ -702,12 +848,151 @@ bool Capturing()
     return capture.running;
 }
 
+namespace
+{
+// The dma-buf imported into Vulkan, for as long as the X server uses the same buffer for the window.
+struct Imported
+{
+    std::shared_ptr<void> buffer;
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+};
+Imported imported;
+
+// The caller makes sure the graphics card no longer uses it.
+void ReleaseImported()
+{
+    if (imported.image)
+        vkDestroyImage(gpu.device, imported.image, nullptr);
+    if (imported.memory)
+        vkFreeMemory(gpu.device, imported.memory, nullptr);
+    imported = {};
+}
+
+VkImage Import(const std::shared_ptr<void>& held)
+{
+    if (imported.buffer == held)
+        return imported.image;
+    vkDeviceWaitIdle(gpu.device);
+    ReleaseImported();
+    const DmaBuffer& buffer = *static_cast<const DmaBuffer*>(held.get());
+
+    // Every plane must be in one buffer object, which is how drivers lay out RGB images.
+    struct stat first{}, other{};
+    if (fstat(buffer.fds[0], &first) != 0)
+        return VK_NULL_HANDLE;
+    for (int fd : buffer.fds)
+        if (fstat(fd, &other) != 0 || other.st_ino != first.st_ino || other.st_dev != first.st_dev)
+            return VK_NULL_HANDLE;
+
+    std::vector<VkSubresourceLayout> planes;
+    for (size_t i = 0; i < buffer.fds.size(); ++i)
+        planes.push_back({ buffer.offsets[i], 0, buffer.strides[i], 0, 0 });
+    VkImageDrmFormatModifierExplicitCreateInfoEXT modifier{ VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT };
+    modifier.drmFormatModifier = buffer.modifier;
+    modifier.drmFormatModifierPlaneCount = uint32_t(planes.size());
+    modifier.pPlaneLayouts = planes.data();
+    VkExternalMemoryImageCreateInfo external{ VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+    external.pNext = &modifier;
+    external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkImageCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    info.pNext = &external;
+    info.imageType = VK_IMAGE_TYPE_2D;
+    // XRGB8888 and ARGB8888, the formats of 24 and 32-bit windows.
+    info.format = VK_FORMAT_B8G8R8A8_UNORM;
+    info.extent = { buffer.width, buffer.height, 1 };
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    Imported result;
+    if (vkCreateImage(gpu.device, &info, nullptr, &result.image) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+
+    const auto getFdProperties = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(vkGetDeviceProcAddr(gpu.device, "vkGetMemoryFdPropertiesKHR"));
+    VkMemoryFdPropertiesKHR fdProperties{ VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR };
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(gpu.device, result.image, &requirements);
+    // Importing hands the file descriptor to Vulkan, so it gets its own copy.
+    const int fd = dup(buffer.fds[0]);
+    uint32_t type = UINT32_MAX;
+    if (fd >= 0 && getFdProperties &&
+        getFdProperties(gpu.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fdProperties) == VK_SUCCESS)
+        type = gpu.FindMemoryType(requirements.memoryTypeBits & fdProperties.memoryTypeBits, 0);
+    VkMemoryDedicatedAllocateInfo dedicated{ VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+    dedicated.image = result.image;
+    VkImportMemoryFdInfoKHR import{ VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR };
+    import.pNext = &dedicated;
+    import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    import.fd = fd;
+    VkMemoryAllocateInfo allocation{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    allocation.pNext = &import;
+    allocation.allocationSize = std::max<VkDeviceSize>(requirements.size, lseek(fd, 0, SEEK_END));
+    allocation.memoryTypeIndex = type;
+    if (type == UINT32_MAX || vkAllocateMemory(gpu.device, &allocation, nullptr, &result.memory) != VK_SUCCESS)
+    {
+        if (fd >= 0)
+            close(fd);
+        vkDestroyImage(gpu.device, result.image, nullptr);
+        return VK_NULL_HANDLE;
+    }
+    if (vkBindImageMemory(gpu.device, result.image, result.memory, 0) != VK_SUCCESS)
+    {
+        vkDestroyImage(gpu.device, result.image, nullptr);
+        vkFreeMemory(gpu.device, result.memory, nullptr);
+        return VK_NULL_HANDLE;
+    }
+
+    // Takes the image from the X server once to move it into the general layout, keeping its contents, then
+    // hands it back. From here on each use takes and returns it in that layout.
+    VkCommandBuffer commands = gpu.BeginCommands();
+    const uint32_t outside = gpu.foreignQueue ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL;
+    VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcQueueFamilyIndex = outside;
+    barrier.dstQueueFamilyIndex = gpu.queueFamily;
+    barrier.image = result.image;
+    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcQueueFamilyIndex = gpu.queueFamily;
+    barrier.dstQueueFamilyIndex = outside;
+    vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    gpu.SubmitAndWait(commands);
+
+    result.buffer = held;
+    imported = result;
+    return imported.image;
+}
+} // namespace
+
 bool TakeFrame(Frame& frame)
 {
-    std::lock_guard lock(capture.mutex);
-    if (capture.ready.serial <= frame.serial || capture.ready.pixels.empty())
-        return false;
-    std::swap(frame, capture.ready);
+    {
+        std::lock_guard lock(capture.mutex);
+        if (capture.ready.serial <= frame.serial || (capture.ready.pixels.empty() && !capture.ready.hold))
+            return false;
+        std::swap(frame, capture.ready);
+    }
+    frame.image = VK_NULL_HANDLE;
+    frame.foreign = false;
+    if (frame.hold)
+    {
+        frame.image = Import(frame.hold);
+        frame.foreign = true;
+        if (!frame.image)
+        {
+            // Copies through memory from the next frame on, which the capture thread notices when it names the
+            // window's pixmap again.
+            Log(LogLevel::Warning, "Could not use the game's picture on the graphics card. Copying it instead.");
+            capture.onGpu = false;
+            capture.reset = true;
+            return false;
+        }
+    }
     return true;
 }
 

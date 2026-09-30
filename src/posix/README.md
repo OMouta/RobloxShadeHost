@@ -8,6 +8,9 @@ ReShade is Windows only, so this host runs ReShade effects itself. It follows th
 | Windows and processes | CoreGraphics, `proc_pidpath` | `_NET_CLIENT_LIST`, XRes, `/proc` |
 | Shortcuts | Carbon hot keys | `XGrabKey` on the root window |
 | Vulkan | MoltenVK, linked directly and copied into the app | The system's loader and driver |
+| Frames on the graphics card | IOSurfaces as Vulkan images (`VK_EXT_metal_objects`) | DRI3 dma-bufs as Vulkan images (`VK_EXT_image_drm_format_modifier`) |
+
+Frames stay on the graphics card where the system allows it, and are copied through memory otherwise: on Linux without DRI3 1.2 (no GPU, some NVIDIA setups on Xorg, remote X) or without the Vulkan extensions above. The log says which one runs. `--render ... --gpu-source` exercises the graphics-card path of the effect runtime without a window.
 
 Effects compile with ReShade's own compiler (`effect_*.cpp` from ReShade 6.8.0, BSD-3-Clause) to SPIR-V, the same path ReShade takes in Vulkan games. `effects.cpp` runs what it produces: textures, render targets, storage, compute passes, blending, mipmaps and the uniforms ReShade sets itself, such as `timer` and `frametime`. Presets are ReShade's `.ini` files. The launcher and the menu use Dear ImGui with GLFW.
 
@@ -16,7 +19,7 @@ Effects compile with ReShade's own compiler (`effect_*.cpp` from ReShade 6.8.0, 
 Linux (Debian and Ubuntu package names):
 
 ```sh
-sudo apt install cmake g++ libvulkan-dev libx11-dev libxcomposite-dev libxext-dev libxres-dev \
+sudo apt install cmake g++ libvulkan-dev libx11-dev libxcomposite-dev libxext-dev libxres-dev libxcb-dri3-dev libx11-xcb-dev \
     libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 cmake --build build --parallel

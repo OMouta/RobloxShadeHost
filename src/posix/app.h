@@ -86,12 +86,15 @@ private:
     void StartCapture(const platform::Window& window);
     void StopCapture();
     bool RegisterShortcut(const Shortcut& shortcut, const Hotkey& hotkey);
+    bool HasFrame() const;
+    fx::Runtime::Source Source() const;
 
     bool inFront = false; // the game or the overlay has focus
     double effectsCheckTime = -10;
     bool effectsInstalled = false;
 
     platform::Frame frame;
+    std::shared_ptr<void> inFlight; // the buffer of the frame the graphics card is drawing
     platform::Rect overlayBounds;
     bool gameHotkeys = false;
     bool hotkeysSuspended = false;

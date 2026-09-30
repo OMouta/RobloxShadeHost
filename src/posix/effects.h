@@ -107,12 +107,24 @@ public:
     // Takes in compiled effects. Call once per frame on the main thread.
     void Update();
 
+    // The game's picture: pixels in memory, or the part at (x, y) of an image on the graphics card, in
+    // VK_IMAGE_LAYOUT_GENERAL. Either way it is the size given to SetSize.
+    struct Source
+    {
+        const uint32_t* pixels = nullptr;
+        VkImage image = VK_NULL_HANDLE;
+        uint32_t x = 0;
+        uint32_t y = 0;
+        bool foreign = false; // owned by something outside Vulkan, such as the X server
+    };
     // Copies the game's picture in and runs every enabled technique on it, or none when effects is false.
-    void Render(VkCommandBuffer commands, const uint32_t* pixels, bool effects);
+    void Render(VkCommandBuffer commands, const Source& source, bool effects);
     // The picture after Render, in VK_IMAGE_LAYOUT_GENERAL. BGRA.
     const GpuImage& Output() const { return backbuffer; }
     // Reads the output back, as RGBA pixels. Waits for the graphics card.
     std::vector<uint8_t> ReadOutput();
+    // Reads the game's own picture from an image source, as RGBA pixels, for before and after screenshots.
+    std::vector<uint8_t> ReadSource(const Source& source);
 
     // Presets. Switching compiles effects again when the preset has other preprocessor definitions.
     bool LoadPreset(const fs::path& path);
@@ -166,6 +178,7 @@ private:
     GpuImage* Texture(const reshadefx::texture& texture, Effect& effect);
     fs::path FindTexture(const std::string& source);
     void GenerateMipmaps(VkCommandBuffer commands, const GpuImage& image);
+    std::vector<uint8_t> ReadImage(VkImage image, uint32_t x, uint32_t y, bool foreign);
 
     Settings settings;
     uint32_t width = 0;

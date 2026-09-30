@@ -42,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libvulkan-dev libx11-dev libxcomposite-dev libxext-dev libxres-dev \
-            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev mesa-vulkan-drivers
+            libxcb-dri3-dev libx11-xcb-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev mesa-vulkan-drivers
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - name: Build
@@ -71,6 +71,15 @@ jobs:
           # A real game picture from the repository's own screenshots.
           for preset in presets/GenericPreset*.ini; do
             ./build/unishade --render assets/ReadmeShowcase1.jpg "$preset" "$(basename "$preset" .ini).png"
+          done
+          # Frames handed over on the graphics card, as zero-copy capture does, must come out the same as frames
+          # copied through memory. These effects use no timer or randomness, so the results match exactly.
+          printf 'Techniques=\n' > "$RUNNER_TEMP/copy.ini"
+          printf 'Techniques=Curves@Curves.fx,LumaSharpen@LumaSharpen.fx,Vibrance@Vibrance.fx\n' > "$RUNNER_TEMP/fixed.ini"
+          for preset in copy fixed; do
+            ./build/unishade --render assets/ReadmeShowcase1.jpg "$RUNNER_TEMP/$preset.ini" "$RUNNER_TEMP/$preset-memory.png"
+            ./build/unishade --render assets/ReadmeShowcase1.jpg "$RUNNER_TEMP/$preset.ini" "$RUNNER_TEMP/$preset-gpu.png" --gpu-source
+            cmp "$RUNNER_TEMP/$preset-memory.png" "$RUNNER_TEMP/$preset-gpu.png"
           done
       - name: Package
         run: |

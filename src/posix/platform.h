@@ -2,7 +2,10 @@
 
 #include "hotkeys.h"
 
+#include <vulkan/vulkan.h>
+
 #include <cstdint>
+#include <memory>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -69,13 +72,21 @@ void ShowOverlay(GLFWwindow* window, bool visible);
 // Gives the overlay keyboard focus while the menu is open.
 void FocusOverlay(GLFWwindow* window);
 
-// The game's picture, copied by a thread of the platform's. Pixels are BGRA, top row first, with opaque alpha.
+// The game's picture. Where the platform can, it stays on the graphics card: image is then an image in
+// VK_IMAGE_LAYOUT_GENERAL whose part at (x, y) of width by height is the window, and stays valid until capture
+// stops. Otherwise pixels holds it, copied by a thread of the platform's: BGRA, top row first, with opaque alpha.
 struct Frame
 {
     std::vector<uint32_t> pixels;
     uint32_t width = 0;
     uint32_t height = 0;
     uint64_t serial = 0;
+    VkImage image = VK_NULL_HANDLE;
+    uint32_t x = 0;
+    uint32_t y = 0;
+    bool foreign = false; // written outside Vulkan, so each use acquires it from outside first
+    // Keeps the platform from reusing the frame's buffer. Held until the graphics card is done with the frame.
+    std::shared_ptr<void> hold;
 };
 
 // Starts copying the window. Frames arrive on another thread, which calls glfwPostEmptyEvent so the main loop

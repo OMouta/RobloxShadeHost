@@ -127,7 +127,7 @@ void App::Run()
 
         const bool newFrame = active && platform::TakeFrame(frame);
         const bool toastShowing = !toast.empty() && Now() < toastUntil;
-        if (overlayVisible && !frame.pixels.empty() && (newFrame || menuOpen || toastShowing || Now() - lastOverlayFrame > 0.1))
+        if (overlayVisible && HasFrame() && (newFrame || menuOpen || toastShowing || Now() - lastOverlayFrame > 0.1))
             RenderOverlay();
 
         if (settings.autoSavePresets && runtime.Dirty() && Now() - lastAutoSave > 1.0)
@@ -197,11 +197,15 @@ void App::StopCapture()
 {
     if (menuOpen)
         CloseMenu(false);
+    // The platform's images go away with the capture, so the graphics card must be done with them.
+    if (gpu.device)
+        vkDeviceWaitIdle(gpu.device);
+    frame = {};
+    inFlight.reset();
     platform::StopCapture();
     if (active)
         Log(LogLevel::Info, "Stopped capturing %s.", active->title.c_str());
     active.reset();
-    frame = {};
     if (overlayVisible)
         platform::ShowOverlay(overlay.window, false);
     overlayVisible = false;
@@ -284,7 +288,7 @@ const std::vector<platform::Window>& App::Windows()
 void App::UpdateOverlay()
 {
     platform::Rect bounds;
-    const bool visible = captureEnabled && active && !frame.pixels.empty() && (menuOpen || inFront) && platform::WindowBounds(active->id, bounds);
+    const bool visible = captureEnabled && active && HasFrame() && (menuOpen || inFront) && platform::WindowBounds(active->id, bounds);
     if (!visible)
     {
         if (overlayVisible)
@@ -310,6 +314,8 @@ void App::RenderOverlay()
     Surface& surface = overlay.surface;
     if (!surface.BeginFrame())
         return;
+    // The previous frame's commands are done, so its buffer can go back to the platform.
+    inFlight = frame.hold;
     lastOverlayFrame = Now();
     runtime.SetSize(frame.width, frame.height);
     runtime.menuOpen = menuOpen;
@@ -322,7 +328,7 @@ void App::RenderOverlay()
 
     if (runtime.Width() == frame.width && runtime.Height() == frame.height)
     {
-        runtime.Render(surface.commands, frame.pixels.data(), effectsEnabled && !comparing && !compareButton);
+        runtime.Render(surface.commands, Source(), effectsEnabled && !comparing && !compareButton);
         FullBarrier(surface.commands);
         const GpuImage& output = runtime.Output();
         VkImageBlit blit{};
@@ -615,6 +621,16 @@ void App::RequestScreenshot(bool beforeAfter)
     beforeAfterRequested = beforeAfter;
 }
 
+bool App::HasFrame() const
+{
+    return frame.image || !frame.pixels.empty();
+}
+
+fx::Runtime::Source App::Source() const
+{
+    return { frame.pixels.empty() ? nullptr : frame.pixels.data(), frame.image, frame.x, frame.y, frame.foreign };
+}
+
 void App::SaveScreenshot()
 {
     screenshotRequested = false;
@@ -624,22 +640,34 @@ void App::SaveScreenshot()
     const uint32_t width = runtime.Width(), height = runtime.Height();
     std::vector<uint8_t> image;
     uint32_t imageWidth = width;
+    std::vector<uint8_t> before;
     if (beforeAfterRequested && frame.width == width && frame.height == height)
+    {
+        if (frame.image)
+            before = runtime.ReadSource(Source());
+        else
+        {
+            before.resize(size_t(width) * height * 4);
+            for (size_t i = 0; i < frame.pixels.size(); ++i)
+            {
+                const uint32_t pixel = frame.pixels[i];
+                before[i * 4] = (pixel >> 16) & 0xFF;
+                before[i * 4 + 1] = (pixel >> 8) & 0xFF;
+                before[i * 4 + 2] = pixel & 0xFF;
+                before[i * 4 + 3] = 255;
+            }
+        }
+    }
+    if (!before.empty())
     {
         // The game's own picture on the left, with effects on the right.
         imageWidth = width * 2;
         image.resize(size_t(imageWidth) * height * 4);
         for (uint32_t y = 0; y < height; ++y)
-            for (uint32_t x = 0; x < width; ++x)
-            {
-                const uint32_t pixel = frame.pixels[size_t(y) * width + x];
-                uint8_t* before = &image[(size_t(y) * imageWidth + x) * 4];
-                before[0] = (pixel >> 16) & 0xFF;
-                before[1] = (pixel >> 8) & 0xFF;
-                before[2] = pixel & 0xFF;
-                before[3] = 255;
-                std::memcpy(&image[(size_t(y) * imageWidth + width + x) * 4], &after[(size_t(y) * width + x) * 4], 4);
-            }
+        {
+            std::memcpy(&image[size_t(y) * imageWidth * 4], &before[size_t(y) * width * 4], size_t(width) * 4);
+            std::memcpy(&image[(size_t(y) * imageWidth + width) * 4], &after[size_t(y) * width * 4], size_t(width) * 4);
+        }
     }
     else
         image = std::move(after);

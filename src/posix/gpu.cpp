@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 
 Gpu gpu;
 
@@ -132,6 +133,25 @@ bool Gpu::Init(bool headless, std::string& error)
     // MoltenVK lists what Metal cannot do through this extension, which must then be enabled.
     if (HasExtension(deviceAvailable, "VK_KHR_portability_subset"))
         deviceExtensions.push_back("VK_KHR_portability_subset");
+    // What lets captured frames stay on the graphics card: IOSurfaces through MoltenVK on macOS, dma-bufs on
+    // Linux. Without them frames are copied through memory.
+    const auto enableAll = [&](std::initializer_list<const char*> names) {
+        for (const char* name : names)
+            if (!HasExtension(deviceAvailable, name))
+                return false;
+        deviceExtensions.insert(deviceExtensions.end(), names);
+        return true;
+    };
+    if (!headless)
+    {
+#ifdef __APPLE__
+        metalObjects = enableAll({ "VK_EXT_metal_objects" });
+#else
+        dmaBuf = enableAll({ "VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf", "VK_KHR_image_format_list",
+                             "VK_EXT_image_drm_format_modifier" });
+        foreignQueue = dmaBuf && enableAll({ "VK_EXT_queue_family_foreign" });
+#endif
+    }
 
     // What ReShade enables for effects, where the device has it.
     VkPhysicalDeviceFeatures supported{};
@@ -171,6 +191,7 @@ bool Gpu::Init(bool headless, std::string& error)
     poolInfo.queueFamilyIndex = queueFamily;
     vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
 
+    Log(LogLevel::Info, "Frames stay on the graphics card: %s", metalObjects || dmaBuf ? "yes" : "no, they are copied through memory");
     Log(LogLevel::Info, "Graphics: %s (Vulkan %u.%u.%u)", properties.deviceName, VK_API_VERSION_MAJOR(properties.apiVersion),
         VK_API_VERSION_MINOR(properties.apiVersion), VK_API_VERSION_PATCH(properties.apiVersion));
     return true;

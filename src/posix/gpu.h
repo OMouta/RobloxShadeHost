@@ -64,6 +64,12 @@ public:
     uint32_t apiVersion = VK_API_VERSION_1_1;
     bool independentBlend = false;
     bool anisotropy = false;
+    bool metalObjects = false; // IOSurfaces can back images (macOS)
+    bool dmaBuf = false;       // dma-bufs can be imported as images (Linux)
+    bool foreignQueue = false; // VK_EXT_queue_family_foreign, for handing dma-bufs back and forth
+
+    // Allocates device memory of the given type bits for an image or import. UINT32_MAX when none fits.
+    uint32_t FindMemoryType(uint32_t bits, VkMemoryPropertyFlags flags) const { return MemoryType(bits, flags); }
 
 private:
     uint32_t MemoryType(uint32_t bits, VkMemoryPropertyFlags flags) const;

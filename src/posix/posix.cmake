@@ -185,10 +185,18 @@ else()
     target_link_libraries(unishade_core PUBLIC X11::X11 X11::Xcomposite X11::Xext)
     # XRes tells which process owns a window even for sandboxed programs such as Flatpak apps. It is loaded at
     # run time when present, so only its header is needed here.
+    # DRI3 shares the window's picture on the graphics card. Also loaded at run time when present.
+    find_path(DRI3_INCLUDE_DIR xcb/dri3.h)
+    find_path(XLIB_XCB_INCLUDE_DIR X11/Xlib-xcb.h)
+    if(DRI3_INCLUDE_DIR AND XLIB_XCB_INCLUDE_DIR)
+        target_compile_definitions(unishade_core PRIVATE UNISHADE_HAVE_DRI3)
+    else()
+        message(WARNING "Without libxcb-dri3 and libx11-xcb headers, frames are always copied through memory.")
+    endif()
     if(X11_XRes_INCLUDE_PATH)
         target_compile_definitions(unishade_core PRIVATE UNISHADE_HAVE_XRES)
-        target_link_libraries(unishade_core PUBLIC ${CMAKE_DL_LIBS})
     endif()
+    target_link_libraries(unishade_core PUBLIC ${CMAKE_DL_LIBS})
 endif()
 
 if(APPLE)

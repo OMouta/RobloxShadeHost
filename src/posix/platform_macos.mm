@@ -1,7 +1,10 @@
 // macOS: windows come from CoreGraphics, pictures from ScreenCaptureKit, which copies one window even where
 // other windows cover it, and shortcuts from Carbon's hot keys, which work without accessibility permission.
 
+// For VK_EXT_metal_objects, which lets an IOSurface back a Vulkan image.
+#define VK_USE_PLATFORM_METAL_EXT
 #include "platform.h"
+#include "gpu.h"
 #include "log.h"
 
 #define GLFW_EXPOSE_NATIVE_COCOA
@@ -13,6 +16,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <IOSurface/IOSurface.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include <libproc.h>
@@ -44,6 +48,7 @@ struct CaptureState
     uint32_t configWidth = 0;
     uint32_t configHeight = 0;
     bool reconfiguring = false;
+    std::atomic<bool> onGpu = false; // frames go to the main thread as IOSurfaces instead of pixels
 };
 CaptureState capture;
 
@@ -116,7 +121,7 @@ void FailCapture(uint64_t generation, const std::string& message)
                 config.pixelFormat = kCVPixelFormatType_32BGRA;
                 config.showsCursor = NO;
                 config.minimumFrameInterval = CMTimeMake(1, 240);
-                config.queueDepth = 5;
+                config.queueDepth = 8;
                 config.colorSpaceName = kCGColorSpaceSRGB;
                 if (@available(macOS 14.0, *))
                     config.ignoreShadowsSingleWindow = YES;
@@ -137,31 +142,50 @@ void FailCapture(uint64_t generation, const std::string& message)
         }
     }
 
-    CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
-    const uint8_t* base = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(image));
-    const size_t stride = CVPixelBufferGetBytesPerRow(image);
     platform::Frame& back = capture.back;
-    if (base && CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_32BGRA)
+    back.width = uint32_t(width);
+    back.height = uint32_t(height);
+    if (capture.onGpu && CVPixelBufferGetIOSurface(image))
     {
-        back.width = uint32_t(width);
-        back.height = uint32_t(height);
-        back.pixels.resize(width * height);
-        for (size_t y = 0; y < height; ++y)
-        {
-            const uint32_t* row = reinterpret_cast<const uint32_t*>(base + (y0 + y) * stride) + x0;
-            uint32_t* out = back.pixels.data() + y * width;
-            for (size_t x = 0; x < width; ++x)
-                out[x] = row[x] | 0xFF000000u;
-        }
+        // The frame stays on the graphics card. The main thread wraps its IOSurface in a Vulkan image, and the
+        // pixel buffer is held until the frame is drawn, so ScreenCaptureKit does not reuse it before then.
+        back.pixels.clear();
+        back.image = VK_NULL_HANDLE; // set by TakeFrame
+        back.x = uint32_t(x0);
+        back.y = uint32_t(y0);
+        back.hold = std::shared_ptr<void>(const_cast<void*>(CFRetain(image)), [](void* buffer) { CFRelease(buffer); });
     }
-    CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
-    if (back.pixels.empty())
-        return;
+    else
+    {
+        back.image = VK_NULL_HANDLE;
+        back.x = back.y = 0;
+        back.hold.reset();
+        CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
+        const uint8_t* base = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(image));
+        const size_t stride = CVPixelBufferGetBytesPerRow(image);
+        back.pixels.clear();
+        if (base && CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_32BGRA)
+        {
+            back.pixels.resize(width * height);
+            for (size_t y = 0; y < height; ++y)
+            {
+                const uint32_t* row = reinterpret_cast<const uint32_t*>(base + (y0 + y) * stride) + x0;
+                uint32_t* out = back.pixels.data() + y * width;
+                for (size_t x = 0; x < width; ++x)
+                    out[x] = row[x] | 0xFF000000u;
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
+        if (back.pixels.empty())
+            return;
+    }
     {
         std::lock_guard lock(capture.mutex);
         back.serial = ++capture.serial;
         std::swap(back, capture.ready);
     }
+    // A frame the main thread skipped goes back to ScreenCaptureKit's pool now.
+    back.hold.reset();
     glfwPostEmptyEvent();
 }
 
@@ -177,6 +201,80 @@ namespace
 {
 UnishadeStreamOutput* output = nil;
 dispatch_queue_t captureQueue = nullptr;
+
+// IOSurfaces wrapped in Vulkan images. ScreenCaptureKit cycles through a few surfaces, so each is wrapped once.
+struct Imported
+{
+    IOSurfaceRef surface = nullptr; // retained
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+};
+std::map<IOSurfaceID, Imported> imported;
+
+// The caller makes sure the graphics card no longer uses them.
+void ReleaseImported()
+{
+    for (auto& [id, entry] : imported)
+    {
+        vkDestroyImage(gpu.device, entry.image, nullptr);
+        vkFreeMemory(gpu.device, entry.memory, nullptr);
+        CFRelease(entry.surface);
+    }
+    imported.clear();
+}
+
+VkImage Import(IOSurfaceRef surface)
+{
+    const IOSurfaceID id = IOSurfaceGetID(surface);
+    // Retained surfaces keep their IDs, so an ID names one surface for as long as it is here.
+    if (const auto found = imported.find(id); found != imported.end())
+        return found->second.image;
+    // A resize brings new surfaces, so the old ones are dropped instead of piling up.
+    if (imported.size() >= 12)
+    {
+        vkDeviceWaitIdle(gpu.device);
+        ReleaseImported();
+    }
+
+    VkImportMetalIOSurfaceInfoEXT import{ VK_STRUCTURE_TYPE_IMPORT_METAL_IO_SURFACE_INFO_EXT };
+    import.ioSurface = surface;
+    VkImageCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    info.pNext = &import;
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = VK_FORMAT_B8G8R8A8_UNORM;
+    info.extent = { uint32_t(IOSurfaceGetWidth(surface)), uint32_t(IOSurfaceGetHeight(surface)), 1 };
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    Imported entry;
+    if (vkCreateImage(gpu.device, &info, nullptr, &entry.image) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    // Vulkan wants memory bound to every image. MoltenVK keeps using the IOSurface for its contents.
+    VkMemoryRequirements requirements;
+    vkGetImageMemoryRequirements(gpu.device, entry.image, &requirements);
+    VkMemoryAllocateInfo allocation{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = gpu.FindMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (allocation.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(gpu.device, &allocation, nullptr, &entry.memory) != VK_SUCCESS ||
+        vkBindImageMemory(gpu.device, entry.image, entry.memory, 0) != VK_SUCCESS)
+    {
+        vkDestroyImage(gpu.device, entry.image, nullptr);
+        if (entry.memory)
+            vkFreeMemory(gpu.device, entry.memory, nullptr);
+        return VK_NULL_HANDLE;
+    }
+    VkCommandBuffer commands = gpu.BeginCommands();
+    GpuImage view;
+    view.image = entry.image;
+    InitLayout(commands, view);
+    gpu.SubmitAndWait(commands);
+    entry.surface = static_cast<IOSurfaceRef>(const_cast<void*>(CFRetain(surface)));
+    imported[id] = entry;
+    return entry.image;
+}
 
 HotkeyCallback hotkeyCallback;
 std::map<int, EventHotKeyRef> hotkeys;
@@ -429,6 +527,7 @@ bool StartCapture(const Window& window, std::string& error)
         return false;
     }
     const uint64_t generation = ++capture.generation;
+    capture.onGpu = gpu.metalObjects;
     {
         std::lock_guard lock(capture.mutex);
         capture.error.clear();
@@ -471,7 +570,7 @@ bool StartCapture(const Window& window, std::string& error)
                                    config.showsCursor = NO;
                                    // As fast as the game draws, so the overlay adds no delay of its own.
                                    config.minimumFrameInterval = CMTimeMake(1, 240);
-                                   config.queueDepth = 5;
+                                   config.queueDepth = 8;
                                    config.colorSpaceName = kCGColorSpaceSRGB;
                                    if (@available(macOS 14.0, *))
                                        config.ignoreShadowsSingleWindow = YES;
@@ -519,8 +618,12 @@ void StopCapture()
         output.stream = nil;
         output = nil;
     }
-    std::lock_guard lock(capture.mutex);
-    capture.ready = {};
+    {
+        std::lock_guard lock(capture.mutex);
+        capture.ready = {};
+    }
+    // The host waited for the graphics card before stopping.
+    ReleaseImported();
 }
 
 bool Capturing()
@@ -530,10 +633,23 @@ bool Capturing()
 
 bool TakeFrame(Frame& frame)
 {
-    std::lock_guard lock(capture.mutex);
-    if (capture.ready.serial <= frame.serial || capture.ready.pixels.empty())
-        return false;
-    std::swap(frame, capture.ready);
+    {
+        std::lock_guard lock(capture.mutex);
+        if (capture.ready.serial <= frame.serial || (capture.ready.pixels.empty() && !capture.ready.hold))
+            return false;
+        std::swap(frame, capture.ready);
+    }
+    if (frame.hold)
+    {
+        frame.image = Import(CVPixelBufferGetIOSurface(static_cast<CVPixelBufferRef>(frame.hold.get())));
+        if (!frame.image)
+        {
+            // Stay with copies through memory from the next frame on.
+            Log(LogLevel::Warning, "Could not use captured frames on the graphics card. Copying them instead.");
+            capture.onGpu = false;
+            return false;
+        }
+    }
     return true;
 }
 

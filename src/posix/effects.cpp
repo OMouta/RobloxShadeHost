@@ -1520,16 +1520,58 @@ void Runtime::DestroyAllGpu()
 
 // Rendering
 
-void Runtime::Render(VkCommandBuffer commands, const uint32_t* pixels, bool enabled)
+namespace
+{
+// Images written outside Vulkan, such as dma-bufs the X server draws to, change hands with a queue family
+// ownership transfer around each use.
+void TransferForeign(VkCommandBuffer commands, VkImage image, bool acquire)
+{
+    const uint32_t outside = gpu.foreignQueue ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL;
+    VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    barrier.srcAccessMask = acquire ? 0 : VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = acquire ? VK_ACCESS_TRANSFER_READ_BIT : 0;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcQueueFamilyIndex = acquire ? outside : gpu.queueFamily;
+    barrier.dstQueueFamilyIndex = acquire ? gpu.queueFamily : outside;
+    barrier.image = image;
+    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &barrier);
+}
+
+void CopySource(VkCommandBuffer commands, const Runtime::Source& source, VkImage target, uint32_t width, uint32_t height)
+{
+    if (source.foreign)
+        TransferForeign(commands, source.image, true);
+    VkImageCopy region{};
+    region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.srcOffset = { int32_t(source.x), int32_t(source.y), 0 };
+    region.dstSubresource = region.srcSubresource;
+    region.extent = { width, height, 1 };
+    vkCmdCopyImage(commands, source.image, VK_IMAGE_LAYOUT_GENERAL, target, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+    if (source.foreign)
+        TransferForeign(commands, source.image, false);
+}
+} // namespace
+
+void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enabled)
 {
     if (!width || !height)
         return;
-    std::memcpy(staging.mapped, pixels, size_t(width) * height * 4);
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    copy.imageExtent = { width, height, 1 };
     FullBarrier(commands);
-    vkCmdCopyBufferToImage(commands, staging.buffer, backbuffer.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+    if (source.image)
+        // Straight from the capture on the graphics card. Alpha is whatever the window has, as in games where
+        // ReShade runs.
+        CopySource(commands, source, backbuffer.image, width, height);
+    else
+    {
+        std::memcpy(staging.mapped, source.pixels, size_t(width) * height * 4);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.imageExtent = { width, height, 1 };
+        vkCmdCopyBufferToImage(commands, staging.buffer, backbuffer.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+    }
     FullBarrier(commands);
 
     const auto now = std::chrono::steady_clock::now();
@@ -1600,6 +1642,17 @@ void Runtime::Render(VkCommandBuffer commands, const uint32_t* pixels, bool enab
 
 std::vector<uint8_t> Runtime::ReadOutput()
 {
+    return ReadImage(backbuffer.image, 0, 0, false);
+}
+
+std::vector<uint8_t> Runtime::ReadSource(const Source& source)
+{
+    return source.image ? ReadImage(source.image, source.x, source.y, source.foreign) : std::vector<uint8_t>();
+}
+
+// Copies width by height pixels at (x, y) of a BGRA image into memory, as RGBA. Waits for the graphics card.
+std::vector<uint8_t> Runtime::ReadImage(VkImage image, uint32_t x, uint32_t y, bool foreign)
+{
     std::vector<uint8_t> pixels;
     if (!width || !height)
         return pixels;
@@ -1613,10 +1666,15 @@ std::vector<uint8_t> Runtime::ReadOutput()
     vkDeviceWaitIdle(gpu.device);
     VkCommandBuffer commands = gpu.BeginCommands();
     FullBarrier(commands);
+    if (foreign)
+        TransferForeign(commands, image, true);
     VkBufferImageCopy copy{};
     copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copy.imageOffset = { int32_t(x), int32_t(y), 0 };
     copy.imageExtent = { width, height, 1 };
-    vkCmdCopyImageToBuffer(commands, backbuffer.image, VK_IMAGE_LAYOUT_GENERAL, readback.buffer, 1, &copy);
+    vkCmdCopyImageToBuffer(commands, image, VK_IMAGE_LAYOUT_GENERAL, readback.buffer, 1, &copy);
+    if (foreign)
+        TransferForeign(commands, image, false);
     gpu.SubmitAndWait(commands);
     pixels.resize(size);
     const uint8_t* source = static_cast<const uint8_t*>(readback.mapped);
