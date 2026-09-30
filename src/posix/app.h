@@ -7,12 +7,25 @@
 #include "platform.h"
 #include "setup.h"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
 
 struct GLFWwindow;
 struct ImGuiContext;
+
+// The presets folder holds presets for all games, and one level of folders in it. A folder named after a saved
+// game holds that game's presets.
+struct PresetFolder
+{
+    fs::path path;
+    std::string name;
+    bool all = false;
+    bool game = false;
+    bool playing = false;
+    std::vector<fs::path> presets;
+};
 
 // A window with its own swapchain and Dear ImGui context: the launcher, or the overlay over the game.
 struct UiWindow
@@ -41,11 +54,19 @@ public:
     void Select(std::optional<platform::Window> window);
     void AddActiveGame();
     void SaveGames();
-    std::vector<fs::path> Presets() const;
+    // As the menu lists them: the game being played, all games, then every other folder with presets.
+    std::vector<PresetFolder> PresetFolders() const;
+    // Other games' folders start closed, unless the active preset is in one. Folders opened or closed by hand
+    // stay that way.
+    bool FolderOpen(const PresetFolder& folder) const;
+    // Where new presets go: the folder of the game being played, or the presets folder without one.
+    fs::path NewPresetFolder() const;
     // Switches presets, saving or dropping unsaved changes as told. Returns false when there are unsaved changes
     // and neither was asked for.
     bool SwitchPreset(const fs::path& path, bool save, bool discard);
     bool NewPreset(const std::string& name, bool copyCurrent, std::string& error);
+    // Moves a preset into a folder, creating it.
+    bool MovePreset(const fs::path& preset, const fs::path& folder, std::string& error);
     void StepPreset(int step);
     void RequestScreenshot(bool beforeAfter);
     // Registers the new shortcuts and saves them. Keeps the old ones and returns false when one is taken.
@@ -63,6 +84,10 @@ public:
     std::vector<AutoGame> autoGames;
     std::optional<platform::Window> selected;
     std::optional<platform::Window> active;
+    // The saved game being played, by its folder's name. Empty for a window picked for this session only.
+    std::string game;
+    // Folders opened or closed by hand, by path.
+    std::map<std::string, bool> folderOpen;
     bool captureEnabled = true;
     bool menuOpen = false;
     bool effectsEnabled = true;
@@ -85,6 +110,9 @@ private:
     void SaveScreenshot();
     void StartCapture(const platform::Window& window);
     void StopCapture();
+    void FollowGame();
+    // Makes a preset the active one in Unishade.ini and for the game being played.
+    void UsePreset(const fs::path& path);
     bool RegisterShortcut(const Shortcut& shortcut, const Hotkey& hotkey);
     bool HasFrame() const;
     fx::Runtime::Source Source() const;

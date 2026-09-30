@@ -25,6 +25,7 @@
 #include <xcb/dri3.h>
 #endif
 #include <dlfcn.h>
+#include <stb_image_write.h>
 #include <sys/stat.h>
 
 #include <dirent.h>
@@ -1077,6 +1078,53 @@ void PollHotkeys()
                 hotkeyCallback(id, pressed);
         }
     }
+}
+
+bool SaveWindowIcon(const Window& window, const std::string& path)
+{
+    // _NET_WM_ICON holds each size as its width, its height and then ARGB pixels, one per 32-bit item.
+    ErrorTrap trap(display);
+    Atom actualType;
+    int format = 0;
+    unsigned long count = 0, remaining;
+    unsigned char* data = nullptr;
+    if (XGetWindowProperty(display, window.id, GetAtom(display, "_NET_WM_ICON"), 0, 1 << 22, False, XA_CARDINAL, &actualType, &format, &count,
+                           &remaining, &data) != Success || !data)
+    {
+        trap.Failed();
+        return false;
+    }
+    const unsigned long* items = reinterpret_cast<const unsigned long*>(data);
+    size_t largest = 0, largestSize = 0;
+    for (size_t i = 0; format == 32 && i + 2 <= count;)
+    {
+        const size_t size = items[i] * items[i + 1];
+        if (!size || size > count - i - 2)
+            break;
+        if (size > largestSize)
+        {
+            largest = i;
+            largestSize = size;
+        }
+        i += 2 + size;
+    }
+    bool saved = false;
+    if (largestSize)
+    {
+        const int width = static_cast<int>(items[largest]), height = static_cast<int>(items[largest + 1]);
+        std::vector<uint8_t> rgba(largestSize * 4);
+        for (size_t p = 0; p < largestSize; ++p)
+        {
+            const unsigned long argb = items[largest + 2 + p];
+            rgba[p * 4] = (argb >> 16) & 0xFF;
+            rgba[p * 4 + 1] = (argb >> 8) & 0xFF;
+            rgba[p * 4 + 2] = argb & 0xFF;
+            rgba[p * 4 + 3] = (argb >> 24) & 0xFF;
+        }
+        saved = stbi_write_png(path.c_str(), width, height, 4, rgba.data(), width * 4) != 0;
+    }
+    XFree(data);
+    return !trap.Failed() && saved;
 }
 
 void Open(const std::string& target)

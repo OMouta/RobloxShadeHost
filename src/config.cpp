@@ -175,6 +175,19 @@ void SetDebugInfoEnabled(bool enabled)
         Log(LogLevel::Warning, L"Could not save the debug info setting to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
+std::wstring GamePreset(const std::wstring& game)
+{
+    std::wstring value(32768, L'\0');
+    value.resize(GetPrivateProfileStringW(L"GamePresets", game.c_str(), L"", value.data(), static_cast<DWORD>(value.size()), IniPath().c_str()));
+    return value;
+}
+
+void SetGamePreset(const std::wstring& game, const std::wstring& preset)
+{
+    if (!WritePrivateProfileStringW(L"GamePresets", game.c_str(), preset.c_str(), IniPath().c_str()))
+        Log(LogLevel::Warning, L"Could not save the preset for %ls to RobloxShadeHost.ini.", game.c_str());
+}
+
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys)
 {
     const InputHotkeys previous = g.hotkeys;

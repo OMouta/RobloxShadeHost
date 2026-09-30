@@ -205,3 +205,18 @@ bool SaveSettings(const Settings& settings)
     Log(LogLevel::Warning, "Could not write %s.", path.c_str());
     return false;
 }
+
+fs::path GamePreset(const std::string& game)
+{
+    std::string value;
+    return IniText(ReadFile(DataDirectory() / "Unishade.ini")).Get("GAMEPRESETS", game, value) && !value.empty() ? Resolve(value) : fs::path();
+}
+
+void SetGamePreset(const std::string& game, const fs::path& preset)
+{
+    const fs::path path = DataDirectory() / "Unishade.ini";
+    IniText ini(ReadFile(path));
+    ini.Set("GAMEPRESETS", game, Relative(preset));
+    if (!WriteFile(path, ini.Text()))
+        Log(LogLevel::Warning, "Could not write %s.", path.c_str());
+}

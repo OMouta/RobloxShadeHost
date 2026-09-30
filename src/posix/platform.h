@@ -63,6 +63,8 @@ struct Process
     std::string command;
 };
 std::vector<Process> ListProcesses();
+// Saves the icon of the window's program as a PNG. Returns false when it has none.
+bool SaveWindowIcon(const Window& window, const std::string& path);
 
 // Makes the overlay stay above the game, out of the taskbar and the window switcher, and on every Space. Call
 // before the window is first shown.

@@ -17,6 +17,7 @@
 #include "update.h"
 #include "../installer/text.h"
 
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <wincodec.h>
 
@@ -29,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -116,12 +118,32 @@ struct Parameter
     bool noReset = false;
 };
 
+struct Texture
+{
+    resource image{};
+    resource_view view{};
+    int size = 0;
+};
+
+// The presets folder holds presets for all games, and one level of folders in it. A folder named after a saved
+// game holds that game's presets.
+struct PresetFolder
+{
+    fs::path path;
+    std::string name;
+    bool all = false;
+    bool game = false;
+    bool playing = false;
+    std::vector<fs::path> presets;
+};
+
 enum class NameAction
 {
     New,
     Duplicate,
     Rename,
     SaveAsNew,
+    NewFolder,
 };
 
 // What to do with unsaved changes before switching presets.
@@ -185,8 +207,15 @@ struct Menu
     // Set when the changes went into the preset being switched to, so the one left behind is reverted.
     bool pendingKeepsEdits = false;
 
-    std::vector<fs::path> presets;
+    // As the Presets tab lists them: the game being played, all games, then every other folder with presets.
+    std::vector<PresetFolder> folders;
     ULONGLONG presetsScanned = 0;
+    // Folders opened or closed by hand, by path.
+    std::map<std::wstring, bool> folderOpen;
+    // The saved game being played, by its folder's name. Empty for a window picked for this session only.
+    DWORD gameProcess = 0;
+    std::wstring game;
+    fs::path gamePreset;
     // Switching presets can reload effects, so it waits until the frame is drawn.
     fs::path pendingPreset;
     bool saveNewPreset = false;
@@ -208,9 +237,9 @@ struct Menu
     int capturing = -1;
     std::wstring shortcutError;
 
-    resource logo{};
-    resource_view logoView{};
-    int logoSize = 0;
+    Texture logo;
+    // By folder. A folder without a logo keeps an empty texture until the presets are scanned again.
+    std::map<std::wstring, Texture> folderLogos;
 };
 Menu m;
 
@@ -252,28 +281,17 @@ std::string Lower(std::string text)
     return text;
 }
 
-// Logo
+// Logos
 
-std::vector<BYTE> LogoPixels(UINT size)
+// Scales with premultiplied alpha, which keeps the transparent edge from darkening.
+std::vector<BYTE> ScaledPixels(IWICImagingFactory* factory, IWICBitmapDecoder* decoder, UINT size)
 {
-    const HRSRC info = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_LOGO), RT_RCDATA);
-    const HGLOBAL resource = info ? LoadResource(nullptr, info) : nullptr;
-    if (!resource)
-        return {};
-    winrt::com_ptr<IWICImagingFactory> factory;
-    winrt::com_ptr<IWICStream> stream;
-    winrt::com_ptr<IWICBitmapDecoder> decoder;
     winrt::com_ptr<IWICBitmapFrameDecode> frame;
     winrt::com_ptr<IWICFormatConverter> premultiplied;
     winrt::com_ptr<IWICBitmapScaler> scaler;
     winrt::com_ptr<IWICFormatConverter> straight;
     std::vector<BYTE> pixels(size * size * 4);
-    // Scaling with premultiplied alpha keeps the transparent edge from darkening.
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()))) ||
-        FAILED(factory->CreateStream(stream.put())) ||
-        FAILED(stream->InitializeFromMemory(static_cast<BYTE*>(LockResource(resource)), SizeofResource(nullptr, info))) ||
-        FAILED(factory->CreateDecoderFromStream(stream.get(), nullptr, WICDecodeMetadataCacheOnLoad, decoder.put())) ||
-        FAILED(decoder->GetFrame(0, frame.put())) || FAILED(factory->CreateFormatConverter(premultiplied.put())) ||
+    if (FAILED(decoder->GetFrame(0, frame.put())) || FAILED(factory->CreateFormatConverter(premultiplied.put())) ||
         FAILED(premultiplied->Initialize(frame.get(), GUID_WICPixelFormat32bppPRGBA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)) ||
         FAILED(factory->CreateBitmapScaler(scaler.put())) ||
         FAILED(scaler->Initialize(premultiplied.get(), size, size, WICBitmapInterpolationModeHighQualityCubic)) ||
@@ -284,32 +302,97 @@ std::vector<BYTE> LogoPixels(UINT size)
     return pixels;
 }
 
-void DestroyLogo()
+std::vector<BYTE> LogoPixels(UINT size)
 {
-    if (m.runtime && m.logoView.handle)
-        m.runtime->get_device()->destroy_resource_view(m.logoView);
-    if (m.runtime && m.logo.handle)
-        m.runtime->get_device()->destroy_resource(m.logo);
-    m.logo = {};
-    m.logoView = {};
-    m.logoSize = 0;
+    const HRSRC info = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_LOGO), RT_RCDATA);
+    const HGLOBAL resource = info ? LoadResource(nullptr, info) : nullptr;
+    if (!resource)
+        return {};
+    winrt::com_ptr<IWICImagingFactory> factory;
+    winrt::com_ptr<IWICStream> stream;
+    winrt::com_ptr<IWICBitmapDecoder> decoder;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()))) ||
+        FAILED(factory->CreateStream(stream.put())) ||
+        FAILED(stream->InitializeFromMemory(static_cast<BYTE*>(LockResource(resource)), SizeofResource(nullptr, info))) ||
+        FAILED(factory->CreateDecoderFromStream(stream.get(), nullptr, WICDecodeMetadataCacheOnLoad, decoder.put())))
+        return {};
+    return ScaledPixels(factory.get(), decoder.get(), size);
 }
 
-// Made at the size it is drawn, since ImGui draws textures without mipmaps.
-void UpdateLogo(int size)
+std::vector<BYTE> ImagePixels(const fs::path& file, UINT size)
 {
-    if (size == m.logoSize)
+    winrt::com_ptr<IWICImagingFactory> factory;
+    winrt::com_ptr<IWICBitmapDecoder> decoder;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()))) ||
+        FAILED(factory->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, decoder.put())))
+        return {};
+    return ScaledPixels(factory.get(), decoder.get(), size);
+}
+
+// Saves an executable's icon as a PNG.
+void SaveExecutableIcon(const fs::path& executable, const fs::path& file)
+{
+    HICON icon = nullptr;
+    if (SHDefExtractIconW(executable.c_str(), 0, 0, &icon, nullptr, 256) != S_OK)
         return;
-    DestroyLogo();
-    m.logoSize = size;
-    std::vector<BYTE> pixels = LogoPixels(size);
+    bool saved = false;
+    {
+        winrt::com_ptr<IWICImagingFactory> factory;
+        winrt::com_ptr<IWICBitmap> bitmap;
+        winrt::com_ptr<IWICStream> stream;
+        winrt::com_ptr<IWICBitmapEncoder> encoder;
+        winrt::com_ptr<IWICBitmapFrameEncode> frame;
+        saved = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()))) &&
+                SUCCEEDED(factory->CreateBitmapFromHICON(icon, bitmap.put())) && SUCCEEDED(factory->CreateStream(stream.put())) &&
+                SUCCEEDED(stream->InitializeFromFilename(file.c_str(), GENERIC_WRITE)) &&
+                SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, encoder.put())) &&
+                SUCCEEDED(encoder->Initialize(stream.get(), WICBitmapEncoderNoCache)) && SUCCEEDED(encoder->CreateNewFrame(frame.put(), nullptr)) &&
+                SUCCEEDED(frame->Initialize(nullptr)) && SUCCEEDED(frame->WriteSource(bitmap.get(), nullptr)) && SUCCEEDED(frame->Commit()) &&
+                SUCCEEDED(encoder->Commit());
+    }
+    DestroyIcon(icon);
+    std::error_code ignored;
+    if (!saved)
+        fs::remove(file, ignored);
+}
+
+void DestroyTexture(Texture& texture)
+{
+    if (m.runtime && texture.view.handle)
+        m.runtime->get_device()->destroy_resource_view(texture.view);
+    if (m.runtime && texture.image.handle)
+        m.runtime->get_device()->destroy_resource(texture.image);
+    texture = {};
+}
+
+// Made at the size it is drawn, since ImGui draws textures without mipmaps. Without pixels the texture stays
+// empty at that size, so it is not tried again every frame.
+void CreateTexture(Texture& texture, int size, std::vector<BYTE> pixels)
+{
+    DestroyTexture(texture);
+    texture.size = size;
     if (pixels.empty())
         return;
     device* device = m.runtime->get_device();
     const subresource_data data{ pixels.data(), static_cast<uint32_t>(size * 4), 0 };
     const resource_desc desc(size, size, 1, 1, format::r8g8b8a8_unorm, 1, memory_heap::default_, resource_usage::shader_resource);
-    if (device->create_resource(desc, &data, resource_usage::shader_resource, &m.logo))
-        device->create_resource_view(m.logo, resource_usage::shader_resource, resource_view_desc(format::r8g8b8a8_unorm), &m.logoView);
+    if (device->create_resource(desc, &data, resource_usage::shader_resource, &texture.image))
+        device->create_resource_view(texture.image, resource_usage::shader_resource, resource_view_desc(format::r8g8b8a8_unorm), &texture.view);
+}
+
+void UpdateLogo(int size)
+{
+    if (size != m.logo.size)
+        CreateTexture(m.logo, size, LogoPixels(size));
+}
+
+// A folder's logo.png, such as the icon saved for a game. 0 when it has none.
+uint64_t FolderLogo(const fs::path& folder, int size)
+{
+    Texture& texture = m.folderLogos[folder.wstring()];
+    if (size != texture.size)
+        CreateTexture(texture, size, ImagePixels(folder / L"logo.png", size));
+    return texture.view.handle;
 }
 
 // Drawing helpers
@@ -488,6 +571,22 @@ void CameraIcon(ImDrawList* draw, ImVec2 center, float size, ImU32 color)
     draw->AddCircle(ImVec2(center.x, center.y + size * 0.05f), size * 0.2f, color, 0, S(1.5f));
 }
 
+// Points down when open and right when closed.
+void Chevron(ImDrawList* draw, ImVec2 center, bool open, ImU32 color)
+{
+    const float r = S(3.5f);
+    if (open)
+    {
+        const ImVec2 points[] = { center + ImVec2(-r, -r / 2), center + ImVec2(0, r / 2), center + ImVec2(r, -r / 2) };
+        draw->AddPolyline(points, 3, color, 0, S(1.6f));
+    }
+    else
+    {
+        const ImVec2 points[] = { center + ImVec2(-r / 2, -r), center + ImVec2(r / 2, 0), center + ImVec2(-r / 2, r) };
+        draw->AddPolyline(points, 3, color, 0, S(1.6f));
+    }
+}
+
 void Rainbow(ImDrawList* draw, ImVec2 min, ImVec2 max)
 {
     constexpr int count = static_cast<int>(std::size(theme::kRainbow));
@@ -564,7 +663,39 @@ fs::path CurrentPreset()
     std::string path(size, '\0');
     m.runtime->get_current_preset_path(path.data(), &size);
     path.resize(size);
-    return fs::path(Wide(path));
+    return fs::path(Wide(path)).lexically_normal();
+}
+
+// Whether a preset is in the presets folder or one of its folders.
+bool InPresets(const fs::path& preset, const fs::path& root)
+{
+    const fs::path folder = preset.parent_path();
+    return _wcsicmp(folder.c_str(), root.c_str()) == 0 || _wcsicmp(folder.parent_path().c_str(), root.c_str()) == 0;
+}
+
+// The presets folder beside the exe. A preset elsewhere, picked in ReShade's menu, lists its own folder instead.
+fs::path PresetsRoot(const fs::path& current)
+{
+    const fs::path root = fs::path(ExeDirectory()) / L"presets";
+    return InPresets(current, root) ? root : current.parent_path();
+}
+
+// A game's folder is named after it, without what Windows does not allow in names.
+std::wstring FolderName(std::wstring name)
+{
+    for (wchar_t& character : name)
+        if (character < 32 || wcschr(L"\\/:*?\"<>|", character))
+            character = L' ';
+    name.erase(0, name.find_first_not_of(L' '));
+    // Windows drops dots and spaces from the end of names.
+    name.erase(name.find_last_not_of(L". ") + 1);
+    return name;
+}
+
+// Where new and imported presets go: the folder of the game being played, or the presets folder without one.
+fs::path NewPresetFolder(const fs::path& root)
+{
+    return m.game.empty() ? root : root / m.game;
 }
 
 void SavePreset()
@@ -630,11 +761,87 @@ bool SwitchNow(const fs::path& target)
     return true;
 }
 
-// Copies presets picked in the import dialog beside the others and switches to the first, asking about unsaved
-// changes like any other switch.
+// Switching to a game switches to the preset last used in it, and switching presets while playing a saved game
+// is remembered for it.
+void FollowGame()
+{
+    const fs::path current = CurrentPreset();
+    const DWORD process = g.activeGame ? g.activeGame->processId : 0;
+    if (process == m.gameProcess)
+    {
+        if (!m.game.empty() && !SamePath(current, m.gamePreset))
+        {
+            m.gamePreset = current;
+            SetGamePreset(m.game, current.lexically_relative(PresetsRoot(current)).wstring());
+        }
+        return;
+    }
+
+    m.gameProcess = process;
+    m.game.clear();
+    m.presetsScanned = 0;
+    fs::path executable;
+    try
+    {
+        executable = ProcessExecutable(process);
+    }
+    catch (const std::system_error&)
+    {
+        return;
+    }
+    for (const AutoGame& game : g.autoGames)
+        if (MatchesExecutable(game, executable))
+        {
+            m.game = FolderName(game.name);
+            break;
+        }
+    if (m.game.empty())
+        return;
+
+    // Games saved by filename, like Roblox, move with every update, so their icon is kept while they run.
+    const fs::path root = PresetsRoot(current);
+    const fs::path logo = root / m.game / L"logo.png";
+    std::error_code error;
+    if (!fs::exists(logo, error))
+    {
+        fs::create_directories(logo.parent_path(), error);
+        SaveExecutableIcon(executable, logo);
+    }
+
+    const std::wstring remembered = GamePreset(m.game);
+    const fs::path preset = (root / remembered).lexically_normal();
+    if (remembered.empty())
+        SetGamePreset(m.game, current.lexically_relative(root).wstring());
+    else if (!SamePath(preset, current) && fs::exists(preset, error) && !SwitchNow(preset))
+        ShowToast("Save or discard the changes to " + Utf8(current.stem().wstring()) + " to switch to " + Utf8(preset.stem().wstring()));
+    m.gamePreset = CurrentPreset();
+}
+
+// Moves a preset into a folder, creating it. Returns what went wrong, if anything.
+std::string MovePreset(const fs::path& preset, const fs::path& folder)
+{
+    const fs::path target = folder / preset.filename();
+    std::error_code error;
+    if (fs::exists(target, error))
+        return "There is already a preset named " + Utf8(preset.stem().wstring()) + " there.";
+    fs::create_directories(folder, error);
+    if (!error)
+        fs::rename(preset, target, error);
+    if (error)
+        return "Windows could not move " + Utf8(preset.stem().wstring()) + ".";
+    m.presetsScanned = 0;
+    return {};
+}
+
+// Copies presets picked in the import dialog into the folder for new presets and switches to the first, asking
+// about unsaved changes like any other switch.
 void ImportPresets(const std::vector<fs::path>& files)
 {
     const fs::path current = CurrentPreset();
+    const fs::path root = PresetsRoot(current);
+    const fs::path folder = NewPresetFolder(root);
+    std::error_code error;
+    fs::create_directories(folder, error);
     for (const fs::path& file : files)
     {
         const std::string name = Utf8(file.filename().wstring());
@@ -643,13 +850,13 @@ void ImportPresets(const std::vector<fs::path>& files)
             ShowToast(name + " is not a ReShade preset");
             continue;
         }
-        fs::path target = current.parent_path() / (file.stem().wstring() + L".ini");
-        std::error_code error;
+        fs::path target = file;
         // A preset picked from the presets folder is already there.
-        if (!SamePath(file, target))
+        if (!InPresets(file, root))
         {
+            target = folder / (file.stem().wstring() + L".ini");
             for (int copy = 2; fs::exists(target, error); ++copy)
-                target = current.parent_path() / (file.stem().wstring() + L" (" + std::to_wstring(copy) + L").ini");
+                target = folder / (file.stem().wstring() + L" (" + std::to_wstring(copy) + L").ini");
             if (!fs::copy_file(file, target, error))
             {
                 ShowToast("Windows could not copy " + name);
@@ -708,19 +915,73 @@ void OpenImportDialog()
     }).detach();
 }
 
+std::vector<fs::path> PresetsIn(const fs::path& folder)
+{
+    std::vector<fs::path> presets;
+    std::error_code error;
+    for (const auto& entry : fs::directory_iterator(folder, error))
+        if (entry.is_regular_file(error) && _wcsicmp(entry.path().extension().c_str(), L".ini") == 0 && IsPreset(entry.path()))
+            presets.push_back(entry.path());
+    std::sort(presets.begin(), presets.end(), [](const fs::path& a, const fs::path& b) { return _wcsicmp(a.stem().c_str(), b.stem().c_str()) < 0; });
+    return presets;
+}
+
 void ScanPresets(const fs::path& current)
 {
-    m.presets.clear();
+    const fs::path root = PresetsRoot(current);
+    // The game being played is listed even before it has presets, since new ones go there.
+    PresetFolder playing{ .path = root / m.game, .name = Utf8(m.game), .game = true, .playing = true };
+    PresetFolder all{ .path = root, .name = "All games", .all = true, .presets = PresetsIn(root) };
+    std::vector<PresetFolder> others;
     std::error_code error;
-    for (const auto& entry : fs::directory_iterator(current.parent_path(), error))
-        if (entry.is_regular_file(error) && _wcsicmp(entry.path().extension().c_str(), L".ini") == 0 && IsPreset(entry.path()))
-            m.presets.push_back(entry.path());
+    for (const auto& entry : fs::directory_iterator(root, error))
+    {
+        if (!entry.is_directory(error))
+            continue;
+        const std::wstring name = entry.path().filename().wstring();
+        if (!m.game.empty() && _wcsicmp(name.c_str(), m.game.c_str()) == 0)
+        {
+            playing.path = entry.path();
+            playing.name = Utf8(name);
+            playing.presets = PresetsIn(entry.path());
+            continue;
+        }
+        PresetFolder folder{ .path = entry.path(), .name = Utf8(name), .presets = PresetsIn(entry.path()) };
+        folder.game = std::any_of(g.autoGames.begin(), g.autoGames.end(),
+                                  [&](const AutoGame& game) { return _wcsicmp(FolderName(game.name).c_str(), name.c_str()) == 0; });
+        if (!folder.presets.empty())
+            others.push_back(std::move(folder));
+    }
+    std::sort(others.begin(), others.end(), [](const PresetFolder& a, const PresetFolder& b) { return _stricmp(a.name.c_str(), b.name.c_str()) < 0; });
+
+    m.folders.clear();
+    if (!m.game.empty())
+        m.folders.push_back(std::move(playing));
+    m.folders.push_back(std::move(all));
+    std::move(others.begin(), others.end(), std::back_inserter(m.folders));
     // ReShade writes a new preset a moment after switching to it.
-    if (std::none_of(m.presets.begin(), m.presets.end(), [&](const fs::path& preset) { return SamePath(preset, current); }))
-        m.presets.push_back(current);
-    std::sort(m.presets.begin(), m.presets.end(),
-              [](const fs::path& a, const fs::path& b) { return _wcsicmp(a.stem().c_str(), b.stem().c_str()) < 0; });
+    const auto listed = [&](const PresetFolder& folder) {
+        return std::any_of(folder.presets.begin(), folder.presets.end(), [&](const fs::path& preset) { return SamePath(preset, current); });
+    };
+    if (std::none_of(m.folders.begin(), m.folders.end(), listed))
+    {
+        const auto folder = std::find_if(m.folders.begin(), m.folders.end(), [&](const PresetFolder& folder) { return SamePath(folder.path, current.parent_path()); });
+        (folder != m.folders.end() ? *folder : m.folders.front()).presets.push_back(current);
+    }
+
+    // A logo saved since, such as the icon of a game that just started, shows on the next scan.
+    std::erase_if(m.folderLogos, [](const auto& entry) { return !entry.second.view.handle; });
     m.presetsScanned = GetTickCount64();
+}
+
+// Other games' folders start closed, unless the active preset is in one. Folders opened or closed by hand stay
+// that way.
+bool FolderOpen(const PresetFolder& folder, const fs::path& current)
+{
+    if (const auto found = m.folderOpen.find(folder.path.wstring()); found != m.folderOpen.end())
+        return found->second;
+    return !folder.game || folder.playing ||
+           std::any_of(folder.presets.begin(), folder.presets.end(), [&](const fs::path& preset) { return SamePath(preset, current); });
 }
 
 void OpenNamePopup(NameAction action, const fs::path& target)
@@ -729,9 +990,10 @@ void OpenNamePopup(NameAction action, const fs::path& target)
     m.nameTarget = target;
     m.nameError.clear();
     const std::string stem = Utf8(target.stem().wstring());
-    const std::string name = action == NameAction::New    ? "New preset"
-                             : action == NameAction::Rename ? stem
-                                                            : stem + " copy";
+    const std::string name = action == NameAction::New         ? "New preset"
+                             : action == NameAction::NewFolder ? "New folder"
+                             : action == NameAction::Rename    ? stem
+                                                               : stem + " copy";
     strncpy_s(m.name, name.c_str(), _TRUNCATE);
     m.openNamePopup = true;
 }
@@ -751,7 +1013,17 @@ bool ApplyName(const fs::path& current)
         m.nameError = "A name cannot contain \\ / : * ? \" < > |";
         return false;
     }
-    const fs::path path = current.parent_path() / (name + L".ini");
+    const fs::path root = PresetsRoot(current);
+    if (m.nameAction == NameAction::NewFolder)
+    {
+        // A folder that exists already, such as one hidden since its presets moved out, is used as it is.
+        m.nameError = MovePreset(m.nameTarget, root / name);
+        return m.nameError.empty();
+    }
+
+    // Other presets stay in the folder of the one they come from.
+    const fs::path folder = m.nameAction == NameAction::New ? NewPresetFolder(root) : m.nameTarget.parent_path();
+    const fs::path path = folder / (name + L".ini");
     std::error_code error;
     if (fs::exists(path, error) && !(m.nameAction == NameAction::Rename && SamePath(path, m.nameTarget)))
     {
@@ -763,6 +1035,7 @@ bool ApplyName(const fs::path& current)
     {
     case NameAction::New:
         // Switching to a preset that does not exist yet starts with every effect off.
+        fs::create_directories(folder, error);
         m.pendingPreset = path;
         m.saveNewPreset = true;
         break;
@@ -805,8 +1078,8 @@ void NamePopup(const fs::path& current)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(20), S(18)));
     if (ImGui::BeginPopupModal("##name", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize))
     {
-        const char* titles[] = { "New preset", "Duplicate preset", "Rename preset", "Save as new preset" };
-        const char* actions[] = { "Create", "Duplicate", "Rename", "Save" };
+        const char* titles[] = { "New preset", "Duplicate preset", "Rename preset", "Save as new preset", "Move to a new folder" };
+        const char* actions[] = { "Create", "Duplicate", "Rename", "Save", "Move" };
         const int action = static_cast<int>(m.nameAction);
         Text(titles[action], kText, 16.5f);
         if (m.nameAction == NameAction::New)
@@ -870,6 +1143,28 @@ void DeletePopup()
     ImGui::PopStyleVar();
 }
 
+// The folders a preset can move to: the ones listed, then saved games that have no presets yet.
+void MoveMenu(const fs::path& preset)
+{
+    const fs::path root = PresetsRoot(CurrentPreset());
+    std::vector<std::pair<std::string, fs::path>> targets;
+    for (const PresetFolder& folder : m.folders)
+        targets.emplace_back(folder.name, folder.path);
+    for (const AutoGame& game : g.autoGames)
+    {
+        const std::wstring name = FolderName(game.name);
+        if (!name.empty() && std::none_of(targets.begin(), targets.end(), [&](const auto& target) { return SamePath(target.second, root / name); }))
+            targets.emplace_back(Utf8(name), root / name);
+    }
+    for (const auto& [name, folder] : targets)
+        if (!SamePath(folder, preset.parent_path()) && ImGui::MenuItem(name.c_str()))
+            if (const std::string error = MovePreset(preset, folder); !error.empty())
+                ShowToast(error);
+    ImGui::Separator();
+    if (ImGui::MenuItem("New folder..."))
+        OpenNamePopup(NameAction::NewFolder, preset);
+}
+
 void PresetRow(const fs::path& path, bool active)
 {
     const std::string name = Utf8(path.stem().wstring());
@@ -923,6 +1218,11 @@ void PresetRow(const fs::path& path, bool active)
             OpenNamePopup(NameAction::Duplicate, path);
         if (ImGui::MenuItem("Rename", nullptr, false, !active))
             OpenNamePopup(NameAction::Rename, path);
+        if (ImGui::BeginMenu("Move to", !active))
+        {
+            MoveMenu(path);
+            ImGui::EndMenu();
+        }
         if (ImGui::MenuItem("Delete", nullptr, false, !active))
         {
             m.deleteTarget = path;
@@ -933,7 +1233,7 @@ void PresetRow(const fs::path& path, bool active)
         {
             ImGui::Separator();
             PushSize(12.5f);
-            ImGui::TextDisabled("Switch to another preset to\nrename or delete this one.");
+            ImGui::TextDisabled("Switch to another preset to\nrename, move or delete this one.");
             ImGui::PopFont();
         }
         ImGui::EndPopup();
@@ -942,6 +1242,93 @@ void PresetRow(const fs::path& path, bool active)
 
     ImGui::SetCursorScreenPos(start);
     ImGui::Dummy(size);
+    ImGui::PopID();
+}
+
+// The folder's logo.png, such as a game's icon, or a stand-in: a globe for all games, a game's first letter, or a
+// folder.
+void FolderIcon(ImDrawList* draw, const PresetFolder& folder, ImVec2 min, float size)
+{
+    const ImVec2 max = min + ImVec2(size, size);
+    if (const uint64_t logo = FolderLogo(folder.path, static_cast<int>(size)))
+    {
+        draw->AddImageRounded(ImTextureRef(logo), min, max, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, S(4));
+        return;
+    }
+    const ImVec2 center = (min + max) * 0.5f;
+    const float t = S(1.5f);
+    if (folder.all)
+    {
+        const float r = size * 0.4f;
+        draw->AddCircle(center, r, kDim, 0, t);
+        draw->AddEllipse(center, ImVec2(r * 0.45f, r), kDim, 0, 0, t);
+        draw->AddLine(center - ImVec2(r, 0), center + ImVec2(r, 0), kDim, t);
+    }
+    else if (folder.game)
+    {
+        draw->AddRectFilled(min, max, kBorder, S(5));
+        size_t length = 1;
+        while (length < folder.name.size() && (static_cast<unsigned char>(folder.name[length]) & 0xC0) == 0x80)
+            ++length;
+        const std::string letter = length == 1 ? std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(folder.name[0]))))
+                                               : folder.name.substr(0, length);
+        PushSize(13);
+        draw->AddText(center - ImGui::CalcTextSize(letter.c_str()) * 0.5f, kText, letter.c_str());
+        ImGui::PopFont();
+    }
+    else
+    {
+        const ImVec2 body(min.x + size * 0.1f, min.y + size * 0.32f);
+        draw->AddRectFilled(ImVec2(body.x, min.y + size * 0.2f), ImVec2(body.x + size * 0.35f, body.y + t), kDim, S(1.5f));
+        draw->AddRect(body, ImVec2(max.x - size * 0.1f, max.y - size * 0.18f), kDim, S(2), 0, t);
+    }
+}
+
+// A folder's logo, name and preset count. Clicking it opens or closes the folder.
+bool FolderHeader(const PresetFolder& folder, bool open)
+{
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const ImVec2 size(ImGui::GetContentRegionAvail().x, S(34));
+    const bool clicked = ImGui::InvisibleButton("folder", size, ImGuiButtonFlags_EnableNav);
+    const bool hovered = ImGui::IsItemHovered();
+    HandOnHover();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (hovered)
+        draw->AddRectFilled(start, start + size, kCard, S(8));
+
+    const float icon = std::round(S(22));
+    const ImVec2 iconStart(std::round(start.x + S(6)), std::round(start.y + (size.y - icon) / 2));
+    FolderIcon(draw, folder, iconStart, icon);
+
+    const float chevron = start.x + size.x - S(20);
+    PushSize(13);
+    const std::string count = std::to_string(folder.presets.size());
+    const ImVec2 countSize = ImGui::CalcTextSize(count.c_str());
+    const float countX = chevron - S(16) - countSize.x;
+    draw->AddText(ImVec2(countX, start.y + (size.y - countSize.y) / 2), kDim, count.c_str());
+    ImGui::PopFont();
+    PushSize(14.5f);
+    draw->PushClipRect(start, ImVec2(countX - S(10), start.y + size.y), true);
+    draw->AddText(ImVec2(iconStart.x + icon + S(10), start.y + (size.y - ImGui::GetFontSize()) / 2), kText, folder.name.c_str());
+    draw->PopClipRect();
+    ImGui::PopFont();
+    Chevron(draw, ImVec2(chevron, start.y + size.y / 2), open, open || hovered ? kText : kDim);
+    return clicked;
+}
+
+void FolderSection(const PresetFolder& folder, const fs::path& current)
+{
+    ImGui::PushID(Utf8(folder.path.wstring()).c_str());
+    const bool open = FolderOpen(folder, current);
+    if (FolderHeader(folder, open))
+        m.folderOpen[folder.path.wstring()] = !open;
+    if (open)
+    {
+        for (const fs::path& preset : folder.presets)
+            PresetRow(preset, SamePath(preset, current));
+        if (folder.presets.empty() && SamePath(folder.path, NewPresetFolder(PresetsRoot(current))))
+            Text("New presets and imports go here.", kDim, 13.5f);
+    }
     ImGui::PopID();
 }
 
@@ -1022,8 +1409,8 @@ void PresetsTab()
         ImGui::Dummy(ImVec2(0, S(2)));
     }
 
-    for (const fs::path& preset : m.presets)
-        PresetRow(preset, SamePath(preset, current));
+    for (const PresetFolder& folder : m.folders)
+        FolderSection(folder, current);
 
     ImGui::Dummy(ImVec2(0, S(4)));
     Text(m.autoSave ? "Changes save to the active preset as you make them."
@@ -1031,7 +1418,7 @@ void PresetsTab()
          kDim, 13);
     PushSize(13.5f);
     if (Link("Open presets folder"))
-        ShellOpen(current.parent_path().wstring());
+        ShellOpen(PresetsRoot(current).wstring());
     ImGui::PopFont();
     NamePopup(current);
     DeletePopup();
@@ -1349,18 +1736,7 @@ void TechniqueRow(Technique& technique)
     ImGui::PopFont();
     draw->PopClipRect();
 
-    const ImVec2 c(chevron, start.y + size.y / 2);
-    const float r = S(3.5f);
-    if (expanded)
-    {
-        const ImVec2 points[] = { c + ImVec2(-r, -r / 2), c + ImVec2(0, r / 2), c + ImVec2(r, -r / 2) };
-        draw->AddPolyline(points, 3, kText, 0, S(1.6f));
-    }
-    else
-    {
-        const ImVec2 points[] = { c + ImVec2(-r / 2, -r), c + ImVec2(r / 2, 0), c + ImVec2(-r / 2, r) };
-        draw->AddPolyline(points, 3, hovered ? kText : kDim, 0, S(1.6f));
-    }
+    Chevron(draw, ImVec2(chevron, start.y + size.y / 2), expanded, expanded || hovered ? kText : kDim);
 
     ImGui::SetCursorScreenPos(start);
     ImGui::Dummy(size);
@@ -1668,8 +2044,8 @@ void Header(ImVec2 origin, float width)
     const float logo = std::round(S(38));
     UpdateLogo(static_cast<int>(logo));
     const ImVec2 logoPosition = origin + ImVec2(std::round(S(kPadding)), std::round(S(18)));
-    if (m.logoView.handle)
-        draw->AddImage(ImTextureRef(m.logoView.handle), logoPosition, logoPosition + ImVec2(logo, logo));
+    if (m.logo.view.handle)
+        draw->AddImage(ImTextureRef(m.logo.view.handle), logoPosition, logoPosition + ImVec2(logo, logo));
     const float textX = S(kPadding) + logo + S(12);
     PushSize(16.5f);
     draw->AddText(origin + ImVec2(textX, S(17)), kText, "Unishade");
@@ -2128,10 +2504,16 @@ void CarryOutRequests()
     {
         const fs::path current = CurrentPreset();
         ScanPresets(current);
-        const int count = static_cast<int>(m.presets.size());
-        const int index = static_cast<int>(
-            std::find_if(m.presets.begin(), m.presets.end(), [&](const fs::path& preset) { return SamePath(preset, current); }) - m.presets.begin());
-        const fs::path& target = m.presets[((index + m.presetStep) % count + count) % count];
+        // The presets in open folders, in the order the Presets tab shows them.
+        std::vector<fs::path> presets;
+        for (const PresetFolder& folder : m.folders)
+            if (FolderOpen(folder, current))
+                presets.insert(presets.end(), folder.presets.begin(), folder.presets.end());
+        const int count = static_cast<int>(presets.size());
+        const auto found = std::find_if(presets.begin(), presets.end(), [&](const fs::path& preset) { return SamePath(preset, current); });
+        // From a preset in a closed folder, the next one is the first shown and the previous one the last.
+        const int index = found != presets.end() ? static_cast<int>(found - presets.begin()) : m.presetStep > 0 ? -1 : count;
+        const fs::path target = count ? presets[((index + m.presetStep) % count + count) % count] : current;
         m.presetStep = 0;
         if (!SamePath(target, current))
             ShowToast(SwitchNow(target) ? Utf8(target.stem().wstring())
@@ -2158,6 +2540,7 @@ void OnOverlay(effect_runtime* runtime)
         ImGui::SetWindowFocus(kDlssWindow);
         m.focusDlss = false;
     }
+    FollowGame();
     CarryOutRequests();
     const bool menu = g.editMode && !ReShadeMenuOpen();
     // The start hint, the only toast with a key, has done its job once the menu opens.
@@ -2199,7 +2582,10 @@ void OnDestroyRuntime(effect_runtime* runtime)
 {
     if (runtime != m.runtime)
         return;
-    DestroyLogo();
+    DestroyTexture(m.logo);
+    for (auto& [folder, texture] : m.folderLogos)
+        DestroyTexture(texture);
+    m.folderLogos.clear();
     m.runtime = nullptr;
     m.comparing = false;
     m.compareKey = 0;

@@ -6,8 +6,11 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
+#include <stb_image.h>
+#include <strings.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <climits>
 #include <cmath>
@@ -324,7 +327,10 @@ struct MenuState
     bool copyPreset = true;
     std::string presetError;
     fs::path pendingPreset; // waiting for an answer about unsaved changes
-    int recording = -1;     // the shortcut being recorded
+    std::vector<PresetFolder> folders;
+    double presetsListed = -10;
+    char folderName[128] = {};
+    int recording = -1; // the shortcut being recorded
     InputHotkeys editing;
     std::string shortcutError;
 };
@@ -542,25 +548,231 @@ void EffectsTab(App& app)
     }
 }
 
+// Folder logos in the overlay's Dear ImGui context, made at the size they are drawn, by folder. A folder without
+// one keeps an empty entry until the presets are listed again.
+struct Logo
+{
+    GpuImage image;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    int size = 0;
+};
+struct Logos
+{
+    ImGuiContext* context = nullptr;
+    std::map<std::string, Logo> byFolder;
+};
+Logos logos;
+
+void DestroyLogo(Logo& logo)
+{
+    if (logo.set)
+        ImGui_ImplVulkan_RemoveTexture(logo.set);
+    gpu.DestroyImage(logo.image);
+    logo = {};
+}
+
+// Averages the pixels each pixel of the result covers, weighted by alpha so transparent edges stay clean.
+std::vector<uint8_t> Shrink(const uint8_t* rgba, int width, int height, int size)
+{
+    std::vector<uint8_t> result(size_t(size) * size * 4);
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x)
+        {
+            const int x0 = x * width / size, x1 = std::max(x0 + 1, (x + 1) * width / size);
+            const int y0 = y * height / size, y1 = std::max(y0 + 1, (y + 1) * height / size);
+            uint64_t color[3] = {}, alpha = 0;
+            for (int sy = y0; sy < y1; ++sy)
+                for (int sx = x0; sx < x1; ++sx)
+                {
+                    const uint8_t* pixel = rgba + (size_t(sy) * width + sx) * 4;
+                    for (int c = 0; c < 3; ++c)
+                        color[c] += uint64_t(pixel[c]) * pixel[3];
+                    alpha += pixel[3];
+                }
+            uint8_t* out = &result[(size_t(y) * size + x) * 4];
+            for (int c = 0; c < 3; ++c)
+                out[c] = alpha ? uint8_t(color[c] / alpha) : 0;
+            out[3] = uint8_t(alpha / (uint64_t(x1 - x0) * uint64_t(y1 - y0)));
+        }
+    return result;
+}
+
+// A folder's logo.png, such as the icon saved for a game. Invalid when it has none.
+ImTextureID FolderLogo(const fs::path& folder, int size)
+{
+    logos.context = ImGui::GetCurrentContext();
+    Logo& logo = logos.byFolder[folder.string()];
+    if (size == logo.size || size <= 0)
+        return (ImTextureID)logo.set;
+    if (logo.set)
+        vkDeviceWaitIdle(gpu.device);
+    DestroyLogo(logo);
+    logo.size = size;
+    int width = 0, height = 0, channels = 0;
+    stbi_uc* pixels = stbi_load((folder / "logo.png").c_str(), &width, &height, &channels, 4);
+    if (!pixels)
+        return ImTextureID_Invalid;
+    const std::vector<uint8_t> rgba = Shrink(pixels, width, height, size);
+    stbi_image_free(pixels);
+    GpuBuffer upload;
+    if (gpu.CreateImage(logo.image, size, size, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
+        gpu.CreateBuffer(upload, rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true))
+    {
+        std::memcpy(upload.mapped, rgba.data(), rgba.size());
+        VkCommandBuffer commands = gpu.BeginCommands();
+        InitLayout(commands, logo.image);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copy.imageExtent = { uint32_t(size), uint32_t(size), 1 };
+        vkCmdCopyBufferToImage(commands, upload.buffer, logo.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        FullBarrier(commands);
+        gpu.SubmitAndWait(commands);
+        logo.set = ImGui_ImplVulkan_AddTexture(logo.image.view, VK_IMAGE_LAYOUT_GENERAL);
+    }
+    gpu.DestroyBuffer(upload);
+    if (!logo.set)
+        gpu.DestroyImage(logo.image);
+    return (ImTextureID)logo.set;
+}
+
+// The folder's logo, or a stand-in: a globe for all games, a game's first letter, or a folder.
+void FolderIcon(const PresetFolder& folder, float size)
+{
+    if (const ImTextureID logo = FolderLogo(folder.path, static_cast<int>(std::round(size * ImGui::GetIO().DisplayFramebufferScale.x))))
+    {
+        ImGui::Image(ImTextureRef(logo), ImVec2(size, size));
+        return;
+    }
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 min = ImGui::GetCursorScreenPos(), max(min.x + size, min.y + size);
+    const ImVec2 center((min.x + max.x) / 2, (min.y + max.y) / 2);
+    const float thickness = std::max(1.0f, size / 16);
+    ImGui::Dummy(ImVec2(size, size));
+    if (folder.all)
+    {
+        const float r = size * 0.4f;
+        draw->AddCircle(center, r, Color(theme::kDim), 0, thickness);
+        draw->AddEllipse(center, ImVec2(r * 0.45f, r), Color(theme::kDim), 0, 0, thickness);
+        draw->AddLine(ImVec2(center.x - r, center.y), ImVec2(center.x + r, center.y), Color(theme::kDim), thickness);
+    }
+    else if (folder.game)
+    {
+        draw->AddRectFilled(min, max, Color(theme::kBorder), size / 5);
+        size_t length = 1;
+        while (length < folder.name.size() && (static_cast<unsigned char>(folder.name[length]) & 0xC0) == 0x80)
+            ++length;
+        const std::string letter = length == 1 ? std::string(1, static_cast<char>(toupper(static_cast<unsigned char>(folder.name[0]))))
+                                               : folder.name.substr(0, length);
+        const ImVec2 text = ImGui::CalcTextSize(letter.c_str());
+        draw->AddText(ImVec2(center.x - text.x / 2, center.y - text.y / 2), Color(theme::kText), letter.c_str());
+    }
+    else
+    {
+        const ImVec2 body(min.x + size * 0.1f, min.y + size * 0.32f);
+        draw->AddRectFilled(ImVec2(body.x, min.y + size * 0.2f), ImVec2(body.x + size * 0.35f, body.y + thickness), Color(theme::kDim), thickness);
+        draw->AddRect(body, ImVec2(max.x - size * 0.1f, max.y - size * 0.18f), Color(theme::kDim), thickness * 1.5f, 0, thickness);
+    }
+}
+
+// The folders a preset can move to: the ones listed, saved games without presets yet, and a new folder.
+void MoveMenu(App& app, const fs::path& preset)
+{
+    std::vector<std::pair<std::string, fs::path>> targets;
+    for (const PresetFolder& folder : menu.folders)
+        targets.emplace_back(folder.name, folder.path);
+    for (const AutoGame& game : app.autoGames)
+    {
+        const std::string name = FolderName(game.name);
+        if (!name.empty() && std::none_of(targets.begin(), targets.end(), [&](const auto& target) {
+                return !strcasecmp(target.second.filename().c_str(), name.c_str());
+            }))
+            targets.emplace_back(name, PresetsDirectory() / name);
+    }
+    for (const auto& [name, folder] : targets)
+        if (folder != preset.parent_path() && ImGui::MenuItem(name.c_str()))
+        {
+            menu.presetError.clear();
+            app.MovePreset(preset, folder, menu.presetError);
+            menu.presetsListed = -10;
+        }
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+    const bool enter = ImGui::InputTextWithHint("##folder", "New folder", menu.folderName, sizeof(menu.folderName), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if ((ImGui::Button("Move") || enter) && menu.folderName[0])
+    {
+        const std::string name = menu.folderName;
+        menu.presetError.clear();
+        if (name.find_first_of("/\\:") != std::string::npos || name[0] == '.')
+            menu.presetError = "Folder names cannot contain slashes or start with a dot.";
+        else if (app.MovePreset(preset, PresetsDirectory() / name, menu.presetError))
+            menu.folderName[0] = 0;
+        menu.presetsListed = -10;
+        ImGui::CloseCurrentPopup();
+    }
+}
+
+void PresetRow(App& app, const fs::path& preset, const fs::path& current, ImGuiID unsavedPopup)
+{
+    const bool active = preset == current;
+    std::string label = preset.stem().string();
+    if (active && app.runtime.Dirty())
+        label += "  (changed)";
+    if (ImGui::Selectable((label + "##" + preset.string()).c_str(), active) && !active)
+    {
+        if (!app.SwitchPreset(preset, app.settings.autoSavePresets, false))
+        {
+            menu.pendingPreset = preset;
+            ImGui::OpenPopup(unsavedPopup);
+        }
+    }
+    if (ImGui::BeginPopupContextItem())
+    {
+        if (active)
+            ImGui::TextDisabled("Switch to another preset to move this one.");
+        else
+        {
+            ImGui::SeparatorText("Move to");
+            MoveMenu(app, preset);
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void PresetsTab(App& app)
 {
     const fs::path current = app.runtime.PresetPath();
-    ImGui::BeginChild("presets", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 4));
-    for (const fs::path& preset : app.Presets())
+    if (glfwGetTime() - menu.presetsListed > 1)
     {
-        const bool active = preset == current;
-        std::string label = preset.stem().string();
-        if (active && app.runtime.Dirty())
-            label += "  (changed)";
-        if (ImGui::Selectable((label + "##" + preset.string()).c_str(), active) && !active)
-        {
-            if (!app.SwitchPreset(preset, app.settings.autoSavePresets, false))
-            {
-                menu.pendingPreset = preset;
-                ImGui::OpenPopup("Unsaved changes");
-            }
-        }
+        menu.folders = app.PresetFolders();
+        menu.presetsListed = glfwGetTime();
+        // A logo saved since, such as the icon of a game that just started, shows now.
+        std::erase_if(logos.byFolder, [](const auto& entry) { return !entry.second.set; });
     }
+    ImGui::BeginChild("presets", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 4));
+    const ImGuiID unsavedPopup = ImGui::GetID("Unsaved changes");
+    for (const PresetFolder& folder : menu.folders)
+    {
+        ImGui::PushID(folder.path.c_str());
+        const bool open = app.FolderOpen(folder);
+        FolderIcon(folder, ImGui::GetFrameHeight());
+        ImGui::SameLine();
+        ImGui::SetNextItemOpen(open);
+        if (ImGui::CollapsingHeader((folder.name + "  " + std::to_string(folder.presets.size()) + "###folder").c_str()) != open)
+            app.folderOpen[folder.path.string()] = !open;
+        if (open)
+        {
+            const float indent = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x;
+            ImGui::Indent(indent);
+            for (const fs::path& preset : folder.presets)
+                PresetRow(app, preset, current, unsavedPopup);
+            if (folder.presets.empty() && (folder.playing || (folder.all && app.game.empty())))
+                Dim("New presets go here.");
+            ImGui::Unindent(indent);
+        }
+        ImGui::PopID();
+    }
+    Dim("Right-click a preset to move it.");
     if (ImGui::BeginPopupModal("Unsaved changes", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::Text("%s has changes that are not saved.", current.stem().c_str());
@@ -591,6 +803,7 @@ void PresetsTab(App& app)
         {
             menu.presetName[0] = 0;
             menu.presetError.clear();
+            menu.presetsListed = -10;
         }
     }
     ImGui::Checkbox("Start from the current preset", &menu.copyPreset);
@@ -831,6 +1044,12 @@ void ShutdownUi(UiWindow& ui)
         return;
     ImGui::SetCurrentContext(ui.context);
     vkDeviceWaitIdle(gpu.device);
+    if (ui.context == logos.context)
+    {
+        for (auto& [folder, logo] : logos.byFolder)
+            DestroyLogo(logo);
+        logos.byFolder.clear();
+    }
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext(ui.context);

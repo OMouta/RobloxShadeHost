@@ -101,6 +101,12 @@ int main()
     const AutoGame path{ "/usr/games/game", "Game" };
     ok &= Check(MatchesProcess(path, "/usr/games/game", "") && !MatchesProcess(path, "/opt/game", "game"), "a saved path must match exactly");
 
+    // A game's presets folder is named after it, with a name Windows also accepts.
+    ok &= Check(FolderName("Roblox") == "Roblox", "keeps a plain name");
+    ok &= Check(FolderName("Half-Life: Alyx") == "Half-Life  Alyx" && FolderName("a/b\\c") == "a b c", "replaces what Windows does not allow");
+    ok &= Check(FolderName("Pok\xC3\xA9mon \xE2\x98\x85") == "Pok\xC3\xA9mon \xE2\x98\x85", "keeps UTF-8 letters");
+    ok &= Check(FolderName("  Game... ") == "Game" && FolderName("\t?*") == "", "trims the ends Windows drops");
+
     // SHA-256, from the standard's own examples.
     ok &= Check(Sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "hashes nothing");
     ok &= Check(Sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "hashes abc");

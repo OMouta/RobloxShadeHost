@@ -74,5 +74,10 @@ void SetAutoSavePresets(bool enabled);
 bool DebugInfoEnabled();
 void SetDebugInfoEnabled(bool enabled);
 
+// The preset last used in a saved game, relative to the presets folder, from RobloxShadeHost.ini. Empty when the
+// game has none yet.
+std::wstring GamePreset(const std::wstring& game);
+void SetGamePreset(const std::wstring& game, const std::wstring& preset);
+
 // Folder of Unishade.exe, with a trailing backslash.
 std::wstring ExeDirectory();

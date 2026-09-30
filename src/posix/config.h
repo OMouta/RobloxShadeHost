@@ -34,6 +34,10 @@ Settings LoadSettings();
 // Returns false when the file cannot be written.
 bool SaveSettings(const Settings& settings);
 
+// The preset last used in a saved game, from Unishade.ini. Empty when the game has none yet.
+fs::path GamePreset(const std::string& game);
+void SetGamePreset(const std::string& game, const fs::path& preset);
+
 // "A=1,B" as ReShade writes preprocessor definitions, and back.
 std::vector<std::pair<std::string, std::string>> ParseDefinitions(const std::string& text);
 std::string FormatDefinitions(const std::vector<std::pair<std::string, std::string>>& definitions);

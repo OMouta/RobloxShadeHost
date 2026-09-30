@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <iterator>
 #include <strings.h>
 
 App app;
@@ -186,6 +187,7 @@ void App::StartCapture(const platform::Window& window)
     frame = {};
     lastCaptureError.clear();
     Log(LogLevel::Info, "Capturing %s", window.title.c_str());
+    FollowGame();
     if (!startHintShown)
     {
         ShowToast("Press " + HotkeyText(kEditModeHotkey) + " to open the Unishade menu", 6);
@@ -206,6 +208,7 @@ void App::StopCapture()
     if (active)
         Log(LogLevel::Info, "Stopped capturing %s.", active->title.c_str());
     active.reset();
+    game.clear();
     if (overlayVisible)
         platform::ShowOverlay(overlay.window, false);
     overlayVisible = false;
@@ -525,20 +528,145 @@ bool App::ChangeHotkeys(const InputHotkeys& hotkeys, std::string& error)
 
 // Presets
 
-std::vector<fs::path> App::Presets() const
+namespace
+{
+std::vector<fs::path> PresetsIn(const fs::path& folder)
 {
     std::vector<fs::path> presets;
     std::error_code error;
-    for (const auto& entry : fs::directory_iterator(PresetsDirectory(), error))
-        if (entry.is_regular_file() && Lowercase(entry.path().extension().string()) == ".ini")
+    for (const auto& entry : fs::directory_iterator(folder, error))
+        if (entry.is_regular_file(error) && Lowercase(entry.path().extension().string()) == ".ini")
             presets.push_back(entry.path());
-    const fs::path& current = runtime.PresetPath();
-    if (!current.empty() && std::find(presets.begin(), presets.end(), current) == presets.end())
-        presets.push_back(current);
     std::sort(presets.begin(), presets.end(), [](const fs::path& a, const fs::path& b) {
         return strcasecmp(a.stem().c_str(), b.stem().c_str()) < 0;
     });
     return presets;
+}
+} // namespace
+
+std::vector<PresetFolder> App::PresetFolders() const
+{
+    const fs::path root = PresetsDirectory();
+    // The game being played is listed even before it has presets, since new ones go there.
+    PresetFolder playing{ .path = root / game, .name = game, .game = true, .playing = true };
+    PresetFolder all{ .path = root, .name = "All games", .all = true, .presets = PresetsIn(root) };
+    std::vector<PresetFolder> others;
+    std::error_code error;
+    for (const auto& entry : fs::directory_iterator(root, error))
+    {
+        if (!entry.is_directory(error))
+            continue;
+        const std::string name = entry.path().filename().string();
+        if (!game.empty() && !strcasecmp(name.c_str(), game.c_str()))
+        {
+            playing.path = entry.path();
+            playing.name = name;
+            playing.presets = PresetsIn(entry.path());
+            continue;
+        }
+        PresetFolder folder{ .path = entry.path(), .name = name, .presets = PresetsIn(entry.path()) };
+        folder.game = std::any_of(autoGames.begin(), autoGames.end(),
+                                  [&](const AutoGame& saved) { return !strcasecmp(FolderName(saved.name).c_str(), name.c_str()); });
+        if (!folder.presets.empty())
+            others.push_back(std::move(folder));
+    }
+    std::sort(others.begin(), others.end(), [](const PresetFolder& a, const PresetFolder& b) { return strcasecmp(a.name.c_str(), b.name.c_str()) < 0; });
+
+    std::vector<PresetFolder> folders;
+    if (!game.empty())
+        folders.push_back(std::move(playing));
+    folders.push_back(std::move(all));
+    std::move(others.begin(), others.end(), std::back_inserter(folders));
+    // Unishade.ini can name a preset elsewhere, which is listed with all games.
+    const fs::path& current = runtime.PresetPath();
+    const auto listed = [&](const PresetFolder& folder) {
+        return std::find(folder.presets.begin(), folder.presets.end(), current) != folder.presets.end();
+    };
+    if (!current.empty() && std::none_of(folders.begin(), folders.end(), listed))
+    {
+        const auto folder = std::find_if(folders.begin(), folders.end(), [&](const PresetFolder& folder) { return folder.path == current.parent_path(); });
+        (folder != folders.end() ? *folder : folders[game.empty() ? 0 : 1]).presets.push_back(current);
+    }
+    return folders;
+}
+
+bool App::FolderOpen(const PresetFolder& folder) const
+{
+    if (const auto found = folderOpen.find(folder.path.string()); found != folderOpen.end())
+        return found->second;
+    return !folder.game || folder.playing || std::find(folder.presets.begin(), folder.presets.end(), runtime.PresetPath()) != folder.presets.end();
+}
+
+fs::path App::NewPresetFolder() const
+{
+    const fs::path root = PresetsDirectory();
+    if (game.empty())
+        return root;
+    // Names on Linux differ by case, and a folder named in another case is still the game's.
+    std::error_code error;
+    for (const auto& entry : fs::directory_iterator(root, error))
+        if (entry.is_directory(error) && !strcasecmp(entry.path().filename().c_str(), game.c_str()))
+            return entry.path();
+    return root / game;
+}
+
+bool App::MovePreset(const fs::path& preset, const fs::path& folder, std::string& error)
+{
+    const fs::path target = folder / preset.filename();
+    std::error_code failure;
+    if (fs::exists(target, failure))
+    {
+        error = "There is already a preset named " + preset.stem().string() + " there.";
+        return false;
+    }
+    fs::create_directories(folder, failure);
+    if (!failure)
+        fs::rename(preset, target, failure);
+    if (failure)
+    {
+        error = "Could not move " + preset.stem().string() + ".";
+        return false;
+    }
+    return true;
+}
+
+// Switching to a saved game switches to the preset last used in it.
+void App::FollowGame()
+{
+    game.clear();
+    const std::string executable = platform::ProcessExecutable(active->pid);
+    const std::string command = platform::ProcessCommand(active->pid);
+    for (const AutoGame& saved : autoGames)
+        if (MatchesProcess(saved, executable, command))
+        {
+            game = FolderName(saved.name);
+            break;
+        }
+    if (game.empty())
+        return;
+
+    // Games saved by filename, like Roblox, can only be found while they run, so their icon is kept.
+    const fs::path logo = NewPresetFolder() / "logo.png";
+    std::error_code error;
+    if (!fs::exists(logo, error))
+    {
+        fs::create_directories(logo.parent_path(), error);
+        platform::SaveWindowIcon(*active, logo.string());
+    }
+
+    const fs::path preset = GamePreset(game);
+    if (preset.empty())
+        SetGamePreset(game, runtime.PresetPath());
+    else if (preset != runtime.PresetPath() && fs::exists(preset, error) && !SwitchPreset(preset, settings.autoSavePresets, false))
+        ShowToast("Save or discard the changes to " + runtime.PresetPath().stem().string() + " to switch to " + preset.stem().string());
+}
+
+void App::UsePreset(const fs::path& path)
+{
+    settings.preset = path;
+    SaveSettings(settings);
+    if (!game.empty())
+        SetGamePreset(game, path);
 }
 
 bool App::SwitchPreset(const fs::path& path, bool save, bool discard)
@@ -553,8 +681,7 @@ bool App::SwitchPreset(const fs::path& path, bool save, bool discard)
             return false;
     }
     runtime.LoadPreset(path);
-    settings.preset = path;
-    SaveSettings(settings);
+    UsePreset(path);
     ShowToast("Preset: " + path.stem().string());
     return true;
 }
@@ -566,7 +693,7 @@ bool App::NewPreset(const std::string& name, bool copyCurrent, std::string& erro
         error = "Preset names cannot contain slashes or start with a dot.";
         return false;
     }
-    const fs::path path = PresetsDirectory() / (name + ".ini");
+    const fs::path path = NewPresetFolder() / (name + ".ini");
     if (fs::exists(path))
     {
         error = "A preset with that name already exists.";
@@ -580,8 +707,7 @@ bool App::NewPreset(const std::string& name, bool copyCurrent, std::string& erro
             error = "Could not write the preset.";
             return false;
         }
-        settings.preset = path;
-        SaveSettings(settings);
+        UsePreset(path);
         return true;
     }
     if (runtime.Dirty() && !settings.autoSavePresets)
@@ -599,7 +725,11 @@ bool App::NewPreset(const std::string& name, bool copyCurrent, std::string& erro
 
 void App::StepPreset(int step)
 {
-    const std::vector<fs::path> presets = Presets();
+    // The presets in open folders, in the order the menu shows them.
+    std::vector<fs::path> presets;
+    for (const PresetFolder& folder : PresetFolders())
+        if (FolderOpen(folder))
+            presets.insert(presets.end(), folder.presets.begin(), folder.presets.end());
     if (presets.empty())
         return;
     if (runtime.Dirty() && !settings.autoSavePresets)
@@ -608,8 +738,9 @@ void App::StepPreset(int step)
         return;
     }
     const auto current = std::find(presets.begin(), presets.end(), runtime.PresetPath());
-    const long index = current == presets.end() ? 0 : current - presets.begin();
     const long count = static_cast<long>(presets.size());
+    // From a preset in a closed folder, the next one is the first shown and the previous one the last.
+    const long index = current != presets.end() ? current - presets.begin() : step > 0 ? -1 : count;
     SwitchPreset(presets[((index + step) % count + count) % count], true, false);
 }
 

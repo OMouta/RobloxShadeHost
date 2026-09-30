@@ -482,6 +482,38 @@ std::vector<Process> ListProcesses()
     return processes;
 }
 
+bool SaveWindowIcon(const Window& window, const std::string& path)
+{
+    @autoreleasepool
+    {
+        NSImage* icon = [NSRunningApplication runningApplicationWithProcessIdentifier:window.pid].icon;
+        if (!icon)
+            return false;
+        // Drawn at 256 pixels from whichever of the icon's sizes fits best.
+        const NSInteger size = 256;
+        NSBitmapImageRep* bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
+                                                                           pixelsWide:size
+                                                                           pixelsHigh:size
+                                                                        bitsPerSample:8
+                                                                      samplesPerPixel:4
+                                                                             hasAlpha:YES
+                                                                             isPlanar:NO
+                                                                       colorSpaceName:NSCalibratedRGBColorSpace
+                                                                          bytesPerRow:0
+                                                                         bitsPerPixel:0];
+        NSGraphicsContext* context = bitmap ? [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap] : nil;
+        if (!context)
+            return false;
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext.currentContext = context;
+        [icon drawInRect:NSMakeRect(0, 0, size, size) fromRect:NSZeroRect operation:NSCompositingOperationCopy fraction:1.0];
+        [NSGraphicsContext restoreGraphicsState];
+        NSData* png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        NSString* file = [NSString stringWithUTF8String:path.c_str()];
+        return png && file && [png writeToFile:file atomically:YES];
+    }
+}
+
 void SetupOverlayWindow(GLFWwindow* window)
 {
     NSWindow* overlay = glfwGetCocoaWindow(window);
