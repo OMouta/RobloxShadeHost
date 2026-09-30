@@ -1,11 +1,10 @@
 #include "game_integration.h"
-#include "ini_text.h"
+#include "game_list.h"
 #include "../installer/text.h"
 
 #include <dwmapi.h>
 #include <tlhelp32.h>
 #include <algorithm>
-#include <charconv>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
@@ -41,46 +40,25 @@ std::vector<AutoGame> LoadAutoGames(const fs::path& path)
     std::ifstream input(path, std::ios::binary);
     if (!input)
         throw std::runtime_error("Could not read the saved game list");
-    IniText ini(std::string{ std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>() });
-    std::string countText;
-    size_t count = 0;
-    if (!ini.Get("Games", "Count", countText))
-        throw std::runtime_error("The saved game list has no game count");
-    const auto parsed = std::from_chars(countText.data(), countText.data() + countText.size(), count);
-    if (parsed.ec != std::errc{} || parsed.ptr != countText.data() + countText.size())
-        throw std::runtime_error("The saved game count is invalid");
     std::vector<AutoGame> games;
-    for (size_t i = 0; i < count; ++i)
-    {
-        const std::string section = "Game" + std::to_string(i);
-        std::string executable, name, enabled;
-        if (!ini.Get(section, "Executable", executable) || executable.empty() ||
-            !ini.Get(section, "Name", name) || name.empty() || !ini.Get(section, "Enabled", enabled) ||
-            (enabled != "0" && enabled != "1"))
-            throw std::runtime_error("A saved game entry is invalid");
-        games.push_back({ Wide(executable), Wide(name), enabled == "1" });
-    }
+    for (const GameListEntry& entry : ParseGameList(std::string{ std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>() }))
+        games.push_back({ Wide(entry.executable), Wide(entry.name), entry.enabled });
     return games;
 }
 
 void SaveAutoGames(const fs::path& path, std::span<const AutoGame> games)
 {
-    IniText ini("");
-    ini.Set("Games", "Count", std::to_string(games.size()));
-    for (size_t i = 0; i < games.size(); ++i)
-    {
-        const std::string section = "Game" + std::to_string(i);
-        ini.Set(section, "Executable", Utf8(games[i].executable.wstring()));
-        ini.Set(section, "Name", Utf8(games[i].name));
-        ini.Set(section, "Enabled", games[i].enabled ? "1" : "0");
-    }
+    std::vector<GameListEntry> entries;
+    for (const AutoGame& game : games)
+        entries.push_back({ Utf8(game.executable.wstring()), Utf8(game.name), game.enabled });
+    const std::string text = FormatGameList(entries);
     const fs::path temporary = path.wstring() + L".tmp";
     try
     {
         std::ofstream output;
         output.exceptions(std::ios::failbit | std::ios::badbit);
         output.open(temporary, std::ios::binary | std::ios::trunc);
-        output << ini.Text();
+        output << text;
         output.close();
         if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             throw std::system_error(GetLastError(), std::system_category(), "Could not save the game list");

@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(Unishade VERSION 0.5.1 LANGUAGES C CXX RC)
+if(WIN32)
+    project(Unishade VERSION 0.5.1 LANGUAGES C CXX RC)
+else()
+    project(Unishade VERSION 0.5.1 LANGUAGES C CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +21,34 @@ function(fetch_file url hash destination)
         endif()
     endif()
 endfunction()
+
+# Setup and the macOS and Linux host draw their windows with Dear ImGui and unpack effect packages with miniz.
+set(IMGUI_DIR "${CMAKE_BINARY_DIR}/imgui")
+set(IMGUI_URL "https://raw.githubusercontent.com/ocornut/imgui/v1.92.9b")
+fetch_file("${IMGUI_URL}/imgui.h" 0d8db1045db01d908853adfd26ae07c5bc5ab4789d4515f6ea34234a69ade0ca "${IMGUI_DIR}/imgui.h")
+fetch_file("${IMGUI_URL}/imgui.cpp" 5a1e5128c0305f50b6556a77f71fde35836505883b74c1d6ae44723243f1e8de "${IMGUI_DIR}/imgui.cpp")
+fetch_file("${IMGUI_URL}/imgui_internal.h" efba9bccc971cc49ec3da3168968ba412c7ea89745c104a7f5c004c8349bc71f "${IMGUI_DIR}/imgui_internal.h")
+fetch_file("${IMGUI_URL}/imgui_draw.cpp" 83d30419a8e06a5f0a8692ee6de186f7ecfddecdc33769e76244837e2975b400 "${IMGUI_DIR}/imgui_draw.cpp")
+fetch_file("${IMGUI_URL}/imgui_tables.cpp" b5deabe5b569ab712c11b6556562a646bf88327320fc60a451071b2a36498d72 "${IMGUI_DIR}/imgui_tables.cpp")
+fetch_file("${IMGUI_URL}/imgui_widgets.cpp" a8a0b2f65caa5711467d9e3ca4028fded48329ea65e11ec92a968293dc2aa231 "${IMGUI_DIR}/imgui_widgets.cpp")
+fetch_file("${IMGUI_URL}/imconfig.h" 5755e1b8d6ab0d7811a9d7cac0f509878b51fc5ee77e09bd0f235bcb414971e7 "${IMGUI_DIR}/imconfig.h")
+fetch_file("${IMGUI_URL}/imstb_rectpack.h" 889b396795202d1457560a797a7242e96f6f132d4b88ca2d69be58bf05e1771f "${IMGUI_DIR}/imstb_rectpack.h")
+fetch_file("${IMGUI_URL}/imstb_textedit.h" a985f5fa0ed97353d493b497961e9eef52082edcd045cf6954b69990ec9d0741 "${IMGUI_DIR}/imstb_textedit.h")
+fetch_file("${IMGUI_URL}/imstb_truetype.h" c51a0f7e7ea760f2366bd3752635ec58e21fccfec4a832501639990ba6ce0528 "${IMGUI_DIR}/imstb_truetype.h")
+
+set(MINIZ_DIR "${CMAKE_BINARY_DIR}/miniz")
+if(NOT EXISTS "${MINIZ_DIR}/miniz.c")
+    fetch_file("https://github.com/richgel999/miniz/releases/download/3.1.2/miniz-3.1.2.zip"
+        f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a "${CMAKE_BINARY_DIR}/miniz-3.1.2.zip")
+    file(ARCHIVE_EXTRACT INPUT "${CMAKE_BINARY_DIR}/miniz-3.1.2.zip" DESTINATION "${MINIZ_DIR}" PATTERNS miniz.c miniz.h)
+endif()
+
+# macOS and Linux have their own host in src/posix. ReShade itself only runs on Windows, so it uses ReShade's
+# effect compiler with Vulkan instead.
+if(NOT WIN32)
+    include(src/posix/posix.cmake)
+    return()
+endif()
 
 set(RESHADE_INCLUDE "${CMAKE_BINARY_DIR}/reshade/include")
 set(RESHADE_HEADERS_URL "https://raw.githubusercontent.com/crosire/reshade/v6.8.0/include")
@@ -65,30 +97,11 @@ target_compile_definitions(Unishade PRIVATE UNISHADE_VERSION_RESOURCE=${PROJECT_
 target_compile_options(Unishade PRIVATE /W4 /permissive- /EHsc /bigobj)
 target_link_libraries(Unishade PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi windowsapp gdi32 gdiplus version winhttp bcrypt shlwapi windowscodecs)
 
-# Setup draws its window with Dear ImGui and unpacks effect packages with miniz.
-set(IMGUI_DIR "${CMAKE_BINARY_DIR}/imgui")
-set(IMGUI_URL "https://raw.githubusercontent.com/ocornut/imgui/v1.92.9b")
-fetch_file("${IMGUI_URL}/imgui.h" 0d8db1045db01d908853adfd26ae07c5bc5ab4789d4515f6ea34234a69ade0ca "${IMGUI_DIR}/imgui.h")
-fetch_file("${IMGUI_URL}/imgui.cpp" 5a1e5128c0305f50b6556a77f71fde35836505883b74c1d6ae44723243f1e8de "${IMGUI_DIR}/imgui.cpp")
-fetch_file("${IMGUI_URL}/imgui_internal.h" efba9bccc971cc49ec3da3168968ba412c7ea89745c104a7f5c004c8349bc71f "${IMGUI_DIR}/imgui_internal.h")
-fetch_file("${IMGUI_URL}/imgui_draw.cpp" 83d30419a8e06a5f0a8692ee6de186f7ecfddecdc33769e76244837e2975b400 "${IMGUI_DIR}/imgui_draw.cpp")
-fetch_file("${IMGUI_URL}/imgui_tables.cpp" b5deabe5b569ab712c11b6556562a646bf88327320fc60a451071b2a36498d72 "${IMGUI_DIR}/imgui_tables.cpp")
-fetch_file("${IMGUI_URL}/imgui_widgets.cpp" a8a0b2f65caa5711467d9e3ca4028fded48329ea65e11ec92a968293dc2aa231 "${IMGUI_DIR}/imgui_widgets.cpp")
-fetch_file("${IMGUI_URL}/imconfig.h" 5755e1b8d6ab0d7811a9d7cac0f509878b51fc5ee77e09bd0f235bcb414971e7 "${IMGUI_DIR}/imconfig.h")
-fetch_file("${IMGUI_URL}/imstb_rectpack.h" 889b396795202d1457560a797a7242e96f6f132d4b88ca2d69be58bf05e1771f "${IMGUI_DIR}/imstb_rectpack.h")
-fetch_file("${IMGUI_URL}/imstb_textedit.h" a985f5fa0ed97353d493b497961e9eef52082edcd045cf6954b69990ec9d0741 "${IMGUI_DIR}/imstb_textedit.h")
-fetch_file("${IMGUI_URL}/imstb_truetype.h" c51a0f7e7ea760f2366bd3752635ec58e21fccfec4a832501639990ba6ce0528 "${IMGUI_DIR}/imstb_truetype.h")
+# Setup's window uses Dear ImGui's Win32 and Direct3D 11 backends.
 fetch_file("${IMGUI_URL}/backends/imgui_impl_win32.h" 2736595b8de1e56871661d5d9b96deec567d35521746fbe2ade8f0543acdfd2b "${IMGUI_DIR}/backends/imgui_impl_win32.h")
 fetch_file("${IMGUI_URL}/backends/imgui_impl_win32.cpp" 6a602ce28470bb209636c40633156e63a530acd49f137819d837d80688d52df6 "${IMGUI_DIR}/backends/imgui_impl_win32.cpp")
 fetch_file("${IMGUI_URL}/backends/imgui_impl_dx11.h" fb8a314a6a2904dcc5bfeb938a169389e170f233ad367d33f1ce5c7bde586a7c "${IMGUI_DIR}/backends/imgui_impl_dx11.h")
 fetch_file("${IMGUI_URL}/backends/imgui_impl_dx11.cpp" 749d12b01011f504284497db21cb52b3c6f73c59612e7115f46f41e0c4ea1c49 "${IMGUI_DIR}/backends/imgui_impl_dx11.cpp")
-
-set(MINIZ_DIR "${CMAKE_BINARY_DIR}/miniz")
-if(NOT EXISTS "${MINIZ_DIR}/miniz.c")
-    fetch_file("https://github.com/richgel999/miniz/releases/download/3.1.2/miniz-3.1.2.zip"
-        f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a "${CMAKE_BINARY_DIR}/miniz-3.1.2.zip")
-    file(ARCHIVE_EXTRACT INPUT "${CMAKE_BINARY_DIR}/miniz-3.1.2.zip" DESTINATION "${MINIZ_DIR}" PATTERNS miniz.c miniz.h)
-endif()
 
 add_library(setup_libraries STATIC EXCLUDE_FROM_ALL
     "${IMGUI_DIR}/imgui.cpp"
