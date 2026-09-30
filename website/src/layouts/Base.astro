@@ -5,6 +5,10 @@ import logo from '../../../assets/UnishadeSmall.png';
 import icon from '../../../assets/Unishade.ico?url';
 import banner from '../../../assets/unishade-banner1.png';
 import { links } from '../links';
+import BookIcon from '../icons/book.svg';
+import DiscordIcon from '../icons/discord.svg';
+import GithubIcon from '../icons/github.svg';
+import KofiIcon from '../icons/kofi.svg';
 
 interface Props {
   title: string;
@@ -40,12 +44,20 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
         <span class="brand-name">Unishade</span>
       </a>
       <nav aria-label="Main">
-        <a href="/docs/">Docs</a>
-        <a href={links.discord}>Discord</a>
-        <a href={links.github}>GitHub</a>
+        <a href="/docs/"><BookIcon aria-hidden="true" />Docs</a>
+        <a href={links.discord}><DiscordIcon aria-hidden="true" />Discord</a>
+        <a href={links.github}><GithubIcon aria-hidden="true" />GitHub</a>
+        <a class="kofi" href={links.kofi}><KofiIcon aria-hidden="true" />Ko-fi</a>
         <a class="button button-primary" href="/download/">Download</a>
       </nav>
     </header>
+
+    <script>
+      const nav = document.querySelector('.nav')!;
+      const update = () => nav.classList.toggle('scrolled', window.scrollY > 0);
+      addEventListener('scroll', update, { passive: true });
+      update();
+    </script>
 
     <slot />
 
@@ -54,6 +66,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
         <p>
           Need help? Ask on <a href={links.discord}>Discord</a>. Only the newest version is supported, and updating keeps your presets.
         </p>
+        <p>Unishade is free. You can support it on <a href={links.kofi}>Ko-fi</a>.</p>
         <p class="dim">
           Effects run on <a href={links.reshade}>ReShade</a> by crosire. Unishade isn't affiliated with the games it runs on.{' '}
           <a href={links.github}>Source on GitHub</a>, <a href={links.license}>MIT license</a>.
@@ -64,24 +77,35 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
 </html>
 
 <style>
+  /* Spans the window so the background does too, with the links on the page's edges. */
   .nav {
+    position: sticky;
+    top: 0;
+    z-index: 10;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 24px;
-    width: var(--page);
-    margin: 0 auto;
-    padding: 18px 0;
+    height: var(--nav-height);
+    padding: 0 calc((100% - var(--page)) / 2);
+    transition: background-color 0.2s, box-shadow 0.2s;
   }
 
-  /* Over the picture, but on the same edges as the page. */
   .nav.overlay {
-    position: absolute;
+    position: fixed;
     inset: 0 0 auto;
-    z-index: 3;
-    width: auto;
-    padding: 18px calc((100% - var(--page)) / 2);
-    background: linear-gradient(to bottom, rgb(15 16 36 / 0.7), transparent);
+    background-image: linear-gradient(to bottom, rgb(15 16 36 / 0.7), transparent);
+  }
+
+  .nav.scrolled {
+    box-shadow: 0 1px 0 var(--line);
+    background-color: rgb(15 16 36 / 0.8);
+    backdrop-filter: blur(16px);
+  }
+
+  .nav .button {
+    min-height: 40px;
+    padding: 0 18px;
   }
 
   .brand {
@@ -106,8 +130,20 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
   }
 
   nav a:not(.button) {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     color: var(--ink);
     text-decoration: none;
+  }
+
+  nav svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .kofi svg {
+    color: #ff5e5b;
   }
 
   nav a:not(.button):hover {
@@ -127,7 +163,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     padding: 36px 0 48px;
   }
 
-  @media (max-width: 720px) {
+  @media (max-width: 780px) {
     nav a:not(.button) {
       display: none;
     }

@@ -14,8 +14,11 @@
   --page: min(1180px, 100% - 2 * var(--gutter));
   --gutter: clamp(20px, 4vw, 48px);
   --radius: 14px;
+  --nav-height: 72px;
 
   color-scheme: dark;
+  /* Links to a heading stop below the navigation. */
+  scroll-padding-top: calc(var(--nav-height) + 24px);
   font-family: 'Archivo Variable', system-ui, sans-serif;
   font-size: 106.25%;
   line-height: 1.6;

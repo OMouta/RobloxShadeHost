@@ -10,14 +10,28 @@
   <a href="https://discord.gg/wVbVUdENas">Discord</a>
 </p>
 
-<p align="center">Formerly RobloxShadeHost.</p>
+Unishade puts ReShade effects on games where ReShade can't run. It used to be called RobloxShadeHost.
 
-Unishade applies ReShade post-processing externally to supported games, making it useful where traditional ReShade injection is unavailable or undesirable. It runs outside the game process, captures the game image through Windows Graphics Capture, and renders ReShade effects in an overlay, with ReShade itself running inside Unishade’s process. Unishade does not inject DLLs into the game or modify game files as part of its normal architecture.
+It never touches the game. Unishade copies the game's window, runs the effects on the copy and draws the result on top. ReShade runs inside Unishade, and nothing gets injected into the game or changed in its files.
 
-Unishade also runs on macOS and Linux, where ReShade itself does not. See [macOS and Linux](https://unishade.me/docs/macos-linux/) and [src/posix](src/posix/README.md).
+## Getting started
 
-Use normal ReShade where it already works for you. Unishade support depends on the game’s compatibility with external capture and overlays.
+1. [Download Setup](https://unishade.me/download/) and run it. You get ReShade, every official effect and a set of presets.
+2. Open your game, click **Add game** in Unishade and pick its window.
+3. Press **Home** in the game and pick a preset.
+
+Games need to run windowed or borderless. Unishade also runs on [macOS and Linux](https://unishade.me/docs/macos-linux/), where ReShade itself doesn't.
+
+If regular ReShade already works in your game, use that.
+
+## Help and presets
+
+Ask on [Discord](https://discord.gg/wVbVUdENas). People share their presets there too. The [docs](https://unishade.me/docs/) cover the menu, add-ons and troubleshooting.
+
+To build Unishade or send a preset, see [CONTRIBUTING.md](CONTRIBUTING.md). The macOS and Linux version lives in [src/posix](src/posix/README.md).
+
+Unishade is free. If you want to support it, I'm on [Ko-fi](https://ko-fi.com/omouta).
 
 ## License
 
-Unishade is licensed under the [MIT license](LICENSE).
+[MIT](LICENSE)
