@@ -411,11 +411,13 @@ void Runtime::SetSize(uint32_t newWidth, uint32_t newHeight)
         width = height = 0;
         return;
     }
-    Reload();
+    // Right away: the size changes before the frame records any pass, so nothing uses the old effects yet.
+    ReloadNow();
 }
 
-void Runtime::Reload()
+void Runtime::ReloadNow()
 {
+    reloadRequested = false;
     StopLoader();
     if (!width || !height)
         return;
@@ -500,6 +502,8 @@ void Runtime::Reload()
 
 void Runtime::Update()
 {
+    if (reloadRequested)
+        ReloadNow();
     std::deque<Effect> arrived;
     {
         std::lock_guard lock(finishedMutex);

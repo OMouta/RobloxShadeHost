@@ -18,6 +18,7 @@
 #include <libproc.h>
 #include <spawn.h>
 #include <sys/sysctl.h>
+#include <strings.h>
 #include <sys/wait.h>
 #include <unistd.h>
 

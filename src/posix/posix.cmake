@@ -7,6 +7,8 @@
 #         MoltenVK copied inside so it runs without Homebrew.
 
 if(APPLE)
+    # Objective-C first: the language enabled first owns the .m extension, and GLFW's .m files are not C++.
+    enable_language(OBJC)
     enable_language(OBJCXX)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "")
 endif()
@@ -76,6 +78,11 @@ FetchContent_Declare(glfw
     URL_HASH SHA256=b5ec004b2712fd08e8861dc271428f048775200a2df719ccf575143ba749a3e9
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(glfw)
+if(APPLE)
+    get_target_property(GLFW_SOURCES glfw SOURCES)
+    list(FILTER GLFW_SOURCES INCLUDE REGEX "\\.m$")
+    set_source_files_properties(${GLFW_SOURCES} TARGET_DIRECTORY glfw PROPERTIES LANGUAGE OBJC)
+endif()
 
 # Vulkan: the system loader on Linux. On macOS MoltenVK is linked directly, so the app carries its own
 # Vulkan implementation and needs no loader or driver manifest.
@@ -106,7 +113,8 @@ add_library(posix_libraries STATIC
     "${MINIZ_DIR}/miniz.c"
     "${POSIX_DIR}/stb.cpp")
 target_include_directories(posix_libraries PUBLIC "${IMGUI_DIR}" "${IMGUI_DIR}/backends" "${MINIZ_DIR}" "${STB_DIR}")
-target_compile_definitions(posix_libraries PUBLIC MINIZ_NO_TIME)
+# Vulkan only: without this GLFW's header pulls in OpenGL's.
+target_compile_definitions(posix_libraries PUBLIC MINIZ_NO_TIME GLFW_INCLUDE_NONE)
 target_compile_options(posix_libraries PRIVATE -w)
 target_link_libraries(posix_libraries PUBLIC glfw unishade_vulkan)
 

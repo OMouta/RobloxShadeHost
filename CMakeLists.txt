@@ -97,6 +97,7 @@ target_compile_definitions(Unishade PRIVATE UNISHADE_VERSION_RESOURCE=${PROJECT_
 target_compile_options(Unishade PRIVATE /W4 /permissive- /EHsc /bigobj)
 target_link_libraries(Unishade PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi windowsapp gdi32 gdiplus version winhttp bcrypt shlwapi windowscodecs)
 
+# Setup's window uses Dear ImGui's Win32 and Direct3D 11 backends.
 fetch_file("${IMGUI_URL}/backends/imgui_impl_win32.h" 2736595b8de1e56871661d5d9b96deec567d35521746fbe2ade8f0543acdfd2b "${IMGUI_DIR}/backends/imgui_impl_win32.h")
 fetch_file("${IMGUI_URL}/backends/imgui_impl_win32.cpp" 6a602ce28470bb209636c40633156e63a530acd49f137819d837d80688d52df6 "${IMGUI_DIR}/backends/imgui_impl_win32.cpp")
 fetch_file("${IMGUI_URL}/backends/imgui_impl_dx11.h" fb8a314a6a2904dcc5bfeb938a169389e170f233ad367d33f1ce5c7bde586a7c "${IMGUI_DIR}/backends/imgui_impl_dx11.h")

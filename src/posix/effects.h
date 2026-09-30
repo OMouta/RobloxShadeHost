@@ -98,9 +98,10 @@ public:
     uint32_t Width() const { return width; }
     uint32_t Height() const { return height; }
 
-    // Finds the effects again and compiles them on worker threads. Effects the current preset uses come first.
-    void Reload();
-    bool Loading() const { return loaderRunning; }
+    // Finds the effects again and compiles them on worker threads, starting at the next Update, since the frame
+    // being recorded may still use the current ones. Effects the current preset uses come first.
+    void Reload() { reloadRequested = true; }
+    bool Loading() const { return loaderRunning || reloadRequested; }
     // How many effect files are compiled out of how many were found.
     std::pair<size_t, size_t> LoadingProgress() const { return { loadedCount.load(), totalCount.load() }; }
     // Takes in compiled effects. Call once per frame on the main thread.
@@ -152,6 +153,7 @@ private:
     };
 
     void StopLoader();
+    void ReloadNow();
     void AddEffect(Effect&& effect);
     void SortTechniques();
     void ApplyPreset(Effect& effect, size_t effectIndex);
@@ -192,6 +194,7 @@ private:
     std::thread loader;
     std::atomic<bool> cancel = false;
     std::atomic<bool> loaderRunning = false;
+    bool reloadRequested = false;
     std::atomic<size_t> loadedCount = 0;
     std::atomic<size_t> totalCount = 0;
     std::mutex finishedMutex;
