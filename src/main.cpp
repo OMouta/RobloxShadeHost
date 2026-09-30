@@ -138,7 +138,7 @@ int Run()
                 {
                     g.latestFrame = nullptr;
                     g.poolSize = size;
-                    g.pool.Recreate(g.captureDevice, kPixelFormat, 2, size);
+                    g.pool.Recreate(g.captureDevice, g.captureFormat, 2, size);
                     Log(LogLevel::Info, L"Roblox resized to %dx%d", size.Width, size.Height);
                 }
             }
