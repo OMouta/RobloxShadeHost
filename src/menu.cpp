@@ -4,6 +4,7 @@
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "menu.h"
+#include "preset_ini.h"
 #include "addon.h"
 #include "config.h"
 #include "log.h"
@@ -582,11 +583,9 @@ void DiscardChanges()
 
 bool IsPreset(const fs::path& path)
 {
-    std::ifstream file(path);
-    for (std::string line; std::getline(file, line);)
-        if (line.rfind("Techniques=", 0) == 0)
-            return true;
-    return false;
+    std::ifstream file(path, std::ios::binary);
+    std::string value;
+    return PresetIni(std::string(std::istreambuf_iterator<char>(file), {})).Get("", "Techniques", value);
 }
 
 bool SamePath(const fs::path& a, const fs::path& b)
@@ -597,28 +596,8 @@ bool SamePath(const fs::path& a, const fs::path& b)
 void ReadPresetEffects(const fs::path& path)
 {
     m.effectsOf = path;
-    m.presetEffects.clear();
-    std::ifstream file(path);
-    for (std::string line; std::getline(file, line);)
-    {
-        if (line.rfind("Techniques=", 0) != 0)
-            continue;
-        // Entries are technique@file, separated by commas.
-        for (size_t start = line.find('=') + 1; start < line.size();)
-        {
-            const size_t end = std::min(line.find(',', start), line.size());
-            const size_t at = line.find('@', start);
-            if (at < end)
-            {
-                std::string effect = line.substr(at + 1, end - at - 1);
-                effect.erase(effect.find_last_not_of(" \r") + 1);
-                if (!effect.empty() && std::none_of(m.presetEffects.begin(), m.presetEffects.end(),
-                                                    [&](const std::string& known) { return _stricmp(known.c_str(), effect.c_str()) == 0; }))
-                    m.presetEffects.push_back(effect);
-            }
-            start = end + 1;
-        }
-    }
+    std::ifstream file(path, std::ios::binary);
+    m.presetEffects = PresetEffectFiles(PresetIni(std::string(std::istreambuf_iterator<char>(file), {})));
 }
 
 // Effects the active preset uses that did not load, once ReShade has loaded effects.

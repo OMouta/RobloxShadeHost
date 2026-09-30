@@ -7,7 +7,9 @@
 #include <vector>
 
 // A ReShade preset: keys before the first section, such as Techniques, then a section per effect file. Keeps
-// the order of sections and keys, so saving a preset changes only what changed.
+// the order of sections and keys, so saving a preset changes only what changed. Section and key names compare
+// without case, since effect files are named without case on Windows. Shared by every platform's host and
+// Setup.
 class PresetIni
 {
 public:
@@ -58,7 +60,7 @@ public:
     {
         if (const Section* found = FindSection(section))
             for (const auto& [name, text] : found->values)
-                if (name == key)
+                if (Same(name, key))
                 {
                     value = text;
                     return true;
@@ -91,7 +93,7 @@ public:
     void Remove(const std::string& section, const std::string& key)
     {
         if (Section* found = FindSection(section))
-            std::erase_if(found->values, [&key](const auto& entry) { return entry.first == key; });
+            std::erase_if(found->values, [&key](const auto& entry) { return Same(entry.first, key); });
     }
 
     std::string Text() const
@@ -125,6 +127,12 @@ public:
         return items;
     }
 
+    // Names compared as presets compare them: ASCII letters without case.
+    static bool Same(const std::string& a, const std::string& b)
+    {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) { return Lower(x) == Lower(y); });
+    }
+
     static std::string Join(const std::vector<std::string>& items)
     {
         std::string text;
@@ -137,7 +145,7 @@ private:
     Section* FindSection(const std::string& name)
     {
         for (Section& section : sections)
-            if (section.name == name)
+            if (Same(section.name, name))
                 return &section;
         return nullptr;
     }
@@ -146,7 +154,7 @@ private:
     static void SetIn(Section& section, const std::string& key, const std::string& value)
     {
         for (auto& entry : section.values)
-            if (entry.first == key)
+            if (Same(entry.first, key))
             {
                 entry.second = value;
                 return;
@@ -154,5 +162,26 @@ private:
         section.values.emplace_back(key, value);
     }
 
+    static char Lower(char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; }
+
     std::vector<Section> sections;
 };
+
+// The effect files whose techniques the preset turns on, in order and each once. Techniques are listed as
+// Name@File.fx; entries without a file are left out.
+inline std::vector<std::string> PresetEffectFiles(const PresetIni& preset)
+{
+    std::vector<std::string> files;
+    std::string techniques;
+    if (!preset.Get("", "Techniques", techniques))
+        return files;
+    for (const std::string& technique : PresetIni::Split(techniques))
+    {
+        const size_t at = technique.find('@');
+        std::string file = at == std::string::npos ? std::string() : technique.substr(at + 1);
+        file.erase(file.find_last_not_of(" \t") + 1);
+        if (!file.empty() && std::none_of(files.begin(), files.end(), [&file](const std::string& known) { return PresetIni::Same(known, file); }))
+            files.push_back(std::move(file));
+    }
+    return files;
+}

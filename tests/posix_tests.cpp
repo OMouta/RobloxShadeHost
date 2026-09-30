@@ -2,12 +2,14 @@
 // the checksum Setup verifies presets with.
 
 #include "config.h"
+#include "game_list.h"
 #include "games.h"
 #include "hotkeys.h"
-#include "preset.h"
+#include "preset_ini.h"
 #include "setup.h"
 
 #include <cstdio>
+#include <stdexcept>
 
 namespace
 {
@@ -61,6 +63,26 @@ int main()
                 "writes changes in place and new keys at the end of their section");
     ok &= Check(PresetIni(PresetIni("\xEF\xBB\xBFTechniques=A@A.fx\n").Text()).Get("", "Techniques", value) && value == "A@A.fx",
                 "reads presets with a byte order mark");
+
+    ok &= Check(preset.Get("curves.FX", "contrast", value) && value == "0.500000", "section and key names ignore case, as on Windows");
+    ok &= Check(PresetEffectFiles(PresetIni("Techniques=A@A.fx,B@b.fx,C@A.FX,Loose\n")) == std::vector<std::string>{ "A.fx", "b.fx" },
+                "lists each effect file a preset uses once");
+
+    // games.ini is the same file on every platform.
+    const std::vector<GameListEntry> games = { { "RobloxPlayerBeta.exe", "Roblox", true }, { "/usr/games/Café Game", "Café", false } };
+    const std::vector<GameListEntry> read = ParseGameList(FormatGameList(games));
+    ok &= Check(read.size() == 2 && read[1].executable == games[1].executable && read[1].name == games[1].name && !read[1].enabled,
+                "writes and reads the game list, UTF-8 included");
+    bool rejected = false;
+    try
+    {
+        ParseGameList("[Games]\nCount=1\n");
+    }
+    catch (const std::runtime_error&)
+    {
+        rejected = true;
+    }
+    ok &= Check(rejected, "rejects a damaged game list");
 
     const auto definitions = ParseDefinitions("A=1,B,,C=x=y");
     ok &= Check(definitions.size() == 3 && definitions[0] == std::pair<std::string, std::string>{ "A", "1" } && definitions[1].second.empty() &&

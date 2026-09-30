@@ -1,6 +1,7 @@
 #include "install.h"
 #include "resource.h"
 #include "text.h"
+#include "../src/preset_ini.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -400,29 +401,12 @@ void InstallPresets(const fs::path& work, const fs::path& files, Progress& progr
         Download(sources.presets + L"/" + file, preset, hash, progress.cancel);
 
         // ReShade keeps Techniques before the first section, where the INI functions cannot read it.
-        const std::string text = ReadFile(preset);
         std::string techniques;
-        for (size_t start = 0; start < text.size();)
-        {
-            size_t end = text.find('\n', start);
-            end = end == std::string::npos ? text.size() : end;
-            std::string line = text.substr(start, end - start);
-            start = end + 1;
-            line.erase(0, line.find_first_not_of(" \t\xEF\xBB\xBF"));
-            line.erase(line.find_last_not_of(" \t\r") + 1);
-            if (line.rfind('[', 0) == 0)
-                break;
-            if (Lowercase(line).rfind("techniques=", 0) == 0)
-                techniques = line.substr(11);
-        }
-        if (techniques.empty())
+        PresetIni(ReadFile(preset)).Get("", "Techniques", techniques);
+        if (PresetIni::Split(techniques).empty())
             throw std::runtime_error(name + " uses no effects.");
-        for (size_t start = 0; start < techniques.size();)
+        for (const std::string& technique : PresetIni::Split(techniques))
         {
-            size_t end = techniques.find(',', start);
-            end = end == std::string::npos ? techniques.size() : end;
-            const std::string technique = techniques.substr(start, end - start);
-            start = end + 1;
             const size_t at = technique.find('@');
             const std::string shader = at == std::string::npos ? "" : technique.substr(at + 1);
             if (shader.empty() || shader.find_first_of("\\/:") != std::string::npos || !effects.count(Lowercase(shader)))

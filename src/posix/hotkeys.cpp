@@ -1,8 +1,7 @@
 #include "hotkeys.h"
+#include "hotkey_text.h"
 
 #include <algorithm>
-#include <cctype>
-#include <strings.h>
 
 namespace
 {
@@ -20,14 +19,6 @@ constexpr NamedKey kNamedKeys[] = {
     { "Tab", ImGuiKey_Tab }, { "Escape", ImGuiKey_Escape }, { "Left", ImGuiKey_LeftArrow },
     { "Right", ImGuiKey_RightArrow }, { "Up", ImGuiKey_UpArrow }, { "Down", ImGuiKey_DownArrow },
 };
-
-std::string Trim(std::string_view text)
-{
-    const size_t first = text.find_first_not_of(" \t");
-    if (first == std::string_view::npos)
-        return {};
-    return std::string(text.substr(first, text.find_last_not_of(" \t") - first + 1));
-}
 } // namespace
 
 bool IsShortcutKey(ImGuiKey key)
@@ -37,68 +28,39 @@ bool IsShortcutKey(ImGuiKey key)
     return std::any_of(std::begin(kNamedKeys), std::end(kNamedKeys), [key](const NamedKey& named) { return named.key == key; });
 }
 
+// The rules for writing shortcuts are shared with Windows. macOS names are accepted everywhere, so settings move
+// between systems.
 bool ParseHotkey(std::string_view text, Hotkey& result)
 {
-    Hotkey parsed;
-    while (!text.empty())
-    {
-        const size_t separator = text.find('+');
-        const std::string token = Trim(text.substr(0, separator));
-        if (token.empty())
-            return false;
-
-        unsigned modifier = 0;
-        const char* name = token.c_str();
-        if (!strcasecmp(name, "Ctrl") || !strcasecmp(name, "Control"))
-            modifier = kCtrl;
-        else if (!strcasecmp(name, "Alt") || !strcasecmp(name, "Option") || !strcasecmp(name, "Opt"))
-            modifier = kAlt;
-        else if (!strcasecmp(name, "Shift"))
-            modifier = kShift;
-        else if (!strcasecmp(name, "Win") || !strcasecmp(name, "Super") || !strcasecmp(name, "Cmd") || !strcasecmp(name, "Command"))
-            modifier = kSuper;
-
-        if (modifier)
-        {
-            if (parsed.key != ImGuiKey_None || (parsed.modifiers & modifier))
-                return false;
-            parsed.modifiers |= modifier;
-        }
-        else
-        {
-            if (parsed.key != ImGuiKey_None)
-                return false;
-            const char first = static_cast<char>(std::toupper(static_cast<unsigned char>(token[0])));
-            if (token.size() == 1 && first >= 'A' && first <= 'Z')
-                parsed.key = static_cast<ImGuiKey>(ImGuiKey_A + (first - 'A'));
-            else if (token.size() == 1 && first >= '0' && first <= '9')
-                parsed.key = static_cast<ImGuiKey>(ImGuiKey_0 + (first - '0'));
-            else if (first == 'F' && token.size() >= 2 && token.size() <= 3 &&
-                     std::all_of(token.begin() + 1, token.end(), [](char c) { return c >= '0' && c <= '9'; }))
-            {
-                const int number = std::stoi(token.substr(1));
-                if (number < 1 || number > 24)
-                    return false;
-                parsed.key = static_cast<ImGuiKey>(ImGuiKey_F1 + number - 1);
-            }
-            else
-            {
-                for (const NamedKey& named : kNamedKeys)
-                    if (!strcasecmp(name, named.name))
-                        parsed.key = named.key;
-                if (parsed.key == ImGuiKey_None)
-                    return false;
-            }
-        }
-        if (separator == std::string_view::npos)
-            break;
-        text.remove_prefix(separator + 1);
-        if (text.empty())
-            return false;
-    }
-    if (parsed.key == ImGuiKey_None)
+    const auto modifierBit = [](std::string_view name) -> unsigned {
+        using hotkey_text::SameName;
+        if (SameName(name, "Ctrl") || SameName(name, "Control"))
+            return kCtrl;
+        if (SameName(name, "Alt") || SameName(name, "Option") || SameName(name, "Opt"))
+            return kAlt;
+        if (SameName(name, "Shift"))
+            return kShift;
+        if (SameName(name, "Win") || SameName(name, "Super") || SameName(name, "Cmd") || SameName(name, "Command"))
+            return kSuper;
+        return 0;
+    };
+    unsigned modifiers = 0;
+    std::string name;
+    if (!hotkey_text::Split(text, modifierBit, modifiers, name))
         return false;
-    result = parsed;
+
+    ImGuiKey key = ImGuiKey_None;
+    if (const char c = hotkey_text::Character(name))
+        key = static_cast<ImGuiKey>(c >= 'A' ? ImGuiKey_A + (c - 'A') : ImGuiKey_0 + (c - '0'));
+    else if (const int number = hotkey_text::FunctionKey(name))
+        key = static_cast<ImGuiKey>(ImGuiKey_F1 + number - 1);
+    else
+        for (const NamedKey& named : kNamedKeys)
+            if (hotkey_text::SameName(name, named.name))
+                key = named.key;
+    if (key == ImGuiKey_None)
+        return false;
+    result = { modifiers, key };
     return true;
 }
 

@@ -1,7 +1,7 @@
 #include "setup.h"
 #include "config.h"
 #include "log.h"
-#include "preset.h"
+#include "preset_ini.h"
 
 #include <miniz.h>
 

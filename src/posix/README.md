@@ -50,4 +50,6 @@ Set `UNISHADE_VALIDATION=1` to run with the Vulkan validation layers.
 | `gpu.cpp` | Vulkan device, images and window swapchains |
 | `platform_x11.cpp`, `platform_macos.mm` | Everything in `platform.h` |
 | `setup.cpp` | `--install-effects` and the launcher's download button |
-| `config.cpp`, `games.cpp`, `hotkeys.cpp`, `preset.h` | `Unishade.ini`, `games.ini`, shortcuts and presets |
+| `config.cpp`, `games.cpp`, `hotkeys.cpp` | `Unishade.ini`, `games.ini` and shortcuts |
+
+Shared with the Windows host, in `src/`: `preset_ini.h` (ReShade presets), `game_list.h` (`games.ini`), `hotkey_text.h` (how shortcuts are written), `ini_text.h` and `theme.h`.

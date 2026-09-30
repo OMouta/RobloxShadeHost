@@ -1,5 +1,7 @@
 #pragma once
 
+#include "hotkey_text.h"
+
 #include <windows.h>
 #include <cwchar>
 #include <cwctype>
@@ -26,70 +28,44 @@ inline constexpr NamedKey kNamedKeys[] = {
     { L"Tab", VK_TAB }, { L"Escape", VK_ESCAPE },
 };
 
+// The rules for writing shortcuts are shared with macOS and Linux. Shortcut names are ASCII.
 inline bool ParseHotkey(std::wstring_view text, Hotkey& result)
 {
-    Hotkey parsed;
-    while (!text.empty())
+    std::string narrow;
+    for (const wchar_t c : text)
     {
-        const auto separator = text.find(L'+');
-        std::wstring token(text.substr(0, separator));
-        const auto first = token.find_first_not_of(L" \t");
-        if (first == std::wstring::npos)
+        if (c > 127)
             return false;
-        token = token.substr(first, token.find_last_not_of(L" \t") - first + 1);
-        for (auto& character : token)
-            character = static_cast<wchar_t>(std::towupper(character));
-
-        UINT modifier = 0;
-        if (token == L"CTRL") modifier = MOD_CONTROL;
-        else if (token == L"ALT") modifier = MOD_ALT;
-        else if (token == L"SHIFT") modifier = MOD_SHIFT;
-        else if (token == L"WIN") modifier = MOD_WIN;
-
-        if (modifier)
-        {
-            if (parsed.key || (parsed.modifiers & modifier))
-                return false;
-            parsed.modifiers |= modifier;
-        }
-        else
-        {
-            if (parsed.key)
-                return false;
-            if (token.size() == 1 && ((token[0] >= L'A' && token[0] <= L'Z') || (token[0] >= L'0' && token[0] <= L'9')))
-                parsed.key = token[0];
-            else if (token[0] == L'F' && token.size() >= 2 && token.size() <= 3)
-            {
-                unsigned number = 0;
-                for (size_t i = 1; i < token.size(); ++i)
-                {
-                    if (token[i] < L'0' || token[i] > L'9')
-                        return false;
-                    number = number * 10 + token[i] - L'0';
-                }
-                // Windows reserves F12 for the debugger.
-                if (number < 1 || number > 24 || number == 12)
-                    return false;
-                parsed.key = VK_F1 + number - 1;
-            }
-            else
-            {
-                for (const auto& named : kNamedKeys)
-                    if (_wcsicmp(token.c_str(), named.name) == 0)
-                        parsed.key = named.key;
-                if (!parsed.key)
-                    return false;
-            }
-        }
-        if (separator == std::wstring_view::npos)
-            break;
-        text.remove_prefix(separator + 1);
-        if (text.empty())
-            return false;
+        narrow += static_cast<char>(c);
     }
-    if (!parsed.key)
+    const auto modifierBit = [](std::string_view name) -> unsigned {
+        using hotkey_text::SameName;
+        return SameName(name, "Ctrl") ? MOD_CONTROL : SameName(name, "Alt") ? MOD_ALT : SameName(name, "Shift") ? MOD_SHIFT
+             : SameName(name, "Win")  ? MOD_WIN
+                                      : 0;
+    };
+    unsigned modifiers = 0;
+    std::string name;
+    if (!hotkey_text::Split(narrow, modifierBit, modifiers, name))
         return false;
-    result = parsed;
+
+    UINT key = 0;
+    if (const char c = hotkey_text::Character(name))
+        key = static_cast<UINT>(c);
+    else if (const int number = hotkey_text::FunctionKey(name))
+    {
+        // Windows reserves F12 for the debugger.
+        if (number == 12)
+            return false;
+        key = static_cast<UINT>(VK_F1 + number - 1);
+    }
+    else
+        for (const auto& named : kNamedKeys)
+            if (_wcsicmp(std::wstring(name.begin(), name.end()).c_str(), named.name) == 0)
+                key = named.key;
+    if (!key)
+        return false;
+    result = { MOD_NOREPEAT | modifiers, key };
     return true;
 }
 
