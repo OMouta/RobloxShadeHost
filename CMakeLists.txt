@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 if(WIN32)
-    project(Unishade VERSION 0.5.1 LANGUAGES C CXX RC)
+    project(Unishade VERSION 0.6.0 LANGUAGES C CXX RC)
 else()
-    project(Unishade VERSION 0.5.1 LANGUAGES C CXX)
+    project(Unishade VERSION 0.6.0 LANGUAGES C CXX)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
