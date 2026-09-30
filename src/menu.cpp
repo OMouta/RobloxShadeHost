@@ -4,6 +4,7 @@
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "menu.h"
+#include "menu_layout.h"
 #include "preset_ini.h"
 #include "addon.h"
 #include "config.h"
@@ -59,9 +60,9 @@ constexpr ImU32 kWarning = Color(theme::kWarning);
 constexpr ImU32 kError = Color(theme::kError);
 constexpr ImU32 kSuccess = Color(theme::kSuccess);
 
-// Layout in pixels at 100% scaling.
-constexpr float kWidth = 460;
-constexpr float kMargin = 16;
+// Layout in pixels at 1080p.
+using menu_layout::kWidth;
+using menu_layout::kMargin;
 constexpr float kPadding = 18;
 constexpr float kHeader = 74;
 constexpr float kTabs = 42;
@@ -2036,8 +2037,10 @@ void OnOverlay(effect_runtime* runtime)
     if (!menu && !toast)
         return;
 
-    // Small windows get a smaller menu, so it still fits.
-    m.scale = std::clamp(std::min(GetDpiForWindow(g.overlay) / 96.0f, ImGui::GetIO().DisplaySize.y / 640.0f), 0.7f, 3.0f);
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    m.scale = menu_layout::Scale(display.x, display.y);
+    if (m.scale <= 0)
+        return;
     // The menu's look only applies to its own windows, so ReShade's is restored after.
     ImGuiStyle& style = ImGui::GetStyle();
     const ImGuiStyle saved = style;

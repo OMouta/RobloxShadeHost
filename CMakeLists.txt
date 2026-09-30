@@ -137,6 +137,10 @@ set_target_properties(installer PROPERTIES
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(menu_layout_tests tests/menu_layout_tests.cpp)
+    target_compile_options(menu_layout_tests PRIVATE /W4 /permissive- /EHsc)
+    add_test(NAME menu_layout_tests COMMAND menu_layout_tests)
+
     add_executable(hotkey_tests tests/hotkey_tests.cpp)
     target_compile_definitions(hotkey_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(hotkey_tests PRIVATE /W4 /permissive- /EHsc)
