@@ -1,0 +1,39 @@
+---
+import Base from './Base.astro';
+
+// The Markdown pages in src/pages that use this layout pass their frontmatter.
+interface Props {
+  frontmatter: { title: string; description: string; updated: string };
+}
+
+const { frontmatter } = Astro.props;
+---
+
+<Base title={`${frontmatter.title} | Unishade`} description={frontmatter.description}>
+  <main class="legal">
+    <h1>{frontmatter.title}</h1>
+    <p class="dim updated">Last updated {frontmatter.updated}</p>
+    <slot />
+  </main>
+</Base>
+
+<style>
+  .legal {
+    width: var(--page);
+    margin: clamp(40px, 7vw, 80px) auto 0;
+  }
+
+  .legal h1 {
+    margin-bottom: 12px;
+    font-size: clamp(2.1rem, 4.4vw, 3.2rem);
+  }
+
+  .updated {
+    margin-bottom: 40px;
+  }
+
+  .legal :global(p) {
+    max-width: 68ch;
+    margin: 0 0 16px;
+  }
+</style>

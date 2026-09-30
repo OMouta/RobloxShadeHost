@@ -63,14 +63,47 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
 
     <footer class="footer">
       <div class="footer-inner">
-        <p>
-          Need help? Ask on <a href={links.discord}>Discord</a>. Only the newest version is supported, and updating keeps your presets.
-        </p>
-        <p>Unishade is free. You can support it on <a href={links.kofi}>Ko-fi</a>.</p>
-        <p class="dim">
-          Effects run on <a href={links.reshade}>ReShade</a> by crosire. Unishade isn't affiliated with the games it runs on.{' '}
-          <a href={links.github}>Source on GitHub</a>, <a href={links.license}>MIT license</a>.
-        </p>
+        <div class="footer-about">
+          <a class="brand" href="/">
+            <Image src={logo} alt="" width={52} class="brand-logo" />
+            Unishade
+          </a>
+          <p class="dim">ReShade effects for games where ReShade can't run. Free and open source.</p>
+        </div>
+        <div class="footer-links">
+          <div>
+            <h2>Unishade</h2>
+            <ul>
+              <li><a href="/download/">Download</a></li>
+              <li><a href="/docs/">Docs</a></li>
+              <li><a href="/docs/troubleshooting/">Troubleshooting</a></li>
+              <li><a href={links.releases}>Releases</a></li>
+            </ul>
+          </div>
+          <div>
+            <h2>Community</h2>
+            <ul>
+              <li><a href={links.discord}>Discord</a></li>
+              <li><a href={links.github}>GitHub</a></li>
+              <li><a href={links.kofi}>Ko-fi</a></li>
+            </ul>
+          </div>
+          <div>
+            <h2>Legal</h2>
+            <ul>
+              <li><a href="/terms/">Terms</a></li>
+              <li><a href="/privacy/">Privacy</a></li>
+              <li><a href="/cookies/">Cookies</a></li>
+              <li><a href={links.license}>MIT license</a></li>
+            </ul>
+          </div>
+        </div>
+        <div class="footer-bottom dim">
+          <p>© {new Date().getFullYear()} Unishade contributors</p>
+          <p>
+            Effects run on <a href={links.reshade}>ReShade</a> by crosire. Unishade isn't affiliated with the games it runs on.
+          </p>
+        </div>
       </div>
     </footer>
   </body>
@@ -157,21 +190,81 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
 
   .footer-inner {
     display: grid;
-    gap: 10px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 48px clamp(32px, 6vw, 96px);
     width: var(--page);
     margin: 0 auto;
-    padding: 36px 0 48px;
+    padding: 56px 0 40px;
+  }
+
+  .footer-about {
+    display: grid;
+    gap: 14px;
+    align-content: start;
+    justify-items: start;
+    max-width: 30ch;
+  }
+
+  .footer-links {
+    display: grid;
+    grid-template-columns: repeat(3, auto);
+    gap: 32px clamp(40px, 6vw, 88px);
+  }
+
+  .footer-links h2 {
+    margin-bottom: 14px;
+    color: var(--haze);
+    font-size: 0.9rem;
+    font-weight: 600;
+    font-stretch: 100%;
+    letter-spacing: 0;
+  }
+
+  .footer-links ul {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .footer-links a {
+    color: var(--ink);
+    text-decoration: none;
+  }
+
+  .footer-links a:hover {
+    color: var(--accent);
+  }
+
+  .footer-bottom {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px 24px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    font-size: 0.9rem;
   }
 
   @media (max-width: 780px) {
     nav a:not(.button) {
       display: none;
     }
+
+    .footer-inner {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
   @media (max-width: 440px) {
     .brand-name {
       display: none;
+    }
+
+    .footer-links {
+      grid-template-columns: repeat(2, auto);
     }
   }
 </style>
