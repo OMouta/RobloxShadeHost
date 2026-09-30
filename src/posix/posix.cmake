@@ -39,14 +39,50 @@ set(SPIRV_URL "https://raw.githubusercontent.com/KhronosGroup/SPIRV-Headers/7845
 fetch_file("${SPIRV_URL}/spirv.hpp" 43f4dcb231a8d61da50043f46e3aa04fa8b7c0ea53bb8b66c5ce70ac4ada51fe "${RESHADEFX_DIR}/spirv/spirv.hpp")
 fetch_file("${SPIRV_URL}/GLSL.std.450.h" 20f32378793c5f416bc0704f44345c2a14c99cba3f411e3beaf1bcea372d58ba "${RESHADEFX_DIR}/spirv/GLSL.std.450.h")
 
+# ReShade's compiler is built with MSVC. A few lines are changed for other systems, in copies under patched/, and
+# configuring stops if a line is no longer there, so an update cannot drop a change unnoticed.
+function(patch_source name)
+    file(READ "${RESHADEFX_DIR}/${name}" source)
+    math(EXPR last "${ARGC} - 1")
+    foreach(index RANGE 1 ${last} 2)
+        math(EXPR next "${index} + 1")
+        set(old "${ARGV${index}}")
+        set(new "${ARGV${next}}")
+        string(FIND "${source}" "${old}" at)
+        if(at EQUAL -1)
+            message(FATAL_ERROR "ReShade's ${name} changed. Update its patch in ${CMAKE_CURRENT_FUNCTION_LIST_FILE}.")
+        endif()
+        string(REPLACE "${old}" "${new}" source "${source}")
+    endforeach()
+    set(patched "${RESHADEFX_DIR}/patched/${name}")
+    set(existing "")
+    if(EXISTS "${patched}")
+        file(READ "${patched}" existing)
+    endif()
+    if(NOT existing STREQUAL source)
+        file(WRITE "${patched}" "${source}")
+    endif()
+endfunction()
+# Effects written on Windows include files as ".\Folder\File.fxh". Outside Windows backslashes are not
+# separators, so the preprocessor's path helper turns them into slashes.
+patch_source(effect_preprocessor.cpp
+    "\t#define u8path(p) path(p)\n"
+    "\tstatic std::string posix_path(std::string p) { for (char &c : p) if (c == '\\\\') c = '/'; return p; }\n\t#define u8path(p) path(posix_path(p))\n")
+# malloc.h is Windows' and glibc's home of alloca, alloca.h everyone's.
+patch_source(effect_symbol_table.cpp "#include <malloc.h> // alloca" "#include <alloca.h> // alloca")
+# Apple's C++ library has no std::from_chars for floats before macOS 15's.
+patch_source(effect_lexer.cpp
+    "#include <charconv> // std::from_chars" "#include <charconv> // std::from_chars\n#include <cstdlib> // std::strtof\n#include <string>"
+    "std::from_chars(begin, end, tok.literal_as_float);" "tok.literal_as_float = std::strtof(std::string(begin, end).c_str(), nullptr);")
+
 add_library(reshadefx STATIC
     "${RESHADEFX_DIR}/effect_codegen_spirv.cpp"
     "${RESHADEFX_DIR}/effect_expression.cpp"
-    "${RESHADEFX_DIR}/effect_lexer.cpp"
+    "${RESHADEFX_DIR}/patched/effect_lexer.cpp"
     "${RESHADEFX_DIR}/effect_parser_exp.cpp"
     "${RESHADEFX_DIR}/effect_parser_stmt.cpp"
-    "${RESHADEFX_DIR}/effect_preprocessor.cpp"
-    "${RESHADEFX_DIR}/effect_symbol_table.cpp")
+    "${RESHADEFX_DIR}/patched/effect_preprocessor.cpp"
+    "${RESHADEFX_DIR}/patched/effect_symbol_table.cpp")
 target_include_directories(reshadefx PUBLIC "${RESHADEFX_DIR}" PRIVATE "${RESHADEFX_DIR}/spirv")
 # Third-party code: its warnings are not ours to fix.
 target_compile_options(reshadefx PRIVATE -w)

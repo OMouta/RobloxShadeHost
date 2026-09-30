@@ -218,20 +218,23 @@ VkFormat SrgbFormat(VkFormat format)
     }
 }
 
-bool Gpu::CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage)
+bool Gpu::CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage,
+                      VkImageType type, uint32_t depth)
 {
     image = {};
+    image.type = type;
     image.format = format;
     image.width = width;
-    image.height = height;
+    image.height = type == VK_IMAGE_TYPE_1D ? 1 : height;
+    image.depth = type == VK_IMAGE_TYPE_3D ? depth : 1;
     image.levels = levels;
     const VkFormat srgb = SrgbFormat(format);
 
     VkImageCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     info.flags = srgb != format ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0;
-    info.imageType = VK_IMAGE_TYPE_2D;
+    info.imageType = type;
     info.format = format;
-    info.extent = { width, height, 1 };
+    info.extent = { image.width, image.height, image.depth };
     info.mipLevels = levels;
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -256,7 +259,7 @@ bool Gpu::CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t
     const auto makeView = [&](VkFormat viewFormat, uint32_t base, uint32_t count) {
         VkImageViewCreateInfo view{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         view.image = image.image;
-        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view.viewType = type == VK_IMAGE_TYPE_1D ? VK_IMAGE_VIEW_TYPE_1D : type == VK_IMAGE_TYPE_3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
         view.format = viewFormat;
         view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, base, count, 0, 1 };
         VkImageViewUsageCreateInfo viewUsage{ VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO };

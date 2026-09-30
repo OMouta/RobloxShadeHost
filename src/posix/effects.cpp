@@ -1035,7 +1035,8 @@ GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
     if (const auto found = sharedTextures.find(key); found != sharedTextures.end())
     {
         const reshadefx::texture_desc& desc = found->second.desc;
-        if (desc.width == texture.width && desc.height == texture.height && desc.levels == texture.levels && desc.format == texture.format)
+        if (desc.width == texture.width && desc.height == texture.height && desc.depth == texture.depth && desc.levels == texture.levels &&
+            desc.format == texture.format && desc.type == texture.type)
             return &found->second.image;
         // Another effect has a texture of the same name that differs, so this one gets its own.
         key += "@" + effect.file;
@@ -1044,7 +1045,11 @@ GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
     }
 
     const VkFormat format = TextureFormat(texture.format);
-    if (format == VK_FORMAT_UNDEFINED || texture.type != reshadefx::texture_type::texture_2d)
+    const VkImageType type = texture.type == reshadefx::texture_type::texture_1d ? VK_IMAGE_TYPE_1D
+                           : texture.type == reshadefx::texture_type::texture_3d ? VK_IMAGE_TYPE_3D
+                                                                                 : VK_IMAGE_TYPE_2D;
+    // Render targets are 2D in ReShade too.
+    if (format == VK_FORMAT_UNDEFINED || (texture.render_target && type != VK_IMAGE_TYPE_2D))
     {
         Log(LogLevel::Warning, "%s: texture %s has a format or shape the host does not support.", effect.file.c_str(), texture.name.c_str());
         return nullptr;
@@ -1070,7 +1075,7 @@ GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
     SharedTexture& shared = sharedTextures[key];
     shared.desc = texture;
     const uint32_t levels = std::max<uint32_t>(1, texture.levels);
-    if (!gpu.CreateImage(shared.image, texture.width, texture.height, levels, format, usage))
+    if (!gpu.CreateImage(shared.image, texture.width, texture.height, levels, format, usage, type, texture.depth))
     {
         sharedTextures.erase(key);
         Log(LogLevel::Warning, "%s: could not create texture %s.", effect.file.c_str(), texture.name.c_str());
@@ -1086,7 +1091,7 @@ GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
     GpuBuffer upload;
     for (const reshadefx::annotation& annotation : texture.annotations)
     {
-        if (annotation.name != "source" || annotation.type.base != reshadefx::type::t_string)
+        if (annotation.name != "source" || annotation.type.base != reshadefx::type::t_string || type != VK_IMAGE_TYPE_2D)
             continue;
         const fs::path file = FindTexture(annotation.value.string_data);
         int w = 0, h = 0, channels = 0;
@@ -1139,9 +1144,10 @@ void Runtime::GenerateMipmaps(VkCommandBuffer commands, const GpuImage& image)
     {
         VkImageBlit blit{};
         blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1 };
-        blit.srcOffsets[1] = { std::max(1, int(image.width >> (level - 1))), std::max(1, int(image.height >> (level - 1))), 1 };
+        blit.srcOffsets[1] = { std::max(1, int(image.width >> (level - 1))), std::max(1, int(image.height >> (level - 1))),
+                               std::max(1, int(image.depth >> (level - 1))) };
         blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 };
-        blit.dstOffsets[1] = { std::max(1, int(image.width >> level)), std::max(1, int(image.height >> level)), 1 };
+        blit.dstOffsets[1] = { std::max(1, int(image.width >> level)), std::max(1, int(image.height >> level)), std::max(1, int(image.depth >> level)) };
         vkCmdBlitImage(commands, image.image, VK_IMAGE_LAYOUT_GENERAL, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
         FullBarrier(commands);
     }

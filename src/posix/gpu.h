@@ -14,8 +14,10 @@ struct GpuImage
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
+    VkImageType type = VK_IMAGE_TYPE_2D;
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t depth = 1; // for 3D images
     uint32_t levels = 1;
     VkImageView view = VK_NULL_HANDLE;     // every level
     VkImageView srgbView = VK_NULL_HANDLE; // every level read as sRGB, or view when the format has no sRGB variant
@@ -40,7 +42,8 @@ public:
     void Shutdown();
 
     // Every image the host makes is kept in VK_IMAGE_LAYOUT_GENERAL, so passes need only memory barriers.
-    bool CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage);
+    bool CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage,
+                     VkImageType type = VK_IMAGE_TYPE_2D, uint32_t depth = 1);
     void DestroyImage(GpuImage& image);
     bool CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible);
     void DestroyBuffer(GpuBuffer& buffer);
