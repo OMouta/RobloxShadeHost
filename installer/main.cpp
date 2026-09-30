@@ -170,6 +170,7 @@ struct App
     Hotkey overlayToggleKey;
     bool hostRunning = false;
     bool launch = true;
+    bool highPerformanceGpu = true;
 
     Task uninstallTask;
     bool deleteUserFiles = false;
@@ -753,11 +754,10 @@ void FinishedPage()
         Spacing(4);
         Text(note, kWarning, 14.5f);
     }
+    Spacing(14);
+    CheckLine("Run Unishade on the high-performance GPU", app.highPerformanceGpu);
     if (!app.hostRunning)
-    {
-        Spacing(14);
         CheckLine("Start Unishade now", app.launch);
-    }
 }
 
 void UninstallPage()
@@ -807,6 +807,9 @@ void CollectTasks()
             app.installation = FindInstallation();
             LoadShortcuts();
             app.hostRunning = HostRunning(Directory());
+            // A different preference picked in Windows' settings stays unless the box is ticked.
+            const int preference = GpuPreference(Directory());
+            app.highPerformanceGpu = preference < 0 || preference == 2;
             app.page = Page::Finished;
         }
         if (app.closeRequested)
@@ -908,6 +911,9 @@ void DrawUi()
     case Page::Finished:
         if (FooterButton(0, "Finish", true))
         {
+            // Before starting Unishade, which picks its GPU when it starts.
+            if (app.highPerformanceGpu)
+                SetHighPerformanceGpu(Directory());
             if (app.launch && !app.hostRunning)
                 LaunchHost(Directory());
             DestroyWindow(ui.window);

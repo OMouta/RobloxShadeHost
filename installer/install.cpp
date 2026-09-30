@@ -26,6 +26,8 @@ namespace
 {
 // Inno Setup's key from earlier versions of Setup, so an update replaces its entry in Windows' app list.
 constexpr wchar_t kUninstallKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{77125AF5-DF0A-485A-A633-E64FBD50E90C}_is1";
+// Windows' graphics settings, one value per exe named after its path, holding "Name=Value;" pairs.
+constexpr wchar_t kGpuPreferencesKey[] = L"Software\\Microsoft\\DirectX\\UserGpuPreferences";
 // Lists the files Setup installed, relative to the installation folder, for uninstalling.
 constexpr wchar_t kManifest[] = L"RobloxShadeHost-Setup.files";
 constexpr wchar_t kSetupExe[] = L"Unishade-Setup.exe";
@@ -803,6 +805,8 @@ void Uninstall(const fs::path& directory, bool deleteUserFiles)
         fs::remove(startMenu / L"RobloxShadeHost Setup.lnk", ignored);
         RegDeleteTreeW(HKEY_CURRENT_USER, kUninstallKey);
     }
+    // Windows keeps graphics settings for exes that no longer exist.
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, kGpuPreferencesKey, (directory / L"Unishade.exe").c_str());
 
     if (deleteUserFiles)
     {
@@ -895,4 +899,53 @@ bool HostRunning(const fs::path& directory)
 void LaunchHost(const fs::path& directory)
 {
     ShellExecuteW(nullptr, L"open", (directory / L"Unishade.exe").c_str(), nullptr, directory.c_str(), SW_SHOWNORMAL);
+}
+
+namespace
+{
+std::vector<std::wstring> GpuSettings(const fs::path& exe)
+{
+    std::vector<std::wstring> settings;
+    DWORD size = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, kGpuPreferencesKey, exe.c_str(), RRF_RT_REG_SZ, nullptr, nullptr, &size) != ERROR_SUCCESS)
+        return settings;
+    std::wstring text(size / sizeof(wchar_t), L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, kGpuPreferencesKey, exe.c_str(), RRF_RT_REG_SZ, nullptr, text.data(), &size) != ERROR_SUCCESS)
+        return settings;
+    text.resize(wcslen(text.c_str()));
+    for (size_t start = 0; start < text.size();)
+    {
+        const size_t end = std::min(text.find(L';', start), text.size());
+        if (end > start)
+            settings.push_back(text.substr(start, end - start));
+        start = end + 1;
+    }
+    return settings;
+}
+} // namespace
+
+int GpuPreference(const fs::path& directory)
+{
+    for (const std::wstring& setting : GpuSettings(directory / L"Unishade.exe"))
+        if (setting.rfind(L"GpuPreference=", 0) == 0)
+            return _wtoi(setting.c_str() + wcslen(L"GpuPreference="));
+    return -1;
+}
+
+void SetHighPerformanceGpu(const fs::path& directory)
+{
+    const fs::path exe = directory / L"Unishade.exe";
+    std::wstring value;
+    for (const std::wstring& setting : GpuSettings(exe))
+        if (setting.rfind(L"GpuPreference=", 0) != 0)
+            value += setting + L";";
+    value += L"GpuPreference=2;";
+    HKEY key = nullptr;
+    const bool saved = RegCreateKeyExW(HKEY_CURRENT_USER, kGpuPreferencesKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS &&
+                       RegSetValueExW(key, exe.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                                      static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+    if (key)
+        RegCloseKey(key);
+    SetupLog(saved ? "Set " + PathText(exe) + " to High performance in Windows' graphics settings."
+                   : "Could not set " + PathText(exe) + " to High performance in Windows' graphics settings.");
 }

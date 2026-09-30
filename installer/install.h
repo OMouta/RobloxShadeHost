@@ -104,3 +104,9 @@ std::wstring ReadShortcut(const std::filesystem::path& directory, const wchar_t*
 
 bool HostRunning(const std::filesystem::path& directory);
 void LaunchHost(const std::filesystem::path& directory);
+
+// The GPU preference for the folder's Unishade.exe in Windows' graphics settings: 0 lets Windows decide, 1 saves
+// power and 2 is high performance. -1 when it has none.
+int GpuPreference(const std::filesystem::path& directory);
+// Sets it to high performance, keeping its other graphics settings.
+void SetHighPerformanceGpu(const std::filesystem::path& directory);
