@@ -50,6 +50,31 @@ const released = release.date.toLocaleDateString('en-US', { year: 'numeric', mon
     </section>
 
     {
+      (release.macos || release.linux) && (
+        <section>
+          <h2>macOS and Linux</h2>
+          <p>
+            {release.macos && (
+              <>
+                <a href={release.macos.url}>Unishade for macOS</a> ({megabytes(release.macos.size)}, macOS 13 or newer)
+              </>
+            )}
+            {release.macos && release.linux && ' · '}
+            {release.linux && (
+              <>
+                <a href={release.linux.url}>Unishade for Linux</a> ({megabytes(release.linux.size)}, X11 or XWayland)
+              </>
+            )}
+          </p>
+          <p>
+            ReShade only runs on Windows, so these run ReShade's effects themselves, with the same presets.{' '}
+            <a href="/docs/macos-linux/">How to set them up</a>
+          </p>
+        </section>
+      )
+    }
+
+    {
       release.host && (
         <section>
           <h2>Without Setup</h2>

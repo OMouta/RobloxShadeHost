@@ -49,12 +49,17 @@ async function newest() {
   const { release, setup } = best;
   // Releases before the rename call the host RobloxShadeHost.exe.
   const host = release.assets.find((asset) => /^(Unishade|RobloxShadeHost)\.exe$/.test(asset.name));
+  // Releases before macOS and Linux support have neither.
+  const macos = release.assets.find((asset) => asset.name === 'Unishade-macOS.zip');
+  const linux = release.assets.find((asset) => asset.name === 'Unishade-linux-x64.tar.gz');
   return {
     version: release.tag_name.slice(1),
     date: new Date(release.published_at),
     notes: release.html_url,
     setup: { url: setup.browser_download_url, size: setup.size },
     host: host && { url: host.browser_download_url, size: host.size },
+    macos: macos && { url: macos.browser_download_url, size: macos.size },
+    linux: linux && { url: linux.browser_download_url, size: linux.size },
   };
 }
 

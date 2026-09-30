@@ -99,7 +99,6 @@ private:
     bool startHintShown = false;
     bool screenshotRequested = false;
     bool beforeAfterRequested = false;
-    int presetStepRequested = 0;
     double nextSearch = 0;
     double lastOverlayFrame = 0;
     double lastLauncherFrame = 0;

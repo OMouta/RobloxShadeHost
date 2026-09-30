@@ -101,11 +101,15 @@ void FailCapture(uint64_t generation, const std::string& message)
         {
             const uint32_t wantedWidth = uint32_t(std::lround(content.size.width / contentScale * scaleFactor));
             const uint32_t wantedHeight = uint32_t(std::lround(content.size.height / contentScale * scaleFactor));
-            std::lock_guard lock(capture.mutex);
-            if (!capture.reconfiguring && wantedWidth > 0 && wantedHeight > 0 &&
-                (wantedWidth != capture.configWidth || wantedHeight != capture.configHeight))
+            bool reconfigure = false;
             {
-                capture.reconfiguring = true;
+                std::lock_guard lock(capture.mutex);
+                reconfigure = !capture.reconfiguring && wantedWidth > 0 && wantedHeight > 0 &&
+                              (wantedWidth != capture.configWidth || wantedHeight != capture.configHeight);
+                capture.reconfiguring |= reconfigure;
+            }
+            if (reconfigure)
+            {
                 SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
                 config.width = wantedWidth;
                 config.height = wantedHeight;
@@ -114,18 +118,19 @@ void FailCapture(uint64_t generation, const std::string& message)
                 config.minimumFrameInterval = CMTimeMake(1, 240);
                 config.queueDepth = 5;
                 config.colorSpaceName = kCGColorSpaceSRGB;
+                if (@available(macOS 14.0, *))
+                    config.ignoreShadowsSingleWindow = YES;
                 const uint64_t generation = self.generation;
                 [stream updateConfiguration:config
                           completionHandler:^(NSError* error) {
-                            std::lock_guard inner(capture.mutex);
-                            if (generation == capture.generation)
+                            std::lock_guard lock(capture.mutex);
+                            if (generation != capture.generation)
+                                return;
+                            capture.reconfiguring = false;
+                            if (!error)
                             {
-                                capture.reconfiguring = false;
-                                if (!error)
-                                {
-                                    capture.configWidth = wantedWidth;
-                                    capture.configHeight = wantedHeight;
-                                }
+                                capture.configWidth = wantedWidth;
+                                capture.configHeight = wantedHeight;
                             }
                           }];
             }
