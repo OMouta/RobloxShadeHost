@@ -86,6 +86,15 @@ add_library(reshadefx STATIC
 target_include_directories(reshadefx PUBLIC "${RESHADEFX_DIR}" PRIVATE "${RESHADEFX_DIR}/spirv")
 # Third-party code: its warnings are not ours to fix.
 target_compile_options(reshadefx PRIVATE -w)
+# Compiled effects are cached for the compiler that made them, so a hash of its files names it.
+get_target_property(RESHADEFX_SOURCES reshadefx SOURCES)
+file(GLOB RESHADEFX_HEADERS "${RESHADEFX_DIR}/*.hpp" "${RESHADEFX_DIR}/*.inl" "${RESHADEFX_DIR}/spirv/*")
+set(RESHADEFX_ID "")
+foreach(source IN LISTS RESHADEFX_SOURCES RESHADEFX_HEADERS)
+    file(SHA256 "${source}" hash)
+    string(APPEND RESHADEFX_ID "${hash}")
+endforeach()
+string(SHA256 RESHADEFX_ID "${RESHADEFX_ID}")
 
 # Dear ImGui's GLFW and Vulkan backends, from the same version as the core.
 fetch_file("${IMGUI_URL}/backends/imgui_impl_glfw.h" ec95fe696c025dbf5fe6d24b958d7531d8cfbac0cb306a5435899d3526f64c4e "${IMGUI_DIR}/backends/imgui_impl_glfw.h")
@@ -93,11 +102,15 @@ fetch_file("${IMGUI_URL}/backends/imgui_impl_glfw.cpp" 41b11f71c17e05a748d4eaf89
 fetch_file("${IMGUI_URL}/backends/imgui_impl_vulkan.h" 351aa104d643f8a575b891d99645389d45d321bcbd33d41270d2ebf0276351f3 "${IMGUI_DIR}/backends/imgui_impl_vulkan.h")
 fetch_file("${IMGUI_URL}/backends/imgui_impl_vulkan.cpp" 659590d8b74bcbd2ba6612d84a6d8871f97314f04da06a8a05508244adabf086 "${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp")
 
-# stb_image loads the textures effects bring along, stb_image_write saves screenshots.
+# stb_image loads the textures effects bring along and stb_image_resize2 sizes them, stb_image_write saves
+# screenshots. ReShade's own addition to stb_image reads DDS files.
 set(STB_DIR "${CMAKE_BINARY_DIR}/stb")
 set(STB_URL "https://raw.githubusercontent.com/nothings/stb/f58f558c120e9b32c217290b80bad1a0729fbb2c")
 fetch_file("${STB_URL}/stb_image.h" 594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3 "${STB_DIR}/stb_image.h")
 fetch_file("${STB_URL}/stb_image_write.h" cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05 "${STB_DIR}/stb_image_write.h")
+fetch_file("${STB_URL}/stb_image_resize2.h" af5fbe1ed423c44cec8155bd0dfea2b5ae6191912790b3a95e15b0b4f610d4df "${STB_DIR}/stb_image_resize2.h")
+fetch_file("https://raw.githubusercontent.com/crosire/reshade/v6.8.0/deps/stb_image/stb_image_dds.h"
+    6740af5e5d6e6bda48ad25b7f5fd990e5cd2f2c0442f9ba060700171f76a2ea0 "${STB_DIR}/stb_image_dds.h")
 
 # GLFW 3.4 is the first version that can pass mouse input through a window, which the overlay needs. Linux
 # builds only the X11 backend: Wayland does not let a window place itself over another program's window, while
@@ -175,6 +188,7 @@ add_library(unishade_core STATIC ${POSIX_SOURCES})
 target_include_directories(unishade_core PUBLIC "${POSIX_DIR}" "${CMAKE_CURRENT_LIST_DIR}/..")
 target_compile_definitions(unishade_core PUBLIC UNISHADE_VERSION="${PROJECT_VERSION}")
 target_compile_options(unishade_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+set_source_files_properties("${POSIX_DIR}/effects.cpp" PROPERTIES COMPILE_DEFINITIONS UNISHADE_COMPILER_ID="${RESHADEFX_ID}")
 target_link_libraries(unishade_core PUBLIC reshadefx posix_libraries Threads::Threads)
 if(APPLE)
     target_compile_options(unishade_core PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
@@ -216,7 +230,8 @@ if(APPLE)
 else()
     add_executable(unishade "${POSIX_DIR}/main.cpp")
     set_target_properties(unishade PROPERTIES OUTPUT_NAME unishade)
-    # The effects and presets folders are found beside the executable when installed as a portable folder.
+    # Run paths into the build folder are relative to the executable, so the folder can move. Effects and presets
+    # are always in the data folder from config.h, never beside the executable.
     set_target_properties(unishade PROPERTIES BUILD_RPATH_USE_ORIGIN ON)
 endif()
 if(APPLE)
@@ -237,4 +252,18 @@ if(BUILD_TESTING)
     add_executable(posix_tests "${CMAKE_SOURCE_DIR}/tests/posix_tests.cpp")
     target_link_libraries(posix_tests PRIVATE unishade_core)
     add_test(NAME posix_tests COMMAND posix_tests)
+
+    add_executable(posix_effects_tests "${CMAKE_SOURCE_DIR}/tests/posix_effects_tests.cpp")
+    target_link_libraries(posix_effects_tests PRIVATE unishade_core)
+    target_compile_options(posix_effects_tests PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+    add_test(NAME posix_effects_tests COMMAND posix_effects_tests)
+
+    add_executable(names_tests "${CMAKE_SOURCE_DIR}/tests/names_tests.cpp")
+    target_compile_options(names_tests PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+    add_test(NAME names_tests COMMAND names_tests)
+
+    add_executable(package_files_tests "${CMAKE_SOURCE_DIR}/tests/package_files_tests.cpp")
+    target_link_libraries(package_files_tests PRIVATE posix_libraries)
+    target_compile_options(package_files_tests PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+    add_test(NAME package_files_tests COMMAND package_files_tests)
 endif()

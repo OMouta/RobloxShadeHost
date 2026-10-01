@@ -3,7 +3,11 @@
 #include <windows.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 
+#include <atomic>
+#include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -21,19 +25,46 @@ inline void ShellOpen(std::wstring target)
     }).detach();
 }
 
-// Moves a file to the Recycle Bin. Returns false when it could not.
-inline bool Recycle(const std::wstring& path)
+enum class RecycleResult
 {
-    bool recycled = false;
-    std::thread([&] {
-        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        const std::wstring from = path + L'\0';
-        SHFILEOPSTRUCTW operation{};
-        operation.wFunc = FO_DELETE;
-        operation.pFrom = from.c_str();
-        operation.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
-        recycled = SHFileOperationW(&operation) == 0 && !operation.fAnyOperationsAborted;
-        CoUninitialize();
-    }).join();
-    return recycled;
+    Pending,
+    Recycled,
+    Cancelled,
+    Failed,
+};
+
+// Moves a file to the Recycle Bin on a thread of its own, so the caller keeps drawing and checks the result later.
+// Where the file cannot go to the Recycle Bin, such as on a drive without one, Windows asks before deleting it for
+// good. done runs on that thread once it is over.
+inline std::shared_ptr<std::atomic<RecycleResult>> Recycle(std::wstring path, std::function<void()> done = {})
+{
+    auto result = std::make_shared<std::atomic<RecycleResult>>(RecycleResult::Pending);
+    std::thread([path = std::move(path), done = std::move(done), result] {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        RecycleResult outcome = RecycleResult::Failed;
+        IFileOperation* operation = nullptr;
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&operation))) &&
+            SUCCEEDED(operation->SetOperationFlags(FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_SILENT)) &&
+            SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item))) &&
+            SUCCEEDED(operation->DeleteItem(item, nullptr)))
+        {
+            const HRESULT performed = operation->PerformOperations();
+            BOOL aborted = FALSE;
+            if (SUCCEEDED(operation->GetAnyOperationsAborted(&aborted)) && aborted)
+                outcome = RecycleResult::Cancelled;
+            else if (SUCCEEDED(performed))
+                outcome = RecycleResult::Recycled;
+        }
+        if (item)
+            item->Release();
+        if (operation)
+            operation->Release();
+        if (SUCCEEDED(com))
+            CoUninitialize();
+        result->store(outcome);
+        if (done)
+            done();
+    }).detach();
+    return result;
 }

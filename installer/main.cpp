@@ -4,8 +4,9 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "install.h"
 #include "resource.h"
-#include "text.h"
 #include "../src/hotkey.h"
+#include "../src/text.h"
+#include "../src/theme.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -40,25 +41,30 @@ constexpr float kStrip = 3;
 constexpr float kSidebar = 236;
 constexpr float kFooter = 74;
 
-constexpr ImU32 kBackground = IM_COL32(17, 18, 23, 255);
-constexpr ImU32 kSidebarColor = IM_COL32(12, 13, 17, 255);
-constexpr ImU32 kCard = IM_COL32(25, 26, 33, 255);
-constexpr ImU32 kCardHover = IM_COL32(31, 32, 41, 255);
-constexpr ImU32 kBorder = IM_COL32(40, 42, 53, 255);
-constexpr ImU32 kBorderStrong = IM_COL32(74, 77, 94, 255);
-constexpr ImU32 kText = IM_COL32(236, 236, 241, 255);
-constexpr ImU32 kDim = IM_COL32(150, 152, 167, 255);
-constexpr ImU32 kAccent = IM_COL32(112, 122, 255, 255);
-constexpr ImU32 kAccentHover = IM_COL32(132, 141, 255, 255);
-constexpr ImU32 kAccentActive = IM_COL32(95, 104, 235, 255);
-constexpr ImU32 kWarning = IM_COL32(245, 192, 92, 255);
-constexpr ImU32 kError = IM_COL32(255, 118, 118, 255);
-constexpr ImU32 kSuccess = IM_COL32(104, 214, 148, 255);
-// The ring in the logo.
-constexpr ImU32 kRainbow[] = {
-    IM_COL32(255, 72, 96, 255),  IM_COL32(255, 158, 54, 255), IM_COL32(248, 228, 76, 255), IM_COL32(84, 222, 122, 255),
-    IM_COL32(62, 198, 255, 255), IM_COL32(84, 110, 255, 255), IM_COL32(186, 92, 255, 255),
-};
+constexpr ImU32 Color(unsigned rgb, int alpha = 255)
+{
+    return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, alpha);
+}
+
+constexpr ImU32 kBackground = Color(theme::kBackground);
+constexpr ImU32 kSidebarColor = Color(theme::kSidebar);
+constexpr ImU32 kCard = Color(theme::kCard);
+constexpr ImU32 kCardHover = Color(theme::kCardHover);
+constexpr ImU32 kBorder = Color(theme::kBorder);
+constexpr ImU32 kBorderStrong = Color(theme::kBorderStrong);
+constexpr ImU32 kText = Color(theme::kText);
+constexpr ImU32 kDim = Color(theme::kDim);
+constexpr ImU32 kAccent = Color(theme::kAccent);
+constexpr ImU32 kAccentHover = Color(theme::kAccentHover);
+constexpr ImU32 kAccentActive = Color(theme::kAccentActive);
+constexpr ImU32 kWarning = Color(theme::kWarning);
+constexpr ImU32 kError = Color(theme::kError);
+constexpr ImU32 kSuccess = Color(theme::kSuccess);
+
+// Exit codes of a silent run. 1 is also used when the command line is invalid.
+constexpr int kExitFailed = 1;
+// Installed, but an effect package, a preset or the requested add-on was left out. The setup log says which.
+constexpr int kExitIncomplete = 2;
 
 constexpr wchar_t kDefaultToggleKey[] = L"Home";
 constexpr wchar_t kDefaultOverlayToggleKey[] = L"Ctrl+F8";
@@ -174,6 +180,7 @@ struct App
 
     Task uninstallTask;
     bool deleteUserFiles = false;
+    bool folderLeft = false;
 };
 App app;
 
@@ -232,6 +239,14 @@ void StartReleaseFetch()
 {
     app.releaseError.clear();
     app.releaseTask.Start([] { app.fetchedRelease = FetchReShadeRelease(app.releaseCancel); });
+}
+
+// Setup started on the uninstall page has not loaded the license yet.
+void ShowLicensePage()
+{
+    if (!app.release && !app.releaseTask.Running())
+        StartReleaseFetch();
+    app.page = Page::License;
 }
 
 void StartInstall()
@@ -336,12 +351,14 @@ void Title(const std::string& text)
 
 void Rainbow(ImDrawList* draw, ImVec2 min, ImVec2 max)
 {
-    constexpr int count = IM_ARRAYSIZE(kRainbow);
+    constexpr int count = IM_ARRAYSIZE(theme::kRainbow);
     for (int i = 0; i + 1 < count; ++i)
     {
         const float left = min.x + (max.x - min.x) * i / (count - 1);
         const float right = min.x + (max.x - min.x) * (i + 1) / (count - 1);
-        draw->AddRectFilledMultiColor(ImVec2(left, min.y), ImVec2(right, max.y), kRainbow[i], kRainbow[i + 1], kRainbow[i + 1], kRainbow[i]);
+        const ImU32 from = Color(theme::kRainbow[i]);
+        const ImU32 to = Color(theme::kRainbow[i + 1]);
+        draw->AddRectFilledMultiColor(ImVec2(left, min.y), ImVec2(right, max.y), from, to, to, from);
     }
 }
 
@@ -566,13 +583,13 @@ void Sidebar(std::initializer_list<const char*> steps, int current)
             draw->AddLine(dot + ImVec2(0, S(9)), dot + ImVec2(0, S(27)), kBorder, S(1.5f));
         if (index < current)
         {
-            draw->AddCircleFilled(dot, S(7), IM_COL32(104, 214, 148, 40));
+            draw->AddCircleFilled(dot, S(7), Color(theme::kSuccess, 40));
             const ImVec2 check[] = { dot + ImVec2(-S(3.2f), 0), dot + ImVec2(-S(0.8f), S(2.5f)), dot + ImVec2(S(3.5f), -S(2.5f)) };
             draw->AddPolyline(check, 3, kSuccess, S(1.8f));
         }
         else if (index == current)
         {
-            draw->AddCircleFilled(dot, S(9), IM_COL32(112, 122, 255, 60));
+            draw->AddCircleFilled(dot, S(9), Color(theme::kAccent, 60));
             draw->AddCircleFilled(dot, S(5), kAccent);
         }
         else
@@ -733,7 +750,7 @@ void FailedPage()
     if (!cancelled)
         Text(app.installTask.error, kError, 15);
     Spacing(6);
-    Text("Go back to try again, or leave out the part that failed.", kDim, 15);
+    Text("Go back to try again.", kDim, 15);
     Spacing(6);
     if (Link("Open the setup log", kAccentHover, 15))
         OpenFile(SetupLogPath());
@@ -765,7 +782,10 @@ void UninstallPage()
     Title("Uninstall Unishade");
     Text("Removes Unishade, ReShade and the effects from " + std::string(app.directory) + ", and its Start menu shortcuts.", kDim, 15);
     Spacing(10);
-    CheckLine("Also delete my presets, ReShade settings and shortcuts", app.deleteUserFiles);
+    CheckLine("Also delete my presets, settings and game list", app.deleteUserFiles);
+    Text("That deletes ReShade.ini, ReShadePreset.ini, RobloxShadeHost.ini and games.ini, and the presets and reshade-shaders folders with "
+         "everything in them. Other files in the folder, such as screenshots, stay.",
+         kDim, 14);
     if (app.uninstallTask.Running())
     {
         Spacing(10);
@@ -779,7 +799,9 @@ void UninstalledPage()
     {
         Title("Unishade was uninstalled");
         if (!app.deleteUserFiles)
-            Text("Your presets, ReShade settings and shortcuts are still in " + std::string(app.directory) + ".", kDim, 15);
+            Text("Your presets and settings are still in " + std::string(app.directory) + ".", kDim, 15);
+        else if (app.folderLeft)
+            Text("Files Setup did not create, such as screenshots, are still in " + std::string(app.directory) + ".", kDim, 15);
     }
     else
     {
@@ -816,7 +838,11 @@ void CollectTasks()
             DestroyWindow(ui.window);
     }
     if (app.uninstallTask.Collect())
+    {
+        std::error_code ignored;
+        app.folderLeft = fs::exists(Directory(), ignored);
         app.page = Page::Uninstalled;
+    }
 }
 
 void DrawUi()
@@ -888,7 +914,7 @@ void DrawUi()
         break;
     case Page::Addons:
         if (FooterButton(0, "Next", true))
-            app.page = Page::License;
+            ShowLicensePage();
         if (FooterButton(1, "Back", false))
             app.page = app.installation ? Page::Manage : Page::Welcome;
         break;
@@ -1126,6 +1152,15 @@ void AddFonts()
 
 int RunWindow(const Arguments& arguments)
 {
+    // However the window ends, the license download stops first, so no hidden Setup keeps running.
+    struct StopReleaseFetch
+    {
+        ~StopReleaseFetch()
+        {
+            app.releaseCancel = true;
+            app.releaseTask.Wait();
+        }
+    } stopReleaseFetch;
     app.installation = FindInstallation();
     const fs::path directory = !arguments.directory.empty() ? fs::absolute(arguments.directory)
                                : app.installation        ? app.installation->directory
@@ -1152,7 +1187,7 @@ int RunWindow(const Arguments& arguments)
     ui.window = CreateWindowExW(0, windowClass.lpszClassName, L"Unishade Setup", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr,
                                 nullptr, windowClass.hInstance, nullptr);
     if (!ui.window)
-        return 1;
+        return kExitFailed;
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(ui.window, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     const COLORREF caption = RGB(12, 13, 17);
@@ -1172,7 +1207,7 @@ int RunWindow(const Arguments& arguments)
     if (!CreateDeviceAndSwapchain())
     {
         MessageBoxW(ui.window, L"Setup could not start its window because DirectX 11 is unavailable.", L"Unishade Setup", MB_ICONERROR);
-        return 1;
+        return kExitFailed;
     }
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
@@ -1228,8 +1263,6 @@ int RunWindow(const Arguments& arguments)
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 500, QS_ALLINPUT);
     }
 
-    app.releaseCancel = true;
-    app.releaseTask.Wait();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -1284,8 +1317,7 @@ int RunSilent(const Arguments& arguments)
 
         Progress progress;
         const ReShadeRelease release = options.reshade ? FetchReShadeRelease(progress.cancel) : ReShadeRelease{};
-        Install(options, release, progress);
-        return 0;
+        return Install(options, release, progress) ? 0 : kExitIncomplete;
     }
     catch (const Cancelled&)
     {
@@ -1295,7 +1327,7 @@ int RunSilent(const Arguments& arguments)
     {
         SetupLog(std::string("Error: ") + e.what());
     }
-    return 1;
+    return kExitFailed;
 }
 
 Arguments ParseArguments()
@@ -1347,8 +1379,9 @@ Arguments ParseArguments()
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     // Setup's copy lives next to ReShade, which installs itself as dxgi.dll or d3d11.dll, and Windows looks
-    // in the exe's folder first. d3d11.dll is delay-loaded, so loading both from System32 before anything
-    // else keeps ReShade out of Setup; later loads by name get these copies.
+    // in the exe's folder first. From here on, DLLs loaded by name, including the delay-loaded imports, come
+    // from System32 only. dxgi.dll and d3d11.dll are loaded right away, so later loads by name get these copies.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1361,7 +1394,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         SetupLog(arguments.error);
         if (!arguments.silent)
             MessageBoxW(nullptr, Wide(arguments.error).c_str(), L"Unishade Setup", MB_ICONERROR);
-        return 1;
+        return kExitFailed;
     }
     const int result = arguments.silent ? RunSilent(arguments) : RunWindow(arguments);
     DeleteMovedSetup();

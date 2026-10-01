@@ -7,11 +7,13 @@
 #include <stb_image_write.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <iterator>
 #include <strings.h>
+#include <system_error>
 
 App app;
 
@@ -109,21 +111,24 @@ void App::Run()
             runtime.LoadPreset(settings.preset);
             runtime.Reload();
         }
+        TakeScreenshots();
 
         UpdateTarget();
-        inFront = active && (platform::ProcessInFront(active->pid) || glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED));
+        // Once per pass, since on X11 each asks the X server.
+        const bool overlayFocused = glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED);
+        inFront = active && (platform::ProcessInFront(active->pid) || overlayFocused);
         UpdateGameHotkeys();
         UpdateOverlay();
 
         if (menuOpen)
         {
             // Another window took focus, as the menu closes on Windows when the host loses it.
-            if (glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED))
+            if (overlayFocused)
                 menuFocused = true;
             else if (menuFocused)
                 CloseMenu(false);
         }
-        else if (overlayVisible && glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED) && active)
+        else if (overlayVisible && overlayFocused && active)
             platform::Activate(*active); // the window manager focused the overlay, which should never have it
 
         const bool newFrame = active && platform::TakeFrame(frame);
@@ -146,6 +151,9 @@ void App::Run()
 
 void App::Shutdown()
 {
+    for (std::future<std::string>& screenshot : screenshots)
+        screenshot.wait();
+    screenshots.clear();
     StopCapture();
     if (runtime.Dirty() && settings.autoSavePresets)
         runtime.SavePreset();
@@ -184,7 +192,11 @@ void App::StartCapture(const platform::Window& window)
         return;
     }
     active = window;
+    activeExecutable = platform::ProcessExecutable(window.pid);
+    activeCommand = platform::ProcessCommand(window.pid);
     frame = {};
+    failedWidth = failedHeight = 0;
+    cursorKnown = false;
     lastCaptureError.clear();
     Log(LogLevel::Info, "Capturing %s", window.title.c_str());
     FollowGame();
@@ -208,6 +220,8 @@ void App::StopCapture()
     if (active)
         Log(LogLevel::Info, "Stopped capturing %s.", active->title.c_str());
     active.reset();
+    activeExecutable.clear();
+    activeCommand.clear();
     game.clear();
     if (overlayVisible)
         platform::ShowOverlay(overlay.window, false);
@@ -216,7 +230,8 @@ void App::StopCapture()
 
 void App::UpdateTarget()
 {
-    if (!captureEnabled)
+    // Nothing can draw once the graphics card is lost, so there is nothing to capture for.
+    if (!captureEnabled || gpu.lost)
     {
         if (active)
             StopCapture();
@@ -236,17 +251,76 @@ void App::UpdateTarget()
         captureRetry = Now() + 2;
     }
 
-    if ((active && (selected || menuOpen)) || Now() < nextSearch || Now() < captureRetry)
+    // Nothing else is looked for while the game is in front or the menu is open, or while a picked window is.
+    if ((active && (selected || menuOpen || inFront)) || Now() < nextSearch || Now() < captureRetry)
         return;
     nextSearch = Now() + 0.5;
-    const platform::WindowId foreground = platform::ForegroundWindow();
-    const std::optional<platform::Window> game = FindGameTarget(selected, autoGames, foreground);
-    if (game && (!active || game->id != active->id) && (!active || game->id == foreground))
+    std::optional<platform::Window> found;
+    if (selected)
+        found = FindGameTarget(selected, autoGames, 0);
+    else
+    {
+        // The window in front first, which is quick to check. Every process only while no game is attached, and
+        // only now and then, since that reads all of them.
+        found = GameInFront();
+        if (!found && !active && Now() >= nextScan)
+        {
+            nextScan = Now() + 2;
+            std::vector<GameProcess> windowless;
+            found = FindGameTarget(std::nullopt, autoGames, platform::ForegroundWindow(), &windowless);
+            NoticeWindowless(windowless);
+        }
+    }
+    if (found && (!active || found->id != active->id))
     {
         if (active)
             StopCapture();
-        StartCapture(*game);
+        StartCapture(*found);
     }
+}
+
+// The saved game whose window is in front, other than the one attached.
+std::optional<platform::Window> App::GameInFront()
+{
+    const platform::WindowId foreground = platform::ForegroundWindow();
+    if (!foreground || foreground == notGame || (active && foreground == active->id))
+        return std::nullopt;
+    std::optional<platform::Window> window = platform::ListedWindow(foreground);
+    if (!window)
+        return std::nullopt;
+    const int index = MatchingGame(autoGames, platform::ProcessExecutable(window->pid), platform::ProcessCommand(window->pid));
+    if (index < 0)
+    {
+        notGame = foreground;
+        return std::nullopt;
+    }
+    window->title = autoGames[index].name;
+    return window;
+}
+
+// Under Wayland, a game that draws to Wayland directly has no X11 window, which looks like a game that never opens.
+// That is said once per process, after a while, since games also start without a window.
+void App::NoticeWindowless(const std::vector<GameProcess>& processes)
+{
+    std::map<int, double> since;
+    if (!processes.empty() && platform::WaylandDesktop())
+    {
+        const std::set<int> owners = platform::WindowOwners();
+        for (const GameProcess& process : processes)
+        {
+            if (owners.count(process.pid))
+                continue;
+            const auto known = windowlessSince.find(process.pid);
+            const double first = known != windowlessSince.end() ? known->second : Now();
+            since[process.pid] = first;
+            if (Now() - first >= 10 && windowlessNoticed.insert(process.pid).second)
+                Report(LogLevel::Warning,
+                       "%s is running without an X11 window, so Unishade cannot see it. Unishade works with games that run through "
+                       "XWayland: start this one with SDL_VIDEODRIVER=x11, or turn off Wayland in Wine, Proton or the game's launcher.",
+                       autoGames[process.game].name.c_str());
+        }
+    }
+    windowlessSince = std::move(since);
 }
 
 void App::Select(std::optional<platform::Window> window)
@@ -272,6 +346,8 @@ void App::AddActiveGame()
 
 void App::SaveGames()
 {
+    // The window in front may be one of the games now.
+    notGame = 0;
     if (!SaveAutoGames(DataDirectory() / "games.ini", autoGames))
         Report(LogLevel::Warning, "Could not save the game list.");
 }
@@ -291,7 +367,9 @@ const std::vector<platform::Window>& App::Windows()
 void App::UpdateOverlay()
 {
     platform::Rect bounds;
-    const bool visible = captureEnabled && active && HasFrame() && (menuOpen || inFront) && platform::WindowBounds(active->id, bounds);
+    const bool sized = frame.width != failedWidth || frame.height != failedHeight;
+    const bool visible = captureEnabled && active && HasFrame() && sized && (menuOpen || inFront) && platform::WindowBounds(active->id, bounds);
+    platform::SetCaptureIdle(!visible);
     if (!visible)
     {
         if (overlayVisible)
@@ -314,13 +392,31 @@ void App::UpdateOverlay()
 
 void App::RenderOverlay()
 {
+    // Effects work at the size of the game's picture. Where the graphics card cannot make room for that, the overlay
+    // hides rather than cover the game with nothing.
+    runtime.SetSize(frame.width, frame.height);
+    if (runtime.Width() != frame.width || runtime.Height() != frame.height)
+    {
+        // A size still being prepared, or a lost graphics card, says nothing about room for effects.
+        if (runtime.Loading() || gpu.lost)
+            return;
+        failedWidth = frame.width;
+        failedHeight = frame.height;
+        Report(LogLevel::Warning, "The graphics card has no room for effects on a %ux%u picture. The overlay stays hidden until the game's window changes size.",
+               frame.width, frame.height);
+        if (menuOpen)
+            CloseMenu();
+        UpdateOverlay();
+        return;
+    }
+    failedWidth = failedHeight = 0;
+
     Surface& surface = overlay.surface;
     if (!surface.BeginFrame())
         return;
     // The previous frame's commands are done, so its buffer can go back to the platform.
     inFlight = frame.hold;
     lastOverlayFrame = Now();
-    runtime.SetSize(frame.width, frame.height);
     runtime.menuOpen = menuOpen;
     double x = 0, y = 0;
     int width = 1, height = 1;
@@ -328,33 +424,79 @@ void App::RenderOverlay()
     glfwGetWindowSize(overlay.window, &width, &height);
     runtime.mouseX = static_cast<float>(x * frame.width / std::max(width, 1));
     runtime.mouseY = static_cast<float>(y * frame.height / std::max(height, 1));
+    // Effects can leave themselves out of screenshots, so only a frame rendered knowing it is one is saved. A
+    // request made in this frame's menu is taken by the next frame.
+    const bool screenshot = screenshotRequested;
+    UpdateInput();
 
-    if (runtime.Width() == frame.width && runtime.Height() == frame.height)
-    {
-        runtime.Render(surface.commands, Source(), effectsEnabled && !comparing && !compareButton);
-        FullBarrier(surface.commands);
-        const GpuImage& output = runtime.Output();
-        VkImageBlit blit{};
-        blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        blit.srcOffsets[1] = { int(output.width), int(output.height), 1 };
-        blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        blit.dstOffsets[1] = { int(surface.extent.width), int(surface.extent.height), 1 };
-        vkCmdBlitImage(surface.commands, output.image, VK_IMAGE_LAYOUT_GENERAL, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                       VK_FILTER_LINEAR);
-    }
-    else
-    {
-        const VkClearColorValue black{};
-        const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        vkCmdClearColorImage(surface.commands, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
-    }
+    runtime.Render(surface.commands, Source(), effectsEnabled && !comparing && !compareButton);
+    FullBarrier(surface.commands);
+    const GpuImage& output = runtime.Output();
+    VkImageBlit blit{};
+    blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    blit.srcOffsets[1] = { int(output.width), int(output.height), 1 };
+    blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    blit.dstOffsets[1] = { int(surface.extent.width), int(surface.extent.height), 1 };
+    vkCmdBlitImage(surface.commands, output.image, VK_IMAGE_LAYOUT_GENERAL, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                   VK_FILTER_LINEAR);
 
     BeginUi(overlay);
     DrawOverlay(*this);
+    // For effects in the next frame. The wheel only reaches the overlay while the menu is open.
+    const ImGuiIO& io = ImGui::GetIO();
+    menuWheel = io.MouseWheel;
+    menuActive = ImGui::IsAnyItemActive();
+    menuHovered = io.WantCaptureMouse;
+    menuTyping = io.WantTextInput;
     EndUi(overlay);
 
-    if (screenshotRequested)
+    if (screenshot)
         SaveScreenshot();
+}
+
+// What effects read of the keyboard and mouse. Keys are read for the whole system, so only while they go to the game
+// or the menu.
+void App::UpdateInput()
+{
+    std::array<bool, 256> keys{};
+    std::array<bool, 5> buttons{};
+    if (menuOpen || inFront)
+        platform::ReadInput(keys, buttons);
+    // Windows also has a code for Shift, Ctrl and Alt on either side, and counts the mouse buttons as keys.
+    keys[0x10] = keys[0xA0] || keys[0xA1];
+    keys[0x11] = keys[0xA2] || keys[0xA3];
+    keys[0x12] = keys[0xA4] || keys[0xA5];
+    keys[0x01] = buttons[0];
+    keys[0x02] = buttons[1];
+    keys[0x04] = buttons[2];
+    keys[0x05] = buttons[3];
+    keys[0x06] = buttons[4];
+
+    fx::EffectInput& input = runtime.input;
+    // Typing in the menu, such as a search, must not set off technique shortcuts.
+    const bool typing = menuOpen && menuTyping;
+    for (size_t i = 0; i < keys.size(); ++i)
+    {
+        input.keysPressed[i] = keys[i] && !input.keysDown[i] && !typing;
+        input.keysDown[i] = keys[i];
+    }
+    for (size_t i = 0; i < buttons.size(); ++i)
+    {
+        input.buttonsPressed[i] = buttons[i] && !input.buttonsDown[i];
+        input.buttonsDown[i] = buttons[i];
+    }
+    // The first frame of a capture has nothing to compare with.
+    input.cursorDeltaX = cursorKnown ? runtime.mouseX - lastMouseX : 0;
+    input.cursorDeltaY = cursorKnown ? runtime.mouseY - lastMouseY : 0;
+    lastMouseX = runtime.mouseX;
+    lastMouseY = runtime.mouseY;
+    cursorKnown = true;
+    input.wheelDelta = menuOpen ? menuWheel : 0;
+    input.overlayActive = menuOpen && menuActive;
+    input.overlayHovered = menuOpen && menuHovered;
+    input.activeUniform = menuOpen ? menuActiveUniform : nullptr;
+    input.hoveredUniform = menuOpen ? menuHoveredUniform : nullptr;
+    input.screenshot = screenshotRequested;
 }
 
 void App::RenderLauncher()
@@ -634,10 +776,8 @@ bool App::MovePreset(const fs::path& preset, const fs::path& folder, std::string
 void App::FollowGame()
 {
     game.clear();
-    const std::string executable = platform::ProcessExecutable(active->pid);
-    const std::string command = platform::ProcessCommand(active->pid);
     for (const AutoGame& saved : autoGames)
-        if (MatchesProcess(saved, executable, command))
+        if (MatchesProcess(saved, activeExecutable, activeCommand))
         {
             game = FolderName(saved.name);
             break;
@@ -686,15 +826,37 @@ bool App::SwitchPreset(const fs::path& path, bool save, bool discard)
     return true;
 }
 
+std::string PresetNameProblem(const std::string& name)
+{
+    if (!name.empty() && name[0] == '.')
+        return "Names cannot start with a dot.";
+    switch (CheckName(name, false))
+    {
+    case NameIssue::None:
+        return {};
+    case NameIssue::Empty:
+        return "Type a name.";
+    case NameIssue::Control:
+    case NameIssue::Character:
+        return "Names cannot contain \\ / : * ? \" < > | or control characters.";
+    case NameIssue::End:
+        return "Names cannot end in a dot or a space.";
+    case NameIssue::Device:
+        return "Windows keeps that name for a device. Pick another one.";
+    }
+    return {};
+}
+
 bool App::NewPreset(const std::string& name, bool copyCurrent, std::string& error)
 {
-    if (name.empty() || name.find_first_of("/\\:") != std::string::npos || name[0] == '.')
+    if (std::string problem = PresetNameProblem(name); !problem.empty())
     {
-        error = "Preset names cannot contain slashes or start with a dot.";
+        error = std::move(problem);
         return false;
     }
     const fs::path path = NewPresetFolder() / (name + ".ini");
-    if (fs::exists(path))
+    std::error_code missing;
+    if (fs::exists(path, missing))
     {
         error = "A preset with that name already exists.";
         return false;
@@ -769,59 +931,96 @@ void App::SaveScreenshot()
     if (after.empty())
         return;
     const uint32_t width = runtime.Width(), height = runtime.Height();
-    std::vector<uint8_t> image;
-    uint32_t imageWidth = width;
     std::vector<uint8_t> before;
-    if (beforeAfterRequested && frame.width == width && frame.height == height)
-    {
-        if (frame.image)
-            before = runtime.ReadSource(Source());
-        else
-        {
-            before.resize(size_t(width) * height * 4);
-            for (size_t i = 0; i < frame.pixels.size(); ++i)
-            {
-                const uint32_t pixel = frame.pixels[i];
-                before[i * 4] = (pixel >> 16) & 0xFF;
-                before[i * 4 + 1] = (pixel >> 8) & 0xFF;
-                before[i * 4 + 2] = pixel & 0xFF;
-                before[i * 4 + 3] = 255;
-            }
-        }
-    }
-    if (!before.empty())
-    {
-        // The game's own picture on the left, with effects on the right.
-        imageWidth = width * 2;
-        image.resize(size_t(imageWidth) * height * 4);
-        for (uint32_t y = 0; y < height; ++y)
-        {
-            std::memcpy(&image[size_t(y) * imageWidth * 4], &before[size_t(y) * width * 4], size_t(width) * 4);
-            std::memcpy(&image[(size_t(y) * imageWidth + width) * 4], &after[size_t(y) * width * 4], size_t(width) * 4);
-        }
-    }
-    else
-        image = std::move(after);
+    std::vector<uint32_t> beforePixels;
+    const bool beforeAfter = beforeAfterRequested && frame.width == width && frame.height == height;
+    if (beforeAfter && frame.image)
+        before = runtime.ReadSource(Source());
+    else if (beforeAfter)
+        beforePixels = frame.pixels;
 
     char stamp[64];
     const time_t now = time(nullptr);
     tm local{};
     localtime_r(&now, &local);
     strftime(stamp, sizeof(stamp), "%Y-%m-%d %H-%M-%S", &local);
-    const std::string game = active ? active->title : "Unishade";
-    const fs::path path = ScreenshotDirectory() / (game + " " + stamp + (beforeAfterRequested ? " before-after" : "") + ".png");
-    std::error_code error;
-    fs::create_directories(path.parent_path(), error);
-    if (stbi_write_png(path.c_str(), int(imageWidth), int(height), 4, image.data(), int(imageWidth) * 4))
-    {
+    // Window titles can hold anything, slashes included, so the name keeps none of that.
+    std::string name = SafeFileName(active ? active->title : "Unishade") + " " + stamp;
+    // Another screenshot in the same second gets a name of its own, rather than the same file written twice at once.
+    screenshotsInStamp = screenshotStamp == stamp ? screenshotsInStamp + 1 : 1;
+    screenshotStamp = stamp;
+    if (screenshotsInStamp > 1)
+        name += " " + std::to_string(screenshotsInStamp);
+    const fs::path folder = ScreenshotDirectory();
+    const fs::path path = folder / (name + (beforeAfter ? " before-after" : "") + ".png");
+    std::string shown = folder.string();
+    if (const char* home = getenv("HOME"); home && *home && shown.rfind(home, 0) == 0)
+        shown = "~" + shown.substr(strlen(home));
+
+    // Encoding the PNG takes long enough to hold up the game's picture, so it happens on a thread of its own.
+    auto write = [path, shown, width, height, after = std::move(after), before = std::move(before),
+                  beforePixels = std::move(beforePixels)]() mutable -> std::string {
+        if (!beforePixels.empty())
+        {
+            before.resize(size_t(width) * height * 4);
+            for (size_t i = 0; i < beforePixels.size(); ++i)
+            {
+                const uint32_t pixel = beforePixels[i];
+                before[i * 4] = (pixel >> 16) & 0xFF;
+                before[i * 4 + 1] = (pixel >> 8) & 0xFF;
+                before[i * 4 + 2] = pixel & 0xFF;
+                before[i * 4 + 3] = 255;
+            }
+        }
+        std::vector<uint8_t> image;
+        uint32_t imageWidth = width;
+        if (!before.empty())
+        {
+            // The game's own picture on the left, with effects on the right.
+            imageWidth = width * 2;
+            image.resize(size_t(imageWidth) * height * 4);
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                std::memcpy(&image[size_t(y) * imageWidth * 4], &before[size_t(y) * width * 4], size_t(width) * 4);
+                std::memcpy(&image[(size_t(y) * imageWidth + width) * 4], &after[size_t(y) * width * 4], size_t(width) * 4);
+            }
+        }
+        else
+            image = std::move(after);
+        std::error_code error;
+        fs::create_directories(path.parent_path(), error);
+        if (!stbi_write_png(path.c_str(), int(imageWidth), int(height), 4, image.data(), int(imageWidth) * 4))
+        {
+            Report(LogLevel::Warning, "Could not save the screenshot to %s.", path.c_str());
+            return {};
+        }
         Log(LogLevel::Info, "Screenshot saved to %s", path.c_str());
-        std::string folder = ScreenshotDirectory().string();
-        if (const char* home = getenv("HOME"); home && *home && folder.rfind(home, 0) == 0)
-            folder = "~" + folder.substr(strlen(home));
-        ShowToast("Screenshot saved to " + folder);
+        return "Screenshot saved to " + shown;
+    };
+    try
+    {
+        screenshots.push_back(std::async(std::launch::async, std::move(write)));
     }
-    else
+    catch (const std::system_error&)
+    {
         Report(LogLevel::Warning, "Could not save the screenshot to %s.", path.c_str());
+    }
+}
+
+// Shows where each screenshot went once it is written.
+void App::TakeScreenshots()
+{
+    for (auto screenshot = screenshots.begin(); screenshot != screenshots.end();)
+    {
+        if (screenshot->wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            ++screenshot;
+            continue;
+        }
+        if (const std::string message = screenshot->get(); !message.empty())
+            ShowToast(message);
+        screenshot = screenshots.erase(screenshot);
+    }
 }
 
 bool App::EffectsInstalled()

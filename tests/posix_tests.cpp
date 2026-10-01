@@ -1,15 +1,17 @@
-// Tests for the macOS and Linux host's parts that need no window: shortcuts, presets, the saved game list and
-// the checksum Setup verifies presets with.
+// Tests for the macOS and Linux host's parts that need no window: shortcuts, presets, the saved game list, file
+// names, notices and the checksum Setup verifies presets with.
 
 #include "config.h"
 #include "game_list.h"
 #include "games.h"
 #include "hotkeys.h"
+#include "log.h"
 #include "preset_ini.h"
 #include "setup.h"
 
 #include <cstdio>
 #include <stdexcept>
+#include <string>
 
 namespace
 {
@@ -43,6 +45,24 @@ int main()
         ok &= Check(ParseHotkey(shortcut.fallback, parsed) && ParseHotkey(FormatHotkey(parsed), again) && again == parsed,
                     "every default shortcut survives writing and reading");
     }
+
+    // Number pad keys have the same names as on Windows.
+    ok &= Check(ParseHotkey("Numpad0", hotkey) && hotkey.modifiers == 0 && hotkey.key == ImGuiKey_Keypad0, "reads Numpad0");
+    ok &= Check(ParseHotkey("ctrl+numpad9", hotkey) && hotkey.modifiers == kCtrl && hotkey.key == ImGuiKey_Keypad9, "reads number pad names without case");
+    const std::pair<const char*, ImGuiKey> numpad[] = { { "NumpadMultiply", ImGuiKey_KeypadMultiply }, { "NumpadAdd", ImGuiKey_KeypadAdd },
+                                                        { "NumpadSubtract", ImGuiKey_KeypadSubtract }, { "NumpadDecimal", ImGuiKey_KeypadDecimal },
+                                                        { "NumpadDivide", ImGuiKey_KeypadDivide }, { "Numpad5", ImGuiKey_Keypad5 } };
+    for (const auto& [name, key] : numpad)
+        ok &= Check(ParseHotkey(std::string("Shift+") + name, hotkey) && hotkey.key == key && FormatHotkey(hotkey) == std::string("Shift+") + name &&
+                        IsShortcutKey(key),
+                    "reads and writes every number pad key, which can be recorded");
+    ok &= Check(!ParseHotkey("Numpad10", hotkey) && !ParseHotkey("Numpad", hotkey) && !ParseHotkey("NumpadEnter", hotkey),
+                "rejects number pad keys Windows does not name");
+#ifdef __APPLE__
+    ok &= Check(IsShortcutKey(ImGuiKey_F20) && !IsShortcutKey(ImGuiKey_F21), "macOS records function keys up to F20");
+#else
+    ok &= Check(IsShortcutKey(ImGuiKey_F24), "records function keys up to F24");
+#endif
 
     // Presets keep keys before the first section and the order of everything else.
     const std::string text = "PreprocessorDefinitions=A=1,B\r\nTechniques=Curves@Curves.fx,LumaSharpen@LumaSharpen.fx\r\n\r\n"
@@ -106,6 +126,31 @@ int main()
     ok &= Check(FolderName("Half-Life: Alyx") == "Half-Life  Alyx" && FolderName("a/b\\c") == "a b c", "replaces what Windows does not allow");
     ok &= Check(FolderName("Pok\xC3\xA9mon \xE2\x98\x85") == "Pok\xC3\xA9mon \xE2\x98\x85", "keeps UTF-8 letters");
     ok &= Check(FolderName("  Game... ") == "Game" && FolderName("\t?*") == "", "trims the ends Windows drops");
+
+    // Screenshots are named after the window's title, which can hold anything.
+    ok &= Check(SafeFileName("Roblox") == "Roblox", "keeps a plain title");
+    ok &= Check(SafeFileName("../../etc/passwd") == "etc passwd", "a title cannot name another folder");
+    ok &= Check(SafeFileName(std::string("a\0b\nc/d\x7f", 8)) == "a b c d", "replaces control characters and slashes");
+    ok &= Check(SafeFileName(".hidden") == "hidden" && SafeFileName(" . ") == "Unishade" && SafeFileName("") == "Unishade",
+                "no dots in front, and a name when nothing is left");
+    const std::string longTitle = std::string(79, 'a') + "\xC3\xA9" + std::string(20, 'b');
+    ok &= Check(SafeFileName(longTitle) == std::string(79, 'a'), "shortens long titles without cutting a character in half");
+
+    // The pictures folder from user-dirs.dirs.
+    const std::string userDirs = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_PICTURES_DIR=\"$HOME/Bilder\"\n";
+    ok &= Check(UserDirectory(userDirs, "XDG_PICTURES_DIR", "/home/a") == "/home/a/Bilder", "reads a folder in the home folder");
+    ok &= Check(UserDirectory("XDG_PICTURES_DIR=\"/data/My \\\"Pictures\\\"\"\n", "XDG_PICTURES_DIR", "/home/a") == "/data/My \"Pictures\"",
+                "reads an absolute folder with escaped quotes");
+    ok &= Check(UserDirectory("XDG_PICTURES_DIR=\"$HOME/\"\n", "XDG_PICTURES_DIR", "/home/a").empty() &&
+                    UserDirectory(userDirs, "XDG_MUSIC_DIR", "/home/a").empty() && UserDirectory("XDG_PICTURES_DIR=\"Pictures\"", "XDG_PICTURES_DIR", "/home/a").empty(),
+                "no folder when it is turned off, missing or not a path");
+
+    // Notices keep the last 40, each message once.
+    for (int i = 0; i < 50; ++i)
+        Report(LogLevel::Info, "Notice %d", i);
+    Report(LogLevel::Warning, "Notice %d", 49);
+    const std::vector<Notice> notices = Notices();
+    ok &= Check(notices.size() == 40 && notices.front().text == "Notice 10" && notices.back().text == "Notice 49", "keeps the last 40 notices once each");
 
     // SHA-256, from the standard's own examples.
     ok &= Check(Sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "hashes nothing");

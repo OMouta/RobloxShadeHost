@@ -15,6 +15,9 @@ using std::min;
 #include "capture.h"
 #include "config.h"
 #include "log.h"
+#include "menu.h"
+#include "names.h"
+#include "overlay.h"
 #include "resource.h"
 #include "shell.h"
 #include "state.h"
@@ -28,9 +31,11 @@ using std::min;
 
 #include <cmath>
 #include <cstdint>
+#include <cwchar>
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -47,6 +52,47 @@ constexpr float kMinHeight = 540;
 constexpr float kPickerWidth = 480;
 constexpr float kPickerMaxHeight = 520;
 constexpr wchar_t kPickerClass[] = L"UnishadePicker";
+// How long a removed game can be put back.
+constexpr UINT kUndoMilliseconds = 8000;
+
+// The launcher window's timers.
+enum Timer : UINT_PTR
+{
+    kUndoTimer = 1,
+    kTipTimer,
+    kTrayTimer,
+};
+
+// Sent to the launcher by its notification area icon.
+constexpr UINT kTrayMessage = WM_APP + 16;
+constexpr UINT kTrayIcon = 1;
+// Posted by the rename box when it is done, so it is not destroyed while it handles a message. lParam is the box.
+constexpr UINT kRenameMessage = WM_APP + 17;
+// Longer names would not fit in the list.
+constexpr WPARAM kMaxNameLength = 100;
+
+enum RenameEnd : WPARAM
+{
+    kSaveName,   // Enter, which keeps the box open when the name is not allowed
+    kLeaveName,  // leaving the box, which drops a name that is not allowed
+    kCancelName, // Escape
+};
+
+enum TrayCommand : UINT
+{
+    kOpenCommand = 1,
+    kEffectsCommand,
+    kQuitCommand,
+};
+
+// Windows starts Unishade at sign-in with this entry, giving it kMinimizedFlag.
+constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+// Task Manager's Startup apps turn entries off here, without removing them.
+constexpr wchar_t kStartupApprovedKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+constexpr wchar_t kRunValue[] = L"Unishade";
+constexpr wchar_t kMinimizedFlag[] = L"--minimized";
+
+constexpr wchar_t kTrayNote[] = L"Minimize to keep the effects running from the notification area. Closing Unishade turns them off.";
 
 enum class Action
 {
@@ -58,7 +104,12 @@ enum class Action
     PickWindow,
     DetectAutomatically,
     ToggleGame,
+    RenameGame,
     RemoveGame,
+    UndoRemove,
+    DismissNotices,
+    OpenUrl,
+    StartWithWindows,
 };
 
 enum class Look
@@ -67,6 +118,8 @@ enum class Look
     Button,
     PrimaryButton,
     Switch,
+    Setting, // a switch with its label after it
+    Rename,
     Remove,
 };
 
@@ -79,6 +132,16 @@ struct Target
     size_t index = 0;
     std::wstring label;
     bool on = false;
+    const wchar_t* tip = nullptr; // for buttons that are only an icon
+};
+
+// Which control a target is. The targets are made again with every layout, so they are told apart by this.
+struct Control
+{
+    Action action;
+    size_t index = 0;
+
+    bool operator==(const Control&) const = default;
 };
 
 // A saved game, or an open window in the picker.
@@ -89,6 +152,9 @@ struct Entry
     fs::path icon; // the executable, or empty to show the name's first letter
     bool enabled = true;
     bool running = false;
+    size_t game = 0;      // its index in g.autoGames
+    bool removed = false; // until it can no longer be put back
+    bool renaming = false;
     RECT rect{};
     RECT iconRect{};
     RECT nameRect{};
@@ -96,11 +162,42 @@ struct Entry
     RECT badge{};
 };
 
+// A word of a notice, placed where DrawText's word wrapping would put it.
+struct Word
+{
+    RECT rect;
+    std::wstring text;
+};
+
 struct Row
 {
     RECT rect;
     LogLevel level;
-    std::wstring text;
+    std::vector<Word> words; // without the web addresses, which are links
+};
+
+// What the launcher shows depends on, compared every loop to know when to describe it again. Cheap to read.
+struct Shown
+{
+    bool captureEnabled = false;
+    HWND target = nullptr;
+    HWND selected = nullptr;
+    bool selectedOpen = false;
+    unsigned notices = 0;
+    unsigned update = 0;
+    UINT inputKey = 0;
+    UINT inputModifiers = 0;
+    UINT overlayKey = 0;
+    UINT overlayModifiers = 0;
+
+    bool operator==(const Shown&) const = default;
+};
+
+// A removed game, which can be put back for a few seconds.
+struct Removed
+{
+    AutoGame game;
+    size_t index = 0; // where it was in the list
 };
 
 // Picking a window either saves its game or uses the window until Detect automatically.
@@ -111,32 +208,42 @@ enum class Picker
     Session,
 };
 
-struct Launcher
+// A window's scaling and its fonts at that scaling.
+struct Scaling
 {
-    ULONG_PTR gdiplus = 0;
-    winrt::com_ptr<IStream> logoStream;
-    std::unique_ptr<Gdiplus::Bitmap> logo;
     float scale = 1;
     HFONT title = nullptr;
     HFONT semibold = nullptr;
     HFONT strong = nullptr;
     HFONT body = nullptr;
     HFONT note = nullptr;
+};
+
+struct Launcher
+{
+    ULONG_PTR gdiplus = 0;
+    winrt::com_ptr<IStream> logoStream;
+    std::unique_ptr<Gdiplus::Bitmap> logo;
+    // The picker has its own, since it can be on a monitor with another scaling.
+    Scaling launcherScaling;
+    Scaling pickerScaling;
     // By pixel size and executable. nullptr when the executable has no icon.
     std::map<std::wstring, HICON> icons;
     // Where games saved by filename were found running.
     std::map<std::wstring, fs::path> located;
 
-    // What is shown, compared every loop to know when to redraw.
-    std::wstring shown;
+    Shown shown;
+    bool minimized = false;
     std::wstring statusTitle;
     std::wstring statusDetail;
     std::wstring statusName;
     fs::path statusIcon;
     unsigned statusColor = 0;
+    bool windowClosed = false; // the picked window, while waiting for it
     fs::path activeExecutable;
     Update update;
     std::wstring setup;
+    bool startWithWindows = false;
     std::vector<Entry> entries;
 
     // Layout in client pixels, moved up by scroll.
@@ -151,12 +258,21 @@ struct Launcher
     RECT updateText{};
     RECT gamesTitle{};
     RECT list{};
-    RECT setupTitle{};
+    RECT noticesTitle{};
     std::vector<Row> rows;
     int footer = 0;
+    RECT trayNote{};
     std::vector<Target> targets;
     int hovered = -1;
     bool tracking = false;
+    // A click only acts when it is let go over the control it was pressed on.
+    std::optional<Control> pressed;
+    // Whose tip shows, after the mouse rests on it.
+    std::optional<Control> tip;
+    // Like in Windows, the focus only shows once the keyboard is used.
+    std::optional<Control> focus;
+    bool focusShown = false;
+    std::optional<Removed> removed;
 
     // The picker, a dialog over the launcher listing the open windows.
     HWND pickerWindow = nullptr;
@@ -169,18 +285,50 @@ struct Launcher
     int pickerScroll = 0;
     int pickerHovered = -1;
     bool pickerTracking = false;
+    HWND pickerPressed = nullptr; // the window whose row the click was pressed on
+    HWND pickerFocus = nullptr;   // the window whose row has the keyboard focus
+
+    // Renaming a game in a box over its name. The game is told by its executable, which a rename keeps.
+    HWND edit = nullptr;
+    WNDPROC editProc = nullptr;
+    fs::path renaming;
+    std::wstring renameProblem;
+    RECT editBox{}; // drawn around the edit control
+    RECT editRect{};
+    HBRUSH editBrush = nullptr;
+
+    // Explorer forgets the notification area icon when it restarts, and then sends TaskbarCreated.
+    UINT taskbarCreated = 0;
+    HICON trayIcon = nullptr;
+    bool trayAdded = false;
 };
 Launcher l;
+// The scaling of the window being laid out or painted, which P, F and the fonts follow.
+Scaling* ui = &l.launcherScaling;
+
+// Uses the picker's scaling until the end of the scope.
+struct PickerScaling
+{
+    Scaling* previous = ui;
+    PickerScaling()
+    {
+        ui = &l.pickerScaling;
+    }
+    ~PickerScaling()
+    {
+        ui = previous;
+    }
+};
 
 // Pixels at the window's scaling, whole for GDI and fractional for GDI+.
 int P(float value)
 {
-    return static_cast<int>(std::lround(value * l.scale));
+    return static_cast<int>(std::lround(value * ui->scale));
 }
 
 float F(float value)
 {
-    return value * l.scale;
+    return value * ui->scale;
 }
 
 float F(LONG pixels)
@@ -198,27 +346,33 @@ Gdiplus::Color Plus(unsigned rgb, BYTE alpha = 255)
     return Gdiplus::Color(alpha, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
 }
 
-HFONT Font(float size, bool semibold)
+HFONT Font(const Scaling& scaling, float size, bool semibold)
 {
-    return CreateFontW(-P(size), 0, 0, 0, semibold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, semibold ? L"Segoe UI Semibold" : L"Segoe UI");
+    return CreateFontW(-static_cast<int>(std::lround(size * scaling.scale)), 0, 0, 0, semibold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE,
+                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
+                       semibold ? L"Segoe UI Semibold" : L"Segoe UI");
 }
 
-void DeleteFonts()
+void DeleteFonts(Scaling& scaling)
 {
-    for (HFONT font : { l.title, l.semibold, l.strong, l.body, l.note })
-        if (font)
-            DeleteObject(font);
+    for (HFONT* font : { &scaling.title, &scaling.semibold, &scaling.strong, &scaling.body, &scaling.note })
+    {
+        if (*font)
+            DeleteObject(*font);
+        *font = nullptr;
+    }
 }
 
-void CreateFonts()
+// Sets a window's scaling from its DPI and creates its fonts at it.
+void Scale(Scaling& scaling, UINT dpi)
 {
-    DeleteFonts();
-    l.title = Font(19, true);
-    l.semibold = Font(15, true);
-    l.strong = Font(13.5f, true);
-    l.body = Font(13.5f, false);
-    l.note = Font(12, false);
+    DeleteFonts(scaling);
+    scaling.scale = static_cast<float>(dpi) / 96.0f;
+    scaling.title = Font(scaling, 19, true);
+    scaling.semibold = Font(scaling, 15, true);
+    scaling.strong = Font(scaling, 13.5f, true);
+    scaling.body = Font(scaling, 13.5f, false);
+    scaling.note = Font(scaling, 12, false);
 }
 
 int TextHeight(HDC dc, HFONT font, const std::wstring& text, int width)
@@ -278,6 +432,8 @@ fs::path Executable(DWORD processId)
 // Games saved by filename, like Roblox, move with every update, so their icon comes from a running copy.
 void LocateGames()
 {
+    // Found again when the copy found is gone, such as after an update.
+    std::erase_if(l.located, [](const auto& entry) { return GetFileAttributesW(entry.second.c_str()) == INVALID_FILE_ATTRIBUTES; });
     const auto unlocated = [](const AutoGame& game) {
         return !game.executable.has_parent_path() && !l.located.contains(game.executable.wstring());
     };
@@ -295,12 +451,81 @@ void LocateGames()
     CloseHandle(snapshot);
 }
 
+// What Windows runs at sign-in: this exe, starting in the notification area.
+std::wstring StartCommand()
+{
+    std::wstring path(32768, L'\0');
+    path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
+    return L"\"" + path + L"\" " + kMinimizedFlag;
+}
+
+// Only while the entry starts this exe, so it shows off after Unishade moves, until it is turned on again.
+bool StartsWithWindows()
+{
+    std::wstring command(32768, L'\0');
+    DWORD size = static_cast<DWORD>(command.size() * sizeof(wchar_t));
+    if (RegGetValueW(HKEY_CURRENT_USER, kRunKey, kRunValue, RRF_RT_REG_SZ, nullptr, command.data(), &size) != ERROR_SUCCESS ||
+        _wcsicmp(command.c_str(), StartCommand().c_str()) != 0)
+        return false;
+    // The first byte is odd when Task Manager turned it off.
+    BYTE approved[64]{};
+    size = sizeof(approved);
+    return RegGetValueW(HKEY_CURRENT_USER, kStartupApprovedKey, kRunValue, RRF_RT_REG_BINARY, nullptr, approved, &size) != ERROR_SUCCESS ||
+           !(approved[0] & 1);
+}
+
+void SetStartWithWindows(bool start)
+{
+    LSTATUS status = ERROR_SUCCESS;
+    if (start)
+    {
+        const std::wstring command = StartCommand();
+        HKEY key = nullptr;
+        status = RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
+        if (status == ERROR_SUCCESS)
+        {
+            status = RegSetValueExW(key, kRunValue, 0, REG_SZ, reinterpret_cast<const BYTE*>(command.c_str()),
+                                    static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(key);
+        }
+        // Turned on here, it should not stay off in Task Manager.
+        if (status == ERROR_SUCCESS)
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, kStartupApprovedKey, kRunValue);
+    }
+    else
+    {
+        status = RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, kRunValue);
+        if (status == ERROR_FILE_NOT_FOUND)
+            status = ERROR_SUCCESS;
+    }
+    if (status != ERROR_SUCCESS)
+        Log(LogLevel::Warning, L"Could not change whether Unishade starts with Windows (error %ld).", status);
+    else
+        Log(LogLevel::Info, start ? L"Unishade starts with Windows." : L"Unishade no longer starts with Windows.");
+}
+
+// Whether Windows started Unishade at sign-in, which starts it in the notification area.
+bool StartedWithWindows()
+{
+    int count = 0;
+    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!arguments)
+        return false;
+    bool found = false;
+    for (int i = 1; i < count; ++i)
+        if (_wcsicmp(arguments[i], kMinimizedFlag) == 0)
+            found = true;
+    LocalFree(arguments);
+    return found;
+}
+
 void Describe()
 {
     l.activeExecutable = g.activeGame ? Executable(g.activeGame->processId) : fs::path{};
     const std::optional<GameWindow>& game = g.activeGame ? g.activeGame : g.selectedGame;
     l.statusName = game ? game->name : L"";
     l.statusIcon = g.activeGame ? l.activeExecutable : game ? Executable(game->processId) : fs::path{};
+    l.windowClosed = false;
     if (!g.captureEnabled)
     {
         l.statusTitle = L"Overlay off";
@@ -315,8 +540,9 @@ void Describe()
     }
     else if (g.selectedGame)
     {
+        l.windowClosed = !l.shown.selectedOpen;
         l.statusTitle = L"Waiting for " + g.selectedGame->name;
-        l.statusDetail = GameWindowExists(*g.selectedGame) ? L"Return to the game to see the effects." : L"Its window closed. Pick its new window.";
+        l.statusDetail = l.windowClosed ? L"Its window closed. Pick its new window." : L"Return to the game to see the effects.";
         l.statusColor = theme::kAccent;
     }
     else
@@ -330,8 +556,15 @@ void Describe()
 
     l.entries.clear();
     LocateGames();
-    for (const AutoGame& saved : g.autoGames)
+    // A removed game keeps its row while it can be put back, so a second click does not land on the next game.
+    const auto removed = [](size_t index) {
+        if (l.removed && l.removed->index == index)
+            l.entries.push_back({ .name = l.removed->game.name, .removed = true });
+    };
+    for (size_t i = 0; i < g.autoGames.size(); ++i)
     {
+        removed(i);
+        const AutoGame& saved = g.autoGames[i];
         const auto located = l.located.find(saved.executable.wstring());
         l.entries.push_back({ .name = saved.name,
                               .detail = saved.executable.wstring(),
@@ -339,12 +572,64 @@ void Describe()
                                     : located != l.located.end()        ? located->second
                                                                         : fs::path{},
                               .enabled = saved.enabled,
-                              .running = g.target && MatchesExecutable(saved, l.activeExecutable) });
+                              .running = g.target && MatchesExecutable(saved, l.activeExecutable),
+                              .game = i,
+                              .renaming = l.edit && saved.executable == l.renaming });
     }
+    if (l.removed && l.removed->index >= g.autoGames.size())
+        removed(l.removed->index);
 
     l.update = AvailableUpdate();
+    l.startWithWindows = StartsWithWindows();
     const std::wstring setup = ExeDirectory() + L"Unishade-Setup.exe";
     l.setup = GetFileAttributesW(setup.c_str()) != INVALID_FILE_ATTRIBUTES ? setup : L"";
+}
+
+// Places a notice's words one by one, so the web addresses in it can be links. links counts the links so far.
+// Returns the bottom of the last line.
+int PlaceWords(HDC dc, Row& row, const std::wstring& text, int left, int top, int right, size_t& links)
+{
+    const HGDIOBJ previous = SelectObject(dc, ui->body);
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    const auto width = [dc](const std::wstring& part) {
+        SIZE size{};
+        GetTextExtentPoint32W(dc, part.c_str(), static_cast<int>(part.size()), &size);
+        return static_cast<int>(size.cx);
+    };
+    const int space = width(L" ");
+    const int line = metrics.tmHeight;
+    int x = left;
+    int y = top;
+    for (size_t start = 0; start < text.size();)
+    {
+        const size_t end = std::min(text.find_first_of(L" \n", start), text.size());
+        if (std::wstring word = text.substr(start, end - start); !word.empty())
+        {
+            const std::wstring link = word.substr(0, WebAddressLength(word));
+            word.erase(0, link.size());
+            const int linkWidth = link.empty() ? 0 : width(link);
+            const int wordWidth = linkWidth + (word.empty() ? 0 : width(word));
+            if (x > left && x + wordWidth > right)
+            {
+                x = left;
+                y += line;
+            }
+            if (!link.empty())
+                l.targets.push_back({ { x, y, std::min(x + linkWidth, right), y + line }, Action::OpenUrl, Look::Link, links++, link });
+            if (!word.empty())
+                row.words.push_back({ { x + linkWidth, y, std::min(x + wordWidth, right), y + line }, word });
+            x += wordWidth + space;
+        }
+        if (end < text.size() && text[end] == L'\n')
+        {
+            x = left;
+            y += line;
+        }
+        start = end + 1;
+    }
+    SelectObject(dc, previous);
+    return y + line;
 }
 
 int ButtonWidth(HDC dc, HFONT font, const wchar_t* label)
@@ -375,22 +660,34 @@ void Layout(HDC dc)
     l.logoRect = { pad, y, pad + P(44), y + P(44) };
     y += P(44) + P(22);
 
-    // The game's icon, what is happening, and switching between detection and a picked window.
+    // The game's icon, what is happening, and switching between detection and a picked window, stacked when the
+    // picked window closed.
     const int iconSize = P(40);
-    const Action statusAction = g.selectedGame ? Action::DetectAutomatically : Action::PickWindow;
-    const wchar_t* statusLabel = g.selectedGame ? L"Detect automatically" : L"Pick a window";
-    const int buttonWidth = ButtonWidth(dc, l.body, statusLabel);
+    std::vector<std::pair<Action, const wchar_t*>> buttons;
+    if (!g.selectedGame || l.windowClosed)
+        buttons.emplace_back(Action::PickWindow, L"Pick a window");
+    if (g.selectedGame)
+        buttons.emplace_back(Action::DetectAutomatically, L"Detect automatically");
+    int buttonWidth = 0;
+    for (const auto& [action, label] : buttons)
+        buttonWidth = std::max(buttonWidth, ButtonWidth(dc, ui->body, label));
+    const int buttonsHeight = static_cast<int>(buttons.size()) * (P(30) + P(8)) - P(8);
     const int textLeft = pad + inner + iconSize + P(14);
     const int textRight = right - inner - buttonWidth - P(16);
-    const int titleHeight = TextHeight(dc, l.semibold, l.statusTitle, textRight - textLeft);
-    const int detailHeight = l.statusDetail.empty() ? 0 : TextHeight(dc, l.body, l.statusDetail, textRight - textLeft);
+    const int titleHeight = TextHeight(dc, ui->semibold, l.statusTitle, textRight - textLeft);
+    const int detailHeight = l.statusDetail.empty() ? 0 : TextHeight(dc, ui->body, l.statusDetail, textRight - textLeft);
     const int textHeight = titleHeight + (detailHeight ? P(3) + detailHeight : 0);
-    l.statusCard = { pad, y, right, y + std::max(iconSize, textHeight) + inner * 2 };
+    l.statusCard = { pad, y, right, y + std::max({ iconSize, textHeight, buttonsHeight }) + inner * 2 };
     int middle = (l.statusCard.top + l.statusCard.bottom) / 2;
     l.statusIconRect = { pad + inner, middle - iconSize / 2, pad + inner + iconSize, middle - iconSize / 2 + iconSize };
     l.statusTitleRect = { textLeft, middle - textHeight / 2, textRight, middle - textHeight / 2 + titleHeight };
     l.statusDetailRect = { textLeft, l.statusTitleRect.bottom + P(3), textRight, l.statusTitleRect.bottom + P(3) + detailHeight };
-    l.targets.push_back({ { right - inner - buttonWidth, middle - P(15), right - inner, middle + P(15) }, statusAction, Look::Button, 0, statusLabel });
+    int buttonTop = middle - buttonsHeight / 2;
+    for (const auto& [action, label] : buttons)
+    {
+        l.targets.push_back({ { right - inner - buttonWidth, buttonTop, right - inner, buttonTop + P(30) }, action, Look::Button, 0, label });
+        buttonTop += P(30) + P(8);
+    }
     y = l.statusCard.bottom + P(14);
 
     l.updateCard = {};
@@ -398,7 +695,7 @@ void Layout(HDC dc)
     {
         l.updateCard = { pad, y, right, y + P(44) };
         const std::wstring download = L"Download";
-        const int downloadWidth = TextWidth(dc, l.semibold, download);
+        const int downloadWidth = TextWidth(dc, ui->semibold, download);
         const RECT downloadRect{ right - inner - downloadWidth, y, right - inner, l.updateCard.bottom };
         l.targets.push_back({ downloadRect, Action::Download, Look::Link, 0, download });
         l.updateText = { pad + inner, y, downloadRect.left - P(8), l.updateCard.bottom };
@@ -406,7 +703,7 @@ void Layout(HDC dc)
     }
 
     y += P(12);
-    const int addWidth = ButtonWidth(dc, l.strong, L"Add game");
+    const int addWidth = ButtonWidth(dc, ui->strong, L"Add game");
     l.gamesTitle = { pad, y, right - addWidth - P(12), y + P(30) };
     l.targets.push_back({ { right - addWidth, y, right, y + P(30) }, Action::AddGame, Look::PrimaryButton, 0, L"Add game" });
     y += P(30) + P(12);
@@ -419,43 +716,83 @@ void Layout(HDC dc)
         const int top = y + static_cast<int>(i) * rowHeight;
         middle = top + rowHeight / 2;
         const RECT remove{ right - P(12) - P(28), middle - P(14), right - P(12), middle + P(14) };
+        if (entry.removed)
+        {
+            // Undo follows the text, away from where the remove button was.
+            const int left = pad + P(14);
+            const int undoWidth = TextWidth(dc, ui->body, L"Undo");
+            const int textWidth = TextWidth(dc, ui->body, L"Removed " + entry.name + L".");
+            const int textEnd = left + std::min<int>(textWidth, remove.left - P(24) - undoWidth - P(10) - left);
+            entry.rect = { pad, top, right, top + rowHeight };
+            entry.nameRect = { left, top, textEnd, top + rowHeight };
+            l.targets.push_back({ { textEnd + P(10), middle - P(10), textEnd + P(10) + undoWidth, middle + P(10) }, Action::UndoRemove,
+                                  Look::Link, 0, L"Undo" });
+            continue;
+        }
         const RECT toggle{ remove.left - P(10) - P(36), middle - P(10), remove.left - P(10), middle + P(10) };
-        l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, i });
-        l.targets.push_back({ toggle, Action::ToggleGame, Look::Switch, i, L"", entry.enabled });
-        int nameRight = toggle.left - P(14);
+        const RECT pencil{ toggle.left - P(8) - P(28), middle - P(14), toggle.left - P(8), middle + P(14) };
+        l.targets.push_back({ pencil, Action::RenameGame, Look::Rename, entry.game, L"", false, L"Rename" });
+        l.targets.push_back({ toggle, Action::ToggleGame, Look::Switch, entry.game, L"", entry.enabled });
+        l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, entry.game, L"", false, L"Remove from list" });
+        int nameRight = pencil.left - P(14);
         entry.badge = {};
         if (entry.running)
         {
-            entry.badge = { nameRight - TextWidth(dc, l.note, L"Running") - P(18), middle - P(11), nameRight, middle + P(11) };
+            entry.badge = { nameRight - TextWidth(dc, ui->note, L"Running") - P(18), middle - P(11), nameRight, middle + P(11) };
             nameRight = entry.badge.left - P(12);
         }
         PlaceEntry(entry, { pad, top, right, top + rowHeight }, P(32), nameRight);
+        if (entry.renaming && l.edit)
+        {
+            // The box covers the name, and the edit control sits in it, moved only when its place changes.
+            l.editBox = { entry.nameRect.left - P(6), middle - P(23), entry.nameRect.right, middle + P(1) };
+            const int line = TextHeight(dc, ui->strong, L"Ag", entry.nameRect.right - entry.nameRect.left);
+            const int editTop = (l.editBox.top + l.editBox.bottom - line) / 2;
+            const RECT edit{ l.editBox.left + P(6), editTop, l.editBox.right - P(6), editTop + line };
+            if (!EqualRect(&edit, &l.editRect))
+            {
+                l.editRect = edit;
+                SetWindowPos(l.edit, nullptr, edit.left, edit.top, edit.right - edit.left, edit.bottom - edit.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
     }
     y = l.list.bottom + P(26);
 
+    // Setup's checks, warnings and errors, until dismissed.
     l.rows.clear();
-    l.setupTitle = {};
+    l.noticesTitle = {};
     const std::vector<Notice> notices = Notices();
     if (!notices.empty())
     {
-        l.setupTitle = { pad, y, right, y + P(22) };
+        const int dismissWidth = TextWidth(dc, ui->body, L"Dismiss");
+        l.noticesTitle = { pad, y, right - dismissWidth - P(12), y + P(22) };
+        l.targets.push_back({ { right - dismissWidth, y, right, y + P(22) }, Action::DismissNotices, Look::Link, 0, L"Dismiss" });
         y += P(22) + P(10);
+        size_t links = 0;
         for (const Notice& notice : notices)
         {
             const int left = pad + P(26);
-            const int height = std::max(TextHeight(dc, l.body, notice.text, right - left), P(18));
-            l.rows.push_back({ { left, y, right, y + height }, notice.level, notice.text });
-            y += height + P(8);
+            Row row{ .level = notice.level };
+            const int bottom = std::max(PlaceWords(dc, row, notice.text, left, y, right, links), y + P(18));
+            row.rect = { left, y, right, bottom };
+            l.rows.push_back(std::move(row));
+            y = bottom + P(8);
         }
         y += P(8);
     }
 
-    // The links stay at the bottom of the window when the content is shorter.
-    l.footer = std::max(y, P(kMinHeight) - P(51) - l.scroll);
-    int linkY = l.footer + P(15);
+    // The footer stays at the bottom of the window when the content is shorter.
+    const int noteHeight = TextHeight(dc, ui->note, kTrayNote, right - pad);
+    l.footer = std::max(y, P(kMinHeight) - (P(14) + P(24) + P(8) + noteHeight + P(12) + P(20) + P(16)) - l.scroll);
+    const int settingTop = l.footer + P(14);
+    const wchar_t* start = L"Start with Windows";
+    l.targets.push_back({ { pad, settingTop, pad + P(36) + P(10) + TextWidth(dc, ui->body, start), settingTop + P(24) }, Action::StartWithWindows,
+                          Look::Setting, 0, start, l.startWithWindows });
+    l.trayNote = { pad, settingTop + P(24) + P(8), right, settingTop + P(24) + P(8) + noteHeight };
+    int linkY = l.trayNote.bottom + P(12);
     int x = pad;
     const auto link = [&](Action action, const wchar_t* label) {
-        const int linkWidth = TextWidth(dc, l.body, label);
+        const int linkWidth = TextWidth(dc, ui->body, label);
         if (x + linkWidth > right)
         {
             x = pad;
@@ -478,19 +815,34 @@ void Relayout()
     ReleaseDC(g.launcher, dc);
 }
 
-// Sizes the window to its content, keeping it where it is and on screen.
+// Sizes the window to its content, keeping it where it is unless it grows past the bottom of the screen.
 void Resize()
 {
     Relayout();
+    // A minimized window is sized when it is restored.
+    if (IsIconic(g.launcher))
+        return;
     const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(g.launcher, GWL_STYLE));
     const UINT dpi = GetDpiForWindow(g.launcher);
     RECT frame{ 0, 0, P(kWidth), l.height };
     AdjustWindowRectExForDpi(&frame, style, FALSE, 0, dpi);
     MONITORINFO monitor{ sizeof(monitor) };
     GetMonitorInfoW(MonitorFromWindow(g.launcher, MONITOR_DEFAULTTONEAREST), &monitor);
-    const int height = std::min<int>(frame.bottom - frame.top, monitor.rcWork.bottom - monitor.rcWork.top);
-    SetWindowPos(g.launcher, nullptr, 0, 0, frame.right - frame.left, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    const RECT& work = monitor.rcWork;
+    RECT window{};
+    GetWindowRect(g.launcher, &window);
+    const int height = std::min<int>(frame.bottom - frame.top, work.bottom - work.top);
+    // Only moved when it grows, so a window placed partly off the screen on purpose stays there.
+    int top = window.top;
+    if (height > window.bottom - window.top && top + height > work.bottom)
+        top = std::max<int>(work.top, work.bottom - height);
+    SetWindowPos(g.launcher, nullptr, window.left, top, frame.right - frame.left, height, SWP_NOZORDER | SWP_NOACTIVATE);
     InvalidateRect(g.launcher, nullptr, FALSE);
+}
+
+Control ControlOf(const Target& target)
+{
+    return { target.action, target.index };
 }
 
 int TargetAt(POINT point)
@@ -501,36 +853,74 @@ int TargetAt(POINT point)
     return -1;
 }
 
+int FindTarget(const std::optional<Control>& control)
+{
+    for (size_t i = 0; control && i < l.targets.size(); ++i)
+        if (ControlOf(l.targets[i]) == *control)
+            return static_cast<int>(i);
+    return -1;
+}
+
+// A button that is only an icon shows its tip once the mouse rests on it, like a tooltip.
+void SetHovered(int hovered)
+{
+    if (hovered == l.hovered)
+        return;
+    l.hovered = hovered;
+    l.tip.reset();
+    KillTimer(g.launcher, kTipTimer);
+    if (hovered >= 0 && l.targets[hovered].tip)
+        SetTimer(g.launcher, kTipTimer, GetDoubleClickTime(), nullptr);
+    InvalidateRect(g.launcher, nullptr, FALSE);
+}
+
 void UpdateHover()
 {
     POINT point{};
     GetCursorPos(&point);
     const bool inside = WindowFromPoint(point) == g.launcher;
     ScreenToClient(g.launcher, &point);
-    const int hovered = inside ? TargetAt(point) : -1;
-    if (hovered != l.hovered)
-    {
-        l.hovered = hovered;
-        InvalidateRect(g.launcher, nullptr, FALSE);
-    }
+    SetHovered(inside ? TargetAt(point) : -1);
 }
 
-std::wstring Shown()
+Shown CurrentShown()
 {
-    const auto game = [](const std::optional<GameWindow>& window) -> std::wstring {
-        if (!window)
-            return L"-";
-        return std::to_wstring(reinterpret_cast<uintptr_t>(window->window)) + L":" + window->name + L":" +
-               std::to_wstring(GameWindowExists(*window));
-    };
-    return std::to_wstring(g.captureEnabled) + L"|" + std::to_wstring(g.target != nullptr) + L"|" + game(g.activeGame) + L"|" +
-           game(g.selectedGame) + L"|" + std::to_wstring(NoticeVersion()) + L"|" + AvailableUpdate().version + L"|" + g.inputHotkey +
-           L"|" + g.overlayHotkey;
+    Shown shown{ .captureEnabled = g.captureEnabled,
+                 .target = g.target,
+                 .selected = g.selectedGame ? g.selectedGame->window : nullptr,
+                 .notices = NoticeVersion(),
+                 .update = AvailableUpdateVersion(),
+                 .inputKey = g.hotkeys.input.key,
+                 .inputModifiers = g.hotkeys.input.modifiers,
+                 .overlayKey = g.hotkeys.overlay.key,
+                 .overlayModifiers = g.hotkeys.overlay.modifiers };
+    // Only shown while waiting for the picked window. The main loop notices the game's window closing.
+    if (g.captureEnabled && !g.target && g.selectedGame)
+        shown.selectedOpen = GameWindowExists(*g.selectedGame);
+    return shown;
+}
+
+// Closes the rename box without saving.
+void CloseRename()
+{
+    const HWND edit = l.edit;
+    if (!edit)
+        return;
+    // Cleared first, so the box losing the focus does not end the rename again.
+    l.edit = nullptr;
+    l.renameProblem.clear();
+    l.editRect = {};
+    if (GetFocus() == edit)
+        SetFocus(g.launcher);
+    DestroyWindow(edit);
 }
 
 void Refresh()
 {
-    l.shown = Shown();
+    // The game being renamed was removed.
+    if (l.edit && std::none_of(g.autoGames.begin(), g.autoGames.end(), [](const AutoGame& game) { return game.executable == l.renaming; }))
+        CloseRename();
+    l.shown = CurrentShown();
     Describe();
     Resize();
     UpdateHover();
@@ -542,9 +932,8 @@ RECT Inset(RECT rect, int by)
     return rect;
 }
 
-void FillRounded(Gdiplus::Graphics& graphics, const RECT& rect, float radius, const Gdiplus::Color& fill, const Gdiplus::Color& border)
+void RoundedPath(Gdiplus::GraphicsPath& path, const RECT& rect, float radius)
 {
-    Gdiplus::GraphicsPath path;
     const float x = F(rect.left) + 0.5f, y = F(rect.top) + 0.5f, w = F(rect.right - rect.left) - 1.0f, h = F(rect.bottom - rect.top) - 1.0f;
     const float d = std::min({ radius * 2, w, h });
     path.AddArc(x, y, d, d, 180, 90);
@@ -552,9 +941,25 @@ void FillRounded(Gdiplus::Graphics& graphics, const RECT& rect, float radius, co
     path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
     path.AddArc(x, y + h - d, d, d, 90, 90);
     path.CloseFigure();
+}
+
+void FillRounded(Gdiplus::Graphics& graphics, const RECT& rect, float radius, const Gdiplus::Color& fill, const Gdiplus::Color& border)
+{
+    Gdiplus::GraphicsPath path;
+    RoundedPath(path, rect, radius);
     Gdiplus::SolidBrush brush(fill);
     graphics.FillPath(&brush, &path);
     Gdiplus::Pen pen(border, 1.0f);
+    graphics.DrawPath(&pen, &path);
+}
+
+// The keyboard focus, around a control.
+void FocusRing(Gdiplus::Graphics& graphics, const RECT& control)
+{
+    const RECT rect = Inset(control, -P(3));
+    Gdiplus::GraphicsPath path;
+    RoundedPath(path, rect, std::min(F(8.0f), F(rect.bottom - rect.top) / 2));
+    Gdiplus::Pen pen(Plus(theme::kAccentHover), F(2.0f));
     graphics.DrawPath(&pen, &path);
 }
 
@@ -606,6 +1011,13 @@ void StatusIcon(Gdiplus::Graphics& graphics)
     graphics.FillEllipse(&solid, dot.X - F(4.5f), dot.Y - F(4.5f), F(9.0f), F(9.0f));
 }
 
+// The switch of a setting, before its label.
+RECT SettingSwitch(const RECT& setting)
+{
+    const int middle = (setting.top + setting.bottom) / 2;
+    return { setting.left, middle - P(10), setting.left + P(36), middle + P(10) };
+}
+
 void Switch(Gdiplus::Graphics& graphics, const RECT& rect, bool on, bool hovered)
 {
     const unsigned track = on ? (hovered ? theme::kAccentHover : theme::kAccent) : (hovered ? theme::kBorderStrong : theme::kBorder);
@@ -617,6 +1029,27 @@ void Switch(Gdiplus::Graphics& graphics, const RECT& rect, bool on, bool hovered
     graphics.FillEllipse(&brush, x, F(rect.top) + F(3.0f), knob, knob);
 }
 
+// A pencil.
+void RenameIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
+{
+    const Gdiplus::PointF center(F(rect.left + rect.right) / 2, F(rect.top + rect.bottom) / 2);
+    const float r = F(rect.right - rect.left) / 2;
+    if (hovered)
+    {
+        Gdiplus::SolidBrush background(Plus(theme::kBorder));
+        graphics.FillEllipse(&background, center.X - r, center.Y - r, r * 2, r * 2);
+    }
+    const float s = ui->scale;
+    Gdiplus::Pen pen(Plus(hovered ? theme::kText : theme::kDim), 1.4f * s);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    // From the tip at the bottom left to the end at the top right, with a band below the end.
+    const Gdiplus::PointF outline[] = { { center.X - 5.0f * s, center.Y + 5.0f * s }, { center.X - 4.5f * s, center.Y + 2.5f * s },
+                                        { center.X + 2.5f * s, center.Y - 4.5f * s }, { center.X + 4.5f * s, center.Y - 2.5f * s },
+                                        { center.X - 2.5f * s, center.Y + 4.5f * s } };
+    graphics.DrawPolygon(&pen, outline, 5);
+    graphics.DrawLine(&pen, center.X + 1.0f * s, center.Y - 3.0f * s, center.X + 3.0f * s, center.Y - 1.0f * s);
+}
+
 void RemoveIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
 {
     const Gdiplus::PointF center(F(rect.left + rect.right) / 2, F(rect.top + rect.bottom) / 2);
@@ -626,7 +1059,7 @@ void RemoveIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
         Gdiplus::SolidBrush background(Plus(theme::kError, 0x24));
         graphics.FillEllipse(&background, center.X - r, center.Y - r, r * 2, r * 2);
     }
-    Gdiplus::Pen pen(Plus(hovered ? theme::kError : theme::kDim), 1.6f * l.scale);
+    Gdiplus::Pen pen(Plus(hovered ? theme::kError : theme::kDim), 1.6f * ui->scale);
     pen.SetStartCap(Gdiplus::LineCapRound);
     pen.SetEndCap(Gdiplus::LineCapRound);
     const float s = F(4.5f);
@@ -639,7 +1072,7 @@ void Icon(Gdiplus::Graphics& graphics, Gdiplus::PointF center, LogLevel level)
     const unsigned color = level == LogLevel::Ok ? theme::kSuccess : level == LogLevel::Warning ? theme::kWarning
                          : level == LogLevel::Error ? theme::kError : theme::kDim;
     const float r = F(8.0f);
-    const float s = l.scale;
+    const float s = ui->scale;
     Gdiplus::SolidBrush tint(Plus(color, 0x30));
     Gdiplus::SolidBrush solid(Plus(color));
     Gdiplus::Pen pen(Plus(color), 1.6f * s);
@@ -712,9 +1145,17 @@ void EntryText(HDC dc, const Entry& entry)
 {
     const unsigned color = entry.enabled ? theme::kText : theme::kDim;
     if (!ExecutableIcon(entry.icon, entry.iconRect.right - entry.iconRect.left))
-        PaintText(dc, l.semibold, color, Initial(entry.name), entry.iconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-    PaintText(dc, l.strong, color, entry.name, entry.nameRect, DT_SINGLELINE | (entry.detail.empty() ? DT_VCENTER : DT_BOTTOM) | DT_END_ELLIPSIS);
-    PaintText(dc, l.note, theme::kDim, entry.detail, entry.detailRect, DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        PaintText(dc, ui->semibold, color, Initial(entry.name), entry.iconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    // The rename box covers the name, and what is wrong with the new one shows below it.
+    if (entry.renaming)
+    {
+        const bool problem = !l.renameProblem.empty();
+        PaintText(dc, ui->note, problem ? theme::kError : theme::kDim, problem ? l.renameProblem : L"Enter saves the name. Esc cancels.",
+                  entry.detailRect, DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+    PaintText(dc, ui->strong, color, entry.name, entry.nameRect, DT_SINGLELINE | (entry.detail.empty() ? DT_VCENTER : DT_BOTTOM) | DT_END_ELLIPSIS);
+    PaintText(dc, ui->note, theme::kDim, entry.detail, entry.detailRect, DT_SINGLELINE | DT_PATH_ELLIPSIS);
 }
 
 void Paint(HDC output)
@@ -724,10 +1165,11 @@ void Paint(HDC output)
     const int width = client.right;
     const int height = client.bottom;
     l.scroll = std::clamp(l.scroll, 0, std::max(0, l.height - height));
+    const bool focusShown = l.focusShown && GetFocus() == g.launcher;
     const HDC dc = CreateCompatibleDC(output);
     const HBITMAP bitmap = CreateCompatibleBitmap(output, width, height);
     const HGDIOBJ previousBitmap = SelectObject(dc, bitmap);
-    const HGDIOBJ previousFont = SelectObject(dc, l.body);
+    const HGDIOBJ previousFont = SelectObject(dc, ui->body);
     Layout(dc);
 
     {
@@ -775,6 +1217,12 @@ void Paint(HDC output)
             case Look::Switch:
                 Switch(graphics, target.rect, target.on, hovered);
                 break;
+            case Look::Setting:
+                Switch(graphics, SettingSwitch(target.rect), target.on, hovered);
+                break;
+            case Look::Rename:
+                RenameIcon(graphics, target.rect, hovered);
+                break;
             case Look::Remove:
                 RemoveIcon(graphics, target.rect, hovered);
                 break;
@@ -785,6 +1233,8 @@ void Paint(HDC output)
 
         for (const Entry& entry : l.entries)
         {
+            if (entry.removed)
+                continue;
             EntryIcon(graphics, entry);
             if (entry.running)
                 FillRounded(graphics, entry.badge, F(entry.badge.bottom - entry.badge.top) / 2, Plus(theme::kSuccess, 0x26),
@@ -794,38 +1244,51 @@ void Paint(HDC output)
         for (const Row& row : l.rows)
             Icon(graphics, Gdiplus::PointF(F(row.rect.left) - F(18.0f), F(row.rect.top) + F(9.0f)), row.level);
 
+        if (l.edit)
+            FillRounded(graphics, l.editBox, F(6.0f), Plus(theme::kCardHover), Plus(l.renameProblem.empty() ? theme::kAccent : theme::kError));
+
+        if (const int focused = FindTarget(l.focus); focused >= 0 && focusShown)
+            FocusRing(graphics, l.targets[focused].rect);
+
         graphics.DrawLine(&line, 0, l.footer, width, l.footer);
     }
 
     SetBkMode(dc, TRANSPARENT);
-    PaintText(dc, l.title, theme::kText, L"Unishade",
+    PaintText(dc, ui->title, theme::kText, L"Unishade",
              { l.logoRect.right + P(14), l.logoRect.top + P(1), width, l.logoRect.top + P(26) }, DT_SINGLELINE);
-    PaintText(dc, l.body, theme::kDim, L"Version " UNISHADE_VERSION,
+    PaintText(dc, ui->body, theme::kDim, L"Version " UNISHADE_VERSION,
              { l.logoRect.right + P(14), l.logoRect.top + P(26), width, l.logoRect.bottom }, DT_SINGLELINE);
 
     if (!l.statusName.empty() && !ExecutableIcon(l.statusIcon, l.statusIconRect.right - l.statusIconRect.left))
-        PaintText(dc, l.title, theme::kText, Initial(l.statusName), l.statusIconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-    PaintText(dc, l.semibold, theme::kText, l.statusTitle, l.statusTitleRect);
-    PaintText(dc, l.body, theme::kDim, l.statusDetail, l.statusDetailRect);
+        PaintText(dc, ui->title, theme::kText, Initial(l.statusName), l.statusIconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    PaintText(dc, ui->semibold, theme::kText, l.statusTitle, l.statusTitleRect);
+    PaintText(dc, ui->body, theme::kDim, l.statusDetail, l.statusDetailRect);
     if (!l.update.version.empty())
-        PaintText(dc, l.body, theme::kText, L"Unishade " + l.update.version + L" is available.", l.updateText,
+        PaintText(dc, ui->body, theme::kText, L"Unishade " + l.update.version + L" is available.", l.updateText,
                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
-    PaintText(dc, l.semibold, theme::kText, L"Games", l.gamesTitle, DT_SINGLELINE | DT_VCENTER);
+    PaintText(dc, ui->semibold, theme::kText, L"Games", l.gamesTitle, DT_SINGLELINE | DT_VCENTER);
     for (const Entry& entry : l.entries)
     {
+        if (entry.removed)
+        {
+            PaintText(dc, ui->body, theme::kDim, L"Removed " + entry.name + L".", entry.nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            continue;
+        }
         EntryText(dc, entry);
         if (entry.running)
-            PaintText(dc, l.note, theme::kSuccess, L"Running", entry.badge, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            PaintText(dc, ui->note, theme::kSuccess, L"Running", entry.badge, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     }
     if (l.entries.empty())
-        PaintText(dc, l.body, theme::kDim, L"No games yet. Open one and click Add game.", Inset(l.list, P(18)),
+        PaintText(dc, ui->body, theme::kDim, L"No games yet. Open one and click Add game.", Inset(l.list, P(18)),
                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
+    PaintText(dc, ui->note, theme::kDim, kTrayNote, l.trayNote);
     if (!l.rows.empty())
-        PaintText(dc, l.semibold, theme::kText, L"Setup", l.setupTitle, DT_SINGLELINE | DT_VCENTER);
+        PaintText(dc, ui->semibold, theme::kText, L"Messages", l.noticesTitle, DT_SINGLELINE | DT_VCENTER);
     for (const Row& row : l.rows)
-        PaintText(dc, l.body, theme::kText, row.text, row.rect);
+        for (const Word& word : row.words)
+            PaintText(dc, ui->body, theme::kText, word.text, word.rect, DT_SINGLELINE | DT_END_ELLIPSIS);
 
     for (size_t i = 0; i < l.targets.size(); ++i)
     {
@@ -835,19 +1298,46 @@ void Paint(HDC output)
         {
         case Look::Link:
             if (target.action == Action::Download)
-                PaintText(dc, l.semibold, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE | DT_VCENTER);
+                PaintText(dc, ui->semibold, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE | DT_VCENTER);
             else
-                PaintText(dc, l.body, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE);
+                PaintText(dc, ui->body, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect,
+                          DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             break;
         case Look::Button:
-            PaintText(dc, l.body, theme::kText, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            PaintText(dc, ui->body, theme::kText, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             break;
         case Look::PrimaryButton:
-            PaintText(dc, l.strong, 0xFFFFFF, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            PaintText(dc, ui->strong, 0xFFFFFF, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             break;
+        case Look::Setting:
+        {
+            const RECT label{ SettingSwitch(target.rect).right + P(10), target.rect.top, target.rect.right, target.rect.bottom };
+            PaintText(dc, ui->body, theme::kText, target.label, label, DT_SINGLELINE | DT_VCENTER);
+            break;
+        }
         default:
             break;
         }
+    }
+
+    // Over everything else, below the button or above it at the bottom of the window.
+    int tip = FindTarget(l.tip);
+    if (tip < 0 && focusShown)
+        tip = FindTarget(l.focus);
+    if (tip >= 0 && l.targets[tip].tip)
+    {
+        const Target& target = l.targets[tip];
+        const int tipWidth = TextWidth(dc, ui->note, target.tip) + P(16);
+        const int tipHeight = P(24);
+        const int top = target.rect.bottom + P(6) + tipHeight <= height ? target.rect.bottom + P(6) : target.rect.top - P(6) - tipHeight;
+        const RECT rect{ target.rect.right - tipWidth, top, target.rect.right, top + tipHeight };
+        {
+            Gdiplus::Graphics graphics(dc);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+            FillRounded(graphics, rect, F(6.0f), Plus(theme::kCardHover), Plus(theme::kBorderStrong));
+        }
+        PaintText(dc, ui->note, theme::kText, target.tip, rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     }
 
     Strip(dc, width);
@@ -888,7 +1378,7 @@ void PickerLayout(HDC dc)
     const int pad = P(20);
     const int right = width - pad;
     int y = P(3) + P(16) - l.pickerScroll;
-    l.pickerDetail = { pad, y, right, y + TextHeight(dc, l.body, PickerDetail(), right - pad) };
+    l.pickerDetail = { pad, y, right, y + TextHeight(dc, ui->body, PickerDetail(), right - pad) };
     y = l.pickerDetail.bottom + P(14);
     const int rowHeight = P(52);
     l.pickerList = { pad, y, right, y + std::max<int>(1, static_cast<int>(l.choices.size())) * rowHeight };
@@ -903,6 +1393,7 @@ void PickerLayout(HDC dc)
 // Sizes the picker to its content, up to kPickerMaxHeight, keeping it where it is.
 void ResizePicker()
 {
+    const PickerScaling scaling;
     const HDC dc = GetDC(l.pickerWindow);
     PickerLayout(dc);
     ReleaseDC(l.pickerWindow, dc);
@@ -911,6 +1402,14 @@ void ResizePicker()
                              static_cast<DWORD>(GetWindowLongPtrW(l.pickerWindow, GWL_EXSTYLE)), GetDpiForWindow(l.pickerWindow));
     SetWindowPos(l.pickerWindow, nullptr, 0, 0, frame.right - frame.left, frame.bottom - frame.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     InvalidateRect(l.pickerWindow, nullptr, FALSE);
+}
+
+int PickerFocusRow()
+{
+    for (size_t i = 0; i < l.windows.size(); ++i)
+        if (l.windows[i].window == l.pickerFocus)
+            return static_cast<int>(i);
+    return -1;
 }
 
 int ChoiceAt(POINT point)
@@ -923,6 +1422,7 @@ int ChoiceAt(POINT point)
 
 void PaintPicker(HDC output)
 {
+    const PickerScaling scaling;
     RECT client{};
     GetClientRect(l.pickerWindow, &client);
     const int width = client.right;
@@ -931,7 +1431,7 @@ void PaintPicker(HDC output)
     const HDC dc = CreateCompatibleDC(output);
     const HBITMAP bitmap = CreateCompatibleBitmap(output, width, height);
     const HGDIOBJ previousBitmap = SelectObject(dc, bitmap);
-    const HGDIOBJ previousFont = SelectObject(dc, l.body);
+    const HGDIOBJ previousFont = SelectObject(dc, ui->body);
     PickerLayout(dc);
 
     {
@@ -949,16 +1449,18 @@ void PaintPicker(HDC output)
         }
         if (l.pickerHovered >= 0 && l.pickerHovered < static_cast<int>(l.choices.size()))
             FillRounded(graphics, Inset(l.choices[l.pickerHovered].rect, P(4)), F(8.0f), Plus(theme::kCardHover), Plus(theme::kCardHover));
+        if (const int focused = PickerFocusRow(); focused >= 0 && focused < static_cast<int>(l.choices.size()))
+            FocusRing(graphics, Inset(l.choices[focused].rect, P(7)));
         for (const Entry& choice : l.choices)
             EntryIcon(graphics, choice);
     }
 
     SetBkMode(dc, TRANSPARENT);
-    PaintText(dc, l.body, theme::kDim, PickerDetail(), l.pickerDetail);
+    PaintText(dc, ui->body, theme::kDim, PickerDetail(), l.pickerDetail);
     for (const Entry& choice : l.choices)
         EntryText(dc, choice);
     if (l.choices.empty())
-        PaintText(dc, l.body, theme::kDim, L"No open windows.", Inset(l.pickerList, P(18)), DT_SINGLELINE | DT_VCENTER);
+        PaintText(dc, ui->body, theme::kDim, L"No open windows.", Inset(l.pickerList, P(18)), DT_SINGLELINE | DT_VCENTER);
 
     Strip(dc, width);
     BitBlt(output, 0, 0, width, height, dc, 0, 0, SRCCOPY);
@@ -985,18 +1487,23 @@ void OpenPicker(Picker picker)
     l.pickerScroll = 0;
     l.pickerHovered = -1;
     ListWindows();
+    // Opened with the keyboard, the first window has the focus.
+    l.pickerFocus = l.focusShown && !l.windows.empty() ? l.windows.front().window : nullptr;
+    // Opened over the launcher, so it starts at the scaling of the launcher's monitor.
+    RECT owner{};
+    GetWindowRect(g.launcher, &owner);
     l.pickerWindow = CreateWindowExW(WS_EX_DLGMODALFRAME, kPickerClass, picker == Picker::Add ? L"Add a game" : L"Pick a window",
-                                     WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 100, 100, g.launcher, nullptr, GetModuleHandleW(nullptr), nullptr);
+                                     WS_POPUP | WS_CAPTION | WS_SYSMENU, owner.left, owner.top, 100, 100, g.launcher, nullptr,
+                                     GetModuleHandleW(nullptr), nullptr);
     if (!l.pickerWindow)
     {
         Log(LogLevel::Error, L"Could not open the window list (error %lu).", GetLastError());
         return;
     }
     DarkFrame(l.pickerWindow);
+    Scale(l.pickerScaling, GetDpiForWindow(l.pickerWindow));
     ResizePicker();
-    RECT owner{};
     RECT own{};
-    GetWindowRect(g.launcher, &owner);
     GetWindowRect(l.pickerWindow, &own);
     SetWindowPos(l.pickerWindow, nullptr, (owner.left + owner.right - (own.right - own.left)) / 2,
                  std::max<int>(owner.top, (owner.top + owner.bottom - (own.bottom - own.top)) / 2), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1014,8 +1521,8 @@ void ClosePicker()
 }
 
 // Saves a changed game list. A game that was turned off or removed stops being used, unless its window was
-// picked for this session.
-void SaveGames(std::vector<AutoGame> games)
+// picked for this session. Returns false when it could not be saved.
+bool SaveGames(std::vector<AutoGame> games)
 {
     try
     {
@@ -1024,13 +1531,216 @@ void SaveGames(std::vector<AutoGame> games)
     catch (const std::exception& e)
     {
         Log(LogLevel::Error, L"Could not save the game list: %hs", e.what());
-        return;
+        return false;
     }
     g.autoGames = std::move(games);
     if (g.target && !g.selectedGame &&
         std::none_of(g.autoGames.begin(), g.autoGames.end(),
                      [](const AutoGame& game) { return game.enabled && MatchesExecutable(game, l.activeExecutable); }))
         StopCapture();
+    return true;
+}
+
+// Once a removed game can no longer be put back, its preset is forgotten, unless a game with the same name was
+// added since.
+void ForgetRemoved()
+{
+    if (!l.removed)
+        return;
+    if (g.launcher)
+        KillTimer(g.launcher, kUndoTimer);
+    const std::wstring key = FolderName(l.removed->game.name);
+    if (!key.empty() && std::none_of(g.autoGames.begin(), g.autoGames.end(),
+                                     [&](const AutoGame& game) { return _wcsicmp(FolderName(game.name).c_str(), key.c_str()) == 0; }))
+        RemoveGamePreset(key);
+    // The focus stays in the list when Undo goes away.
+    if (l.focus == Control{ Action::UndoRemove } && !g.autoGames.empty())
+        l.focus = Control{ Action::ToggleGame, std::min(l.removed->index, g.autoGames.size() - 1) };
+    l.removed.reset();
+}
+
+void RemoveGame(size_t index)
+{
+    if (index >= g.autoGames.size())
+        return;
+    ForgetRemoved();
+    auto games = g.autoGames;
+    Removed removed{ games[index], index };
+    games.erase(games.begin() + static_cast<std::ptrdiff_t>(index));
+    if (!SaveGames(std::move(games)))
+        return;
+    l.removed = std::move(removed);
+    SetTimer(g.launcher, kUndoTimer, kUndoMilliseconds, nullptr);
+    // So pressing Enter again does not remove the next game.
+    l.focus = Control{ Action::UndoRemove };
+}
+
+void UndoRemove()
+{
+    if (!l.removed)
+        return;
+    auto games = g.autoGames;
+    // Unless it was added again meanwhile.
+    if (std::none_of(games.begin(), games.end(), [](const AutoGame& game) {
+            return _wcsicmp(game.executable.c_str(), l.removed->game.executable.c_str()) == 0;
+        }))
+    {
+        const size_t index = std::min(l.removed->index, games.size());
+        games.insert(games.begin() + static_cast<std::ptrdiff_t>(index), l.removed->game);
+        if (!SaveGames(std::move(games)))
+            return;
+        l.focus = Control{ Action::RemoveGame, index };
+    }
+    KillTimer(g.launcher, kUndoTimer);
+    l.removed.reset();
+}
+
+// Why a game cannot have this name, or nothing. The name also names its presets folder and its entry in
+// RobloxShadeHost.ini.
+std::wstring NameProblem(const std::wstring& name, size_t index)
+{
+    switch (CheckName(name, true))
+    {
+    case NameIssue::None:
+        break;
+    case NameIssue::Empty:
+        return L"Type a name.";
+    case NameIssue::Control:
+        return L"A name can't contain control characters.";
+    case NameIssue::Character:
+        return L"A name can't contain \\ / : * ? \" < > | = ; [ or ].";
+    case NameIssue::End:
+        return L"A name can't end with a dot or a space.";
+    case NameIssue::Device:
+        return L"Windows keeps " + std::wstring(DeviceName(name)) + L" for devices.";
+    }
+    for (size_t i = 0; i < g.autoGames.size(); ++i)
+        if (i != index && _wcsicmp(FolderName(g.autoGames[i].name).c_str(), name.c_str()) == 0)
+            return L"Another game has this name.";
+    return {};
+}
+
+// Renames a saved game, with its presets folder and its remembered preset. Returns why it could not, or nothing.
+std::wstring RenameGame(const fs::path& executable, const std::wstring& name)
+{
+    const auto game = std::find_if(g.autoGames.begin(), g.autoGames.end(), [&](const AutoGame& saved) { return saved.executable == executable; });
+    if (game == g.autoGames.end() || game->name == name)
+        return {};
+    const size_t index = static_cast<size_t>(game - g.autoGames.begin());
+    if (std::wstring problem = NameProblem(name, index); !problem.empty())
+        return problem;
+    const std::wstring previous = game->name;
+    const std::wstring key = FolderName(previous);
+    // Windows and RobloxShadeHost.ini ignore case, so a name that only changes case keeps both.
+    const bool sameKey = _wcsicmp(key.c_str(), name.c_str()) == 0;
+    const fs::path root = fs::path(ExeDirectory()) / L"presets";
+    std::error_code error;
+    const bool moveFolder = !sameKey && !key.empty() && fs::is_directory(root / key, error) && !fs::exists(root / name, error);
+    if (moveFolder)
+    {
+        fs::rename(root / key, root / name, error);
+        if (error)
+        {
+            Log(LogLevel::Warning, L"Could not rename %ls: %hs", (root / key).c_str(), error.message().c_str());
+            return L"Could not rename its presets folder.";
+        }
+    }
+    auto games = g.autoGames;
+    games[index].name = name;
+    if (!SaveGames(std::move(games)))
+    {
+        if (moveFolder)
+            fs::rename(root / name, root / key, error);
+        return L"Could not save the game list.";
+    }
+    if (std::wstring preset = sameKey ? L"" : GamePreset(key); !preset.empty())
+    {
+        // A preset in the game's folder moved with it.
+        if (moveFolder && preset.size() > key.size() && _wcsnicmp(preset.c_str(), key.c_str(), key.size()) == 0 &&
+            (preset[key.size()] == L'\\' || preset[key.size()] == L'/'))
+            preset = name + preset.substr(key.size());
+        SetGamePreset(name, preset);
+        RemoveGamePreset(key);
+    }
+    // The game being played shows the new name. A picked window keeps its title.
+    if (g.target && g.activeGame && !g.selectedGame && MatchesExecutable(g.autoGames[index], l.activeExecutable))
+        g.activeGame->name = name;
+    Log(LogLevel::Info, L"Renamed %ls to %ls.", previous.c_str(), name.c_str());
+    return {};
+}
+
+// Saves the name in the rename box, unless it is cancelled or the name is not allowed.
+void EndRename(WPARAM how)
+{
+    if (!l.edit)
+        return;
+    if (how != kCancelName)
+    {
+        const int length = GetWindowTextLengthW(l.edit);
+        std::wstring name(static_cast<size_t>(length) + 1, L'\0');
+        name.resize(static_cast<size_t>(GetWindowTextW(l.edit, name.data(), length + 1)));
+        // Spaces around it would not survive as a folder name or an ini key.
+        name.erase(0, name.find_first_not_of(L' '));
+        name.erase(name.find_last_not_of(L' ') + 1);
+        l.renameProblem = RenameGame(l.renaming, name);
+        if (!l.renameProblem.empty() && how == kSaveName)
+        {
+            InvalidateRect(g.launcher, nullptr, FALSE);
+            return;
+        }
+    }
+    CloseRename();
+    Refresh();
+}
+
+// Enter saves the name, Escape cancels, and Tab or clicking elsewhere leaves the box.
+LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message)
+    {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB)
+        {
+            const WPARAM how = wParam == VK_RETURN ? kSaveName : wParam == VK_ESCAPE ? kCancelName : kLeaveName;
+            PostMessageW(g.launcher, kRenameMessage, how, reinterpret_cast<LPARAM>(hwnd));
+            return 0;
+        }
+        break;
+    // They would beep.
+    case WM_CHAR:
+        if (wParam == L'\r' || wParam == L'\x1B' || wParam == L'\t')
+            return 0;
+        break;
+    // Not while CloseRename takes the focus away.
+    case WM_KILLFOCUS:
+        if (hwnd == l.edit)
+            PostMessageW(g.launcher, kRenameMessage, kLeaveName, reinterpret_cast<LPARAM>(hwnd));
+        break;
+    }
+    return CallWindowProcW(l.editProc, hwnd, message, wParam, lParam);
+}
+
+void StartRename(size_t index)
+{
+    if (index >= g.autoGames.size())
+        return;
+    CloseRename();
+    l.edit = CreateWindowExW(0, L"EDIT", g.autoGames[index].name.c_str(), WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, g.launcher, nullptr,
+                             GetModuleHandleW(nullptr), nullptr);
+    if (!l.edit)
+    {
+        Log(LogLevel::Error, L"Could not rename %ls (error %lu).", g.autoGames[index].name.c_str(), GetLastError());
+        return;
+    }
+    l.renaming = g.autoGames[index].executable;
+    l.editProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(l.edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(EditProc)));
+    SendMessageW(l.edit, EM_SETLIMITTEXT, kMaxNameLength, 0);
+    SendMessageW(l.edit, WM_SETFONT, reinterpret_cast<WPARAM>(l.launcherScaling.strong), FALSE);
+    // Laid out first, which places the box.
+    Refresh();
+    ShowWindow(l.edit, SW_SHOW);
+    SendMessageW(l.edit, EM_SETSEL, 0, -1);
+    SetFocus(l.edit);
 }
 
 void UseWindow(Picker picker, const GameWindow& window)
@@ -1073,6 +1783,7 @@ void Run(const Target& target)
     case Action::Help: ShellOpen(kHelpUrl); return;
     case Action::RunSetup: ShellOpen(l.setup); return;
     case Action::Download: ShellOpen(l.update.url); return;
+    case Action::OpenUrl: ShellOpen(target.label); return;
     case Action::AddGame: OpenPicker(Picker::Add); break;
     case Action::PickWindow: OpenPicker(Picker::Session); break;
     case Action::DetectAutomatically:
@@ -1080,6 +1791,9 @@ void Run(const Target& target)
         if (g.target)
             StopCapture();
         break;
+    case Action::RenameGame:
+        StartRename(target.index);
+        return;
     case Action::ToggleGame:
         if (target.index < g.autoGames.size())
         {
@@ -1089,12 +1803,16 @@ void Run(const Target& target)
         }
         break;
     case Action::RemoveGame:
-        if (target.index < g.autoGames.size())
-        {
-            auto games = g.autoGames;
-            games.erase(games.begin() + static_cast<std::ptrdiff_t>(target.index));
-            SaveGames(std::move(games));
-        }
+        RemoveGame(target.index);
+        break;
+    case Action::UndoRemove:
+        UndoRemove();
+        break;
+    case Action::DismissNotices:
+        ClearNotices();
+        break;
+    case Action::StartWithWindows:
+        SetStartWithWindows(!l.startWithWindows);
         break;
     }
     Refresh();
@@ -1107,6 +1825,231 @@ void Choose(size_t index)
     ClosePicker();
     UseWindow(picker, window);
     Refresh();
+}
+
+NOTIFYICONDATAW TrayData()
+{
+    NOTIFYICONDATAW data{ sizeof(data) };
+    data.hWnd = g.launcher;
+    data.uID = kTrayIcon;
+    return data;
+}
+
+// Shows Unishade in the notification area while it runs. Tried again later when the notification area is not
+// ready, such as right after signing in.
+void AddTrayIcon()
+{
+    if (!l.trayIcon)
+        l.trayIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                                   GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    NOTIFYICONDATAW data = TrayData();
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    data.uCallbackMessage = kTrayMessage;
+    data.hIcon = l.trayIcon;
+    wcscpy_s(data.szTip, std::size(data.szTip), L"Unishade");
+    // TaskbarCreated also comes when the taskbar's scaling changes, while the icon is still there.
+    Shell_NotifyIconW(NIM_DELETE, &data);
+    l.trayAdded = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+    if (l.trayAdded)
+    {
+        data.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &data);
+    }
+    else
+        SetTimer(g.launcher, kTrayTimer, 5000, nullptr);
+}
+
+void RemoveTrayIcon()
+{
+    if (l.trayAdded)
+    {
+        NOTIFYICONDATAW data = TrayData();
+        Shell_NotifyIconW(NIM_DELETE, &data);
+        l.trayAdded = false;
+    }
+    if (l.trayIcon)
+        DestroyIcon(l.trayIcon);
+    l.trayIcon = nullptr;
+}
+
+// Brings the launcher back from the notification area or the taskbar.
+void ShowLauncher()
+{
+    if (!IsWindowVisible(g.launcher) || IsIconic(g.launcher))
+        ShowWindow(g.launcher, SW_RESTORE);
+    SetForegroundWindow(l.pickerWindow ? l.pickerWindow : g.launcher);
+}
+
+// Asks about preset changes that are not saved before Unishade quits, since they are lost otherwise. Returns false
+// when the user wants to stay.
+bool ConfirmQuit()
+{
+    if (!MenuHasUnsavedChanges())
+    {
+        FlushPresets();
+        return true;
+    }
+    const std::wstring name = ActivePresetName();
+    const std::wstring question = L"Save the changes to " + (name.empty() ? std::wstring(L"the preset") : name) + L" before quitting?";
+    switch (MessageBoxW(g.launcher, question.c_str(), L"Unishade", MB_YESNOCANCEL | MB_ICONWARNING))
+    {
+    case IDYES:
+        FlushPresets(true);
+        return true;
+    case IDNO:
+        FlushPresets();
+        return true;
+    default:
+        return false;
+    }
+}
+
+void TrayMenu(int x, int y)
+{
+    const HMENU menu = CreatePopupMenu();
+    if (!menu)
+        return;
+    AppendMenuW(menu, MF_STRING, kOpenCommand, L"Open Unishade");
+    AppendMenuW(menu, MF_STRING | (g.captureEnabled ? MF_CHECKED : MF_UNCHECKED), kEffectsCommand, L"Show effects");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kQuitCommand, L"Quit");
+    SetMenuDefaultItem(menu, kOpenCommand, FALSE);
+    // Otherwise the menu stays open when clicking elsewhere.
+    SetForegroundWindow(g.launcher);
+    const UINT align = GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN;
+    const UINT command =
+        static_cast<UINT>(TrackPopupMenuEx(menu, align | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, x, y, g.launcher, nullptr));
+    PostMessageW(g.launcher, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    switch (command)
+    {
+    case kOpenCommand:
+        ShowLauncher();
+        break;
+    case kEffectsCommand:
+        ToggleOverlay();
+        break;
+    case kQuitCommand:
+        if (ConfirmQuit())
+            DestroyWindow(g.launcher);
+        break;
+    }
+}
+
+// Scrolls the launcher so a control is in view.
+void ScrollTo(RECT rect)
+{
+    RECT client{};
+    GetClientRect(g.launcher, &client);
+    const int margin = P(12);
+    int scroll = l.scroll;
+    if (rect.top < P(3) + margin)
+        scroll += rect.top - P(3) - margin;
+    else if (rect.bottom > client.bottom - margin)
+        scroll += rect.bottom - (client.bottom - margin);
+    scroll = std::clamp(scroll, 0, std::max(0, l.height - static_cast<int>(client.bottom)));
+    if (scroll == l.scroll)
+        return;
+    l.scroll = scroll;
+    Relayout();
+    UpdateHover();
+}
+
+// Tab and Shift+Tab move the focus through the controls, and Enter or Space use the focused one. Returns whether
+// the key was used.
+bool LauncherKey(WPARAM key, LPARAM flags)
+{
+    if (key == VK_TAB && !l.targets.empty())
+    {
+        const int count = static_cast<int>(l.targets.size());
+        const int current = FindTarget(l.focus);
+        const bool back = GetKeyState(VK_SHIFT) < 0;
+        const int next = current < 0 ? (back ? count - 1 : 0) : (current + (back ? count - 1 : 1)) % count;
+        l.focus = ControlOf(l.targets[next]);
+        l.focusShown = true;
+        ScrollTo(l.targets[next].rect);
+        InvalidateRect(g.launcher, nullptr, FALSE);
+        return true;
+    }
+    // A held key repeats, which should not use the control again.
+    const bool repeated = (flags & (1 << 30)) != 0;
+    if ((key == VK_RETURN || key == VK_SPACE) && l.focusShown && !repeated)
+        if (const int index = FindTarget(l.focus); index >= 0)
+        {
+            // Copied, since running it lays the window out again.
+            const Target target = l.targets[index];
+            Run(target);
+            return true;
+        }
+    // F2 renames the game whose control has the focus, like in Explorer.
+    if (key == VK_F2)
+        if (const int index = FindTarget(l.focus); index >= 0)
+            if (const Target& target = l.targets[index];
+                target.action == Action::RenameGame || target.action == Action::ToggleGame || target.action == Action::RemoveGame)
+            {
+                StartRename(target.index);
+                return true;
+            }
+    return false;
+}
+
+// Scrolls the picker so a row is in view.
+void ScrollPickerTo(RECT rect)
+{
+    const PickerScaling scaling;
+    RECT client{};
+    GetClientRect(l.pickerWindow, &client);
+    int scroll = l.pickerScroll;
+    if (rect.top < P(3))
+        scroll += rect.top - P(3);
+    else if (rect.bottom > client.bottom)
+        scroll += rect.bottom - client.bottom;
+    scroll = std::clamp(scroll, 0, std::max(0, l.pickerHeight - static_cast<int>(client.bottom)));
+    if (scroll != l.pickerScroll)
+    {
+        l.pickerScroll = scroll;
+        l.pickerHovered = -1;
+    }
+}
+
+// The arrows, Home and End, Tab and Shift+Tab move the focus through the windows, Enter or Space picks the focused
+// one, and Escape closes the picker. Returns whether the key was used.
+bool PickerKey(WPARAM key, LPARAM flags)
+{
+    const int count = static_cast<int>(l.windows.size());
+    int row = PickerFocusRow();
+    const bool back = key == VK_UP || (key == VK_TAB && GetKeyState(VK_SHIFT) < 0);
+    switch (key)
+    {
+    case VK_ESCAPE:
+        ClosePicker();
+        return true;
+    case VK_RETURN:
+    case VK_SPACE:
+        // A held key repeats, which should not pick again.
+        if (row >= 0 && !(flags & (1 << 30)))
+            Choose(static_cast<size_t>(row));
+        return true;
+    case VK_UP:
+    case VK_DOWN:
+    case VK_TAB:
+        row = row < 0 ? (back ? count - 1 : 0) : std::clamp(row + (back ? -1 : 1), 0, count - 1);
+        break;
+    case VK_HOME:
+        row = 0;
+        break;
+    case VK_END:
+        row = count - 1;
+        break;
+    default:
+        return false;
+    }
+    if (row < 0 || row >= count)
+        return true;
+    l.pickerFocus = l.windows[row].window;
+    ScrollPickerTo(l.choices[row].rect);
+    InvalidateRect(l.pickerWindow, nullptr, FALSE);
+    return true;
 }
 
 LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1148,6 +2091,7 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         return 0;
     case WM_MOUSEWHEEL:
     {
+        const PickerScaling scaling;
         RECT client{};
         GetClientRect(hwnd, &client);
         const int scroll = std::clamp(l.pickerScroll - GET_WHEEL_DELTA_WPARAM(wParam) * P(52) / WHEEL_DELTA, 0,
@@ -1167,16 +2111,30 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             return TRUE;
         }
         break;
-    case WM_LBUTTONUP:
+    case WM_LBUTTONDOWN:
         if (const int index = ChoiceAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }); index >= 0)
+        {
+            l.pickerPressed = l.windows[index].window;
+            SetCapture(hwnd);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+    {
+        const HWND pressed = l.pickerPressed;
+        l.pickerPressed = nullptr;
+        if (GetCapture() == hwnd)
+            ReleaseCapture();
+        if (const int index = ChoiceAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) });
+            index >= 0 && pressed && l.windows[index].window == pressed)
             Choose(static_cast<size_t>(index));
         return 0;
+    }
+    case WM_CAPTURECHANGED:
+        l.pickerPressed = nullptr;
+        return 0;
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE)
-        {
-            ClosePicker();
+        if (PickerKey(wParam, lParam))
             return 0;
-        }
         break;
     // A game opened while the picker was open shows up when the picker is activated again. A click that activates
     // it while the rows move is dropped, so it cannot pick the wrong window.
@@ -1191,6 +2149,17 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if (LOWORD(wParam) == WA_ACTIVE && ListWindows())
             ResizePicker();
         break;
+    // Moved to a monitor with another scaling.
+    case WM_DPICHANGED:
+    {
+        Scale(l.pickerScaling, HIWORD(wParam));
+        ClearIcons();
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        ResizePicker();
+        return 0;
+    }
     case WM_CLOSE:
         ClosePicker();
         return 0;
@@ -1198,6 +2167,7 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         l.pickerWindow = nullptr;
         l.picker = Picker::None;
         l.pickerTracking = false;
+        l.pickerFocus = nullptr;
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -1205,6 +2175,11 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (message == l.taskbarCreated && l.taskbarCreated)
+    {
+        AddTrayIcon();
+        return 0;
+    }
     switch (message)
     {
     case WM_PAINT:
@@ -1224,21 +2199,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, hwnd, 0 };
             l.tracking = TrackMouseEvent(&track);
         }
-        const int hovered = TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) });
-        if (hovered != l.hovered)
-        {
-            l.hovered = hovered;
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
+        SetHovered(TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }));
         return 0;
     }
     case WM_MOUSELEAVE:
         l.tracking = false;
-        if (l.hovered >= 0)
-        {
-            l.hovered = -1;
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
+        SetHovered(-1);
         return 0;
     case WM_MOUSEWHEEL:
     {
@@ -1262,18 +2228,139 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             return TRUE;
         }
         break;
-    case WM_LBUTTONUP:
+    case WM_LBUTTONDOWN:
+        KillTimer(hwnd, kTipTimer);
+        if (l.tip)
+        {
+            l.tip.reset();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        // Clicking outside the rename box leaves it.
+        if (l.edit)
+            SetFocus(hwnd);
+        // Clicking hides the focus until a key is used again.
+        if (l.focusShown)
+        {
+            l.focusShown = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         if (const int index = TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }); index >= 0)
+        {
+            l.pressed = ControlOf(l.targets[index]);
+            l.focus = l.pressed;
+            SetCapture(hwnd);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+    {
+        const std::optional<Control> pressed = l.pressed;
+        l.pressed.reset();
+        if (GetCapture() == hwnd)
+            ReleaseCapture();
+        if (const int index = TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) });
+            index >= 0 && pressed == ControlOf(l.targets[index]))
         {
             // Copied, since running it lays the window out again.
             const Target target = l.targets[index];
             Run(target);
         }
         return 0;
+    }
+    case WM_CAPTURECHANGED:
+        l.pressed.reset();
+        return 0;
+    case WM_KEYDOWN:
+        if (LauncherKey(wParam, lParam))
+            return 0;
+        break;
+    // The focus only shows while the launcher has it.
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+        InvalidateRect(hwnd, nullptr, FALSE);
+        break;
+    case WM_TIMER:
+        if (wParam == kUndoTimer)
+        {
+            ForgetRemoved();
+            Refresh();
+        }
+        else if (wParam == kTrayTimer)
+        {
+            KillTimer(hwnd, kTrayTimer);
+            AddTrayIcon();
+        }
+        else if (wParam == kTipTimer)
+        {
+            KillTimer(hwnd, kTipTimer);
+            if (l.hovered >= 0 && l.targets[l.hovered].tip)
+            {
+                l.tip = ControlOf(l.targets[l.hovered]);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+        return 0;
+    case WM_SHOWWINDOW:
+        if (wParam && !IsIconic(hwnd))
+            Refresh();
+        break;
+    case WM_CLOSE:
+        if (!ConfirmQuit())
+            return 0;
+        break;
+    case WM_SIZE:
+    {
+        const bool restored = l.minimized && wParam != SIZE_MINIMIZED;
+        l.minimized = wParam == SIZE_MINIMIZED;
+        // Minimized, it waits in the notification area while the effects keep running.
+        if (l.minimized && l.trayAdded)
+        {
+            ClosePicker();
+            CloseRename();
+            ShowWindow(hwnd, SW_HIDE);
+        }
+        if (restored)
+            Refresh();
+        return 0;
+    }
+    case kRenameMessage:
+        // Not when it was sent by a box that is already closed.
+        if (l.edit && reinterpret_cast<HWND>(lParam) == l.edit)
+            EndRename(wParam);
+        return 0;
+    // Typing again hides what was wrong with the name.
+    case WM_COMMAND:
+        if (HIWORD(wParam) == EN_CHANGE && l.edit && reinterpret_cast<HWND>(lParam) == l.edit && !l.renameProblem.empty())
+        {
+            l.renameProblem.clear();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        break;
+    case WM_CTLCOLOREDIT:
+    {
+        const HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, Gdi(theme::kText));
+        SetBkColor(dc, Gdi(theme::kCardHover));
+        if (!l.editBrush)
+            l.editBrush = CreateSolidBrush(Gdi(theme::kCardHover));
+        return reinterpret_cast<LRESULT>(l.editBrush);
+    }
+    case kTrayMessage:
+        switch (LOWORD(lParam))
+        {
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+            ShowLauncher();
+            break;
+        case WM_CONTEXTMENU:
+            TrayMenu(static_cast<short>(LOWORD(wParam)), static_cast<short>(HIWORD(wParam)));
+            break;
+        }
+        return 0;
     case WM_DPICHANGED:
     {
-        l.scale = HIWORD(wParam) / 96.0f;
-        CreateFonts();
+        Scale(l.launcherScaling, HIWORD(wParam));
+        if (l.edit)
+            SendMessageW(l.edit, WM_SETFONT, reinterpret_cast<WPARAM>(l.launcherScaling.strong), TRUE);
         ClearIcons();
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top,
@@ -1282,6 +2369,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_DESTROY:
+        RemoveTrayIcon();
+        // Destroyed with the launcher.
+        l.edit = nullptr;
         g.launcher = nullptr;
         PostQuitMessage(0);
         return 0;
@@ -1320,14 +2410,19 @@ void CreateLauncher()
     wc.lpfnWndProc = PickerProc;
     wc.lpszClassName = kPickerClass;
     RegisterClassExW(&wc);
-    constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    // Clipping keeps the launcher's drawing off the rename box.
+    constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    l.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     g.launcher = CreateWindowExW(0, kLauncherClass, L"Unishade", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr,
                                  wc.hInstance, nullptr);
     winrt::check_bool(g.launcher != nullptr);
     DarkFrame(g.launcher);
+    // Explorer runs without administrator rights, so Unishade running with them must accept its messages.
+    ChangeWindowMessageFilterEx(g.launcher, l.taskbarCreated, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(g.launcher, kTrayMessage, MSGFLT_ALLOW, nullptr);
+    AddTrayIcon();
 
-    l.scale = GetDpiForWindow(g.launcher) / 96.0f;
-    CreateFonts();
+    Scale(l.launcherScaling, GetDpiForWindow(g.launcher));
     Refresh();
 
     // Centered on the monitor the window opened on.
@@ -1339,24 +2434,35 @@ void CreateLauncher()
     const int height = window.bottom - window.top;
     SetWindowPos(g.launcher, nullptr, (monitor.rcWork.left + monitor.rcWork.right - width) / 2,
                  (monitor.rcWork.top + monitor.rcWork.bottom - height) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    ShowWindow(g.launcher, SW_SHOWNORMAL);
+    // Started with Windows, it waits in the notification area, or on the taskbar until there is one.
+    if (!StartedWithWindows())
+        ShowWindow(g.launcher, SW_SHOWNORMAL);
+    else if (!l.trayAdded)
+        ShowWindow(g.launcher, SW_SHOWMINNOACTIVE);
 }
 
 void UpdateLauncher()
 {
-    if (g.launcher && Shown() != l.shown)
+    // Nothing is drawn while the launcher is hidden or minimized. Showing it describes it again.
+    if (g.launcher && IsWindowVisible(g.launcher) && !IsIconic(g.launcher) && CurrentShown() != l.shown)
         Refresh();
 }
 
 void DestroyLauncher()
 {
+    ForgetRemoved();
     if (g.launcher)
         DestroyWindow(g.launcher);
     g.launcher = nullptr;
-    DeleteFonts();
+    DeleteFonts(l.launcherScaling);
+    DeleteFonts(l.pickerScaling);
     ClearIcons();
+    if (l.editBrush)
+        DeleteObject(l.editBrush);
+    l.editBrush = nullptr;
     l.logo.reset();
     l.logoStream = nullptr;
     if (l.gdiplus)
         Gdiplus::GdiplusShutdown(l.gdiplus);
+    l.gdiplus = 0;
 }

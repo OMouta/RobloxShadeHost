@@ -29,10 +29,7 @@ void Log(LogLevel level, const char* format, ...) __attribute__((format(printf, 
 // Like Log, but shown in the launcher and the menu at any level.
 void Report(LogLevel level, const char* format, ...) __attribute__((format(printf, 2, 3)));
 
-// What Report and warnings and errors have shown so far, oldest first. A repeated message is shown once.
+// What Report and warnings and errors have shown so far, oldest first: the last 40, each message once.
 std::vector<Notice> Notices();
-
-// Changes whenever a notice is added.
-unsigned NoticeVersion();
 
 const std::filesystem::path& LogPath();

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "net.h"
+#include "../src/net.h"
 
 #include <atomic>
 #include <filesystem>
@@ -27,7 +27,8 @@ struct InstallOptions
     bool portable = false;
 };
 
-// Download locations. Tests point them elsewhere from the command line.
+// Download locations. Tests point them elsewhere from the command line, and may give a local file for the effect
+// package list and the add-on manifests.
 struct Sources
 {
     std::wstring effects = L"https://raw.githubusercontent.com/crosire/reshade-shaders/list/EffectPackages.ini";
@@ -78,15 +79,17 @@ const std::filesystem::path& SetupLogPath();
 // A resource embedded in Setup, such as the host exe.
 std::string_view Resource(int id);
 
-// Finds the newest ReShade on reshade.me and downloads its license.
+// Finds the newest ReShade on reshade.me and downloads its license from that version's source tag.
 ReShadeRelease FetchReShadeRelease(const std::atomic<bool>& cancel);
 
-// Downloads everything into a temporary folder first, so a failed or cancelled download leaves the
-// installation folder untouched. Throws std::runtime_error or Cancelled.
-void Install(const InstallOptions& options, const ReShadeRelease& release, Progress& progress);
+// Downloads everything into a temporary folder first, so a failed or cancelled download leaves the installation
+// folder untouched. An effect package, preset or add-on that cannot be installed is left out with a note, and the
+// result is false. Throws std::runtime_error or Cancelled.
+bool Install(const InstallOptions& options, const ReShadeRelease& release, Progress& progress);
 
-// Removes what Setup installed. ReShade.ini, presets and RobloxShadeHost.ini stay unless deleteUserFiles is set.
-// When Setup runs from the folder, it moves its own exe out first; call DeleteMovedSetup before exiting.
+// Removes the files Setup installed and the logs. With deleteUserFiles, also removes ReShade.ini, ReShadePreset.ini,
+// RobloxShadeHost.ini, games.ini and the presets and reshade-shaders folders. Refuses a folder that is not a Unishade
+// installation. When Setup runs from the folder, it moves its own exe out first; call DeleteMovedSetup before exiting.
 void Uninstall(const std::filesystem::path& directory, bool deleteUserFiles);
 void DeleteMovedSetup();
 

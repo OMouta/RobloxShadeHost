@@ -10,11 +10,13 @@ Like on Windows, Unishade copies the game's window and draws it again with effec
 
 ## macOS
 
-You need macOS 13 or newer.
+You need a Mac with Apple Silicon (M1 or newer) and macOS 13 or newer. Macs with an Intel processor aren't supported.
 
-1. Download **Unishade-macOS.zip**, unzip it and move **Unishade** to Applications.
-2. The build isn't notarized yet. The first time, right-click Unishade and choose **Open**.
-3. When Unishade asks to record the screen, allow it under **System Settings > Privacy & Security > Screen & System Audio Recording**. Then open Unishade again.
+1. Download **Unishade-macOS.zip** from the [download page](/download/#macos-and-linux), unzip it and move **Unishade** to Applications.
+2. The build isn't notarized yet, so macOS stops it the first time:
+   - On macOS 15 or newer, open Unishade and click **Done** when macOS says it can't verify it. Then open **System Settings > Privacy & Security**, scroll down to Security and click **Open Anyway** next to Unishade. Confirm with **Open Anyway** and your password.
+   - On macOS 13 and 14, right-click Unishade and choose **Open**, then click **Open**.
+3. When Unishade asks to record the screen, allow it under **System Settings > Privacy & Security > Screen & System Audio Recording**, called **Screen Recording** on macOS 13 and 14. Then open Unishade again.
 
 The shortcuts differ, since Mac keyboards have no Home key:
 
@@ -31,10 +33,11 @@ Roblox is found automatically. Windowed or borderless games work best. Unishade 
 
 ## Linux
 
-Unishade works with games that draw through X11. That covers X11 desktops and, on Wayland desktops, every game that runs through XWayland, such as Wine and Proton games. Games that draw to Wayland directly can't be captured.
+Unishade works with games that draw through X11. That covers X11 desktops and, on Wayland desktops, every game that runs through XWayland, such as Wine and Proton games. Games that draw to Wayland directly can't be captured. It needs a 64-bit (x64) PC.
 
 1. Install the Vulkan driver for your graphics card. Most distributions include it.
-2. Download **Unishade-linux-x64.tar.gz**, unpack it and run `./unishade`.
+2. Download **Unishade-linux-x64.tar.gz** from the [download page](/download/#macos-and-linux) and unpack it. It holds a **Unishade** folder.
+3. Open a terminal where you unpacked it and run `cd Unishade`, then `./unishade`.
 
 Roblox is found automatically, whether it runs through Sober or through Wine. If Sober draws to Wayland directly on your desktop, start it without Wayland so it uses XWayland: `flatpak run --nosocket=wayland org.vinegarhq.Sober`.
 

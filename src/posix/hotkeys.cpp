@@ -11,19 +11,31 @@ struct NamedKey
     ImGuiKey key;
 };
 
-// Keys other than letters, digits and function keys.
+// Keys other than letters, digits and function keys, named as on Windows.
 constexpr NamedKey kNamedKeys[] = {
     { "Home", ImGuiKey_Home }, { "End", ImGuiKey_End }, { "Insert", ImGuiKey_Insert },
     { "Delete", ImGuiKey_Delete }, { "PageUp", ImGuiKey_PageUp }, { "PageDown", ImGuiKey_PageDown },
     { "Pause", ImGuiKey_Pause }, { "ScrollLock", ImGuiKey_ScrollLock }, { "Space", ImGuiKey_Space },
     { "Tab", ImGuiKey_Tab }, { "Escape", ImGuiKey_Escape }, { "Left", ImGuiKey_LeftArrow },
     { "Right", ImGuiKey_RightArrow }, { "Up", ImGuiKey_UpArrow }, { "Down", ImGuiKey_DownArrow },
+    { "Numpad0", ImGuiKey_Keypad0 }, { "Numpad1", ImGuiKey_Keypad1 }, { "Numpad2", ImGuiKey_Keypad2 },
+    { "Numpad3", ImGuiKey_Keypad3 }, { "Numpad4", ImGuiKey_Keypad4 }, { "Numpad5", ImGuiKey_Keypad5 },
+    { "Numpad6", ImGuiKey_Keypad6 }, { "Numpad7", ImGuiKey_Keypad7 }, { "Numpad8", ImGuiKey_Keypad8 },
+    { "Numpad9", ImGuiKey_Keypad9 }, { "NumpadMultiply", ImGuiKey_KeypadMultiply }, { "NumpadAdd", ImGuiKey_KeypadAdd },
+    { "NumpadSubtract", ImGuiKey_KeypadSubtract }, { "NumpadDecimal", ImGuiKey_KeypadDecimal }, { "NumpadDivide", ImGuiKey_KeypadDivide },
 };
+
+// macOS has no hot key codes past F20.
+#ifdef __APPLE__
+constexpr ImGuiKey kLastFunctionKey = ImGuiKey_F20;
+#else
+constexpr ImGuiKey kLastFunctionKey = ImGuiKey_F24;
+#endif
 } // namespace
 
 bool IsShortcutKey(ImGuiKey key)
 {
-    if ((key >= ImGuiKey_A && key <= ImGuiKey_Z) || (key >= ImGuiKey_0 && key <= ImGuiKey_9) || (key >= ImGuiKey_F1 && key <= ImGuiKey_F24))
+    if ((key >= ImGuiKey_A && key <= ImGuiKey_Z) || (key >= ImGuiKey_0 && key <= ImGuiKey_9) || (key >= ImGuiKey_F1 && key <= kLastFunctionKey))
         return true;
     return std::any_of(std::begin(kNamedKeys), std::end(kNamedKeys), [key](const NamedKey& named) { return named.key == key; });
 }

@@ -102,6 +102,33 @@ struct Fixtures
     }
 };
 
+// A fixture window by title, including the ones ListGameWindows leaves out.
+HWND FixtureWindow(DWORD process, const wchar_t* title)
+{
+    struct Search
+    {
+        DWORD process;
+        const wchar_t* title;
+        HWND window;
+    } search{ process, title, nullptr };
+    EnumWindows(
+        [](HWND window, LPARAM param) -> BOOL {
+            auto& wanted = *reinterpret_cast<Search*>(param);
+            DWORD owner = 0;
+            GetWindowThreadProcessId(window, &owner);
+            wchar_t className[64]{};
+            wchar_t text[64]{};
+            GetClassNameW(window, className, 64);
+            GetWindowTextW(window, text, 64);
+            if (owner != wanted.process || wcscmp(className, L"UnishadeTestGame") != 0 || wcscmp(text, wanted.title) != 0)
+                return TRUE;
+            wanted.window = window;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.window;
+}
+
 bool StartFixture(const fs::path& self, const fs::path& executable, std::wstring& desktopName,
                   const std::wstring& readyName, HANDLE ready, PROCESS_INFORMATION& process)
 {
@@ -158,11 +185,22 @@ int wmain(int argc, wchar_t** argv)
     wrongProcess.processId = GetCurrentProcessId();
     ok &= Check(!FindGameTarget(wrongProcess, autoGames), "reject a window belonging to a different process");
     ok &= Check(FindGameTarget(std::nullopt, autoGames).has_value(), "keep automatic Roblox detection");
+    const auto matched = MatchGameWindow(games[0].window, autoGames);
+    ok &= Check(matched && matched->window == games[0].window && matched->name == L"Roblox" &&
+                    matched->processId == fixture.process.dwProcessId,
+                "match one window of a saved game");
+    for (const wchar_t* title : { L"Tool", L"Owned popup", L"Hidden", L"" })
+    {
+        const HWND window = FixtureWindow(fixture.process.dwProcessId, title);
+        ok &= Check(window && !MatchGameWindow(window, autoGames), "do not match tools, owned popups, hidden or untitled windows");
+    }
+    ok &= Check(!MatchGameWindow(fixture.ownWindow, autoGames) && !MatchGameWindow(nullptr, autoGames),
+                "do not match the host's own windows or no window");
     SendMessageW(games[1].window, WM_CLOSE, 0, 0);
     ok &= Check(!FindGameTarget(games[1], autoGames), "a closed selection does not fall back to another game");
     ok &= Check(FindGameTarget(std::nullopt, autoGames).has_value(), "automatic detection remains available after a selected game closes");
     autoGames[0].enabled = false;
-    ok &= Check(!FindGameTarget(std::nullopt, autoGames), "disabled Roblox is not detected");
+    ok &= Check(!FindGameTarget(std::nullopt, autoGames) && !MatchGameWindow(games[0].window, autoGames), "disabled Roblox is not detected");
     AddAutoGame(autoGames, games[0]);
     ok &= Check(autoGames.size() == 1 && autoGames[0].enabled && !autoGames[0].executable.has_parent_path(),
                 "adding Roblox again re-enables its default entry without pinning its installation folder");
@@ -225,6 +263,10 @@ int wmain(int argc, wchar_t** argv)
     const auto matchedPath = FindGameTarget(std::nullopt, autoGames, impostor == sameNames.end() ? nullptr : impostor->window);
     ok &= Check(matchedPath && matchedPath->processId == fixture.otherProcess.dwProcessId,
                 "do not attach to another executable with the same filename in a different folder");
+    const auto matchedOther = MatchGameWindow(other->window, autoGames);
+    ok &= Check(matchedOther && matchedOther->name == L"Other game \u6e38" && impostor != sameNames.end() &&
+                    !MatchGameWindow(impostor->window, autoGames),
+                "match a window by the saved executable's full path");
     for (const GameWindow& window : allWindows)
         if (window.processId == fixture.otherProcess.dwProcessId)
             SendMessageW(window.window, WM_CLOSE, 0, 0);

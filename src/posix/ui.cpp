@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <utility>
 
 namespace
 {
@@ -250,10 +251,9 @@ void GamesCard(App& app)
         }
         if (app.active)
         {
-            const std::string executable = platform::ProcessExecutable(app.active->pid);
-            const std::string command = platform::ProcessCommand(app.active->pid);
-            const bool saved = std::any_of(app.autoGames.begin(), app.autoGames.end(),
-                                           [&](const AutoGame& game) { return game.enabled && MatchesProcess(game, executable, command); });
+            const bool saved = std::any_of(app.autoGames.begin(), app.autoGames.end(), [&](const AutoGame& game) {
+                return game.enabled && MatchesProcess(game, app.activeExecutable, app.activeCommand);
+            });
             if (!saved && ImGui::Button(("Attach to " + app.active->title + " automatically").c_str()))
                 app.AddActiveGame();
         }
@@ -346,6 +346,9 @@ void DrawParameter(App& app, fx::Effect& effect, const fx::Uniform& uniform)
     ImGui::PushID(uniform.name.c_str());
     if (!uniform.text.empty())
         Dim(uniform.text.c_str());
+    // One group for the control, radio buttons and color pickers included, so effects can tell which of their
+    // variables is in use or under the cursor.
+    ImGui::BeginGroup();
     ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 2);
     const char* label = uniform.label.c_str();
     const bool bounded = uniform.min > std::numeric_limits<float>::lowest() && uniform.max < std::numeric_limits<float>::max();
@@ -417,6 +420,11 @@ void DrawParameter(App& app, fx::Effect& effect, const fx::Uniform& uniform)
         if (changed)
             app.runtime.SetValue(effect, uniform, value, components);
     }
+    ImGui::EndGroup();
+    if (ImGui::IsItemActive())
+        app.menuActiveUniform = &uniform;
+    if (ImGui::IsItemHovered())
+        app.menuHoveredUniform = &uniform;
     Tooltip(uniform.tooltip);
     ImGui::SameLine();
     if (ImGui::SmallButton("R"))
@@ -549,7 +557,11 @@ void EffectsTab(App& app)
 }
 
 // Folder logos in the overlay's Dear ImGui context, made at the size they are drawn, by folder. A folder without
-// one keeps an empty entry until the presets are listed again.
+// one keeps an empty entry until the presets are listed again. Each takes a set from Dear ImGui's descriptor pool,
+// which also holds its fonts, so there are at most kMaxLogos.
+constexpr size_t kMaxLogos = 192;
+constexpr uint32_t kDescriptorPoolSize = kMaxLogos + 64;
+
 struct Logo
 {
     GpuImage image;
@@ -608,6 +620,9 @@ ImTextureID FolderLogo(const fs::path& folder, int size)
         vkDeviceWaitIdle(gpu.device);
     DestroyLogo(logo);
     logo.size = size;
+    if (std::count_if(logos.byFolder.begin(), logos.byFolder.end(), [](const auto& entry) { return entry.second.set != VK_NULL_HANDLE; }) >=
+        std::ptrdiff_t(kMaxLogos))
+        return ImTextureID_Invalid;
     int width = 0, height = 0, channels = 0;
     stbi_uc* pixels = stbi_load((folder / "logo.png").c_str(), &width, &height, &channels, 4);
     if (!pixels)
@@ -619,15 +634,19 @@ ImTextureID FolderLogo(const fs::path& folder, int size)
         gpu.CreateBuffer(upload, rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true))
     {
         std::memcpy(upload.mapped, rgba.data(), rgba.size());
-        VkCommandBuffer commands = gpu.BeginCommands();
-        InitLayout(commands, logo.image);
-        VkBufferImageCopy copy{};
-        copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copy.imageExtent = { uint32_t(size), uint32_t(size), 1 };
-        vkCmdCopyBufferToImage(commands, upload.buffer, logo.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-        FullBarrier(commands);
-        gpu.SubmitAndWait(commands);
-        logo.set = ImGui_ImplVulkan_AddTexture(logo.image.view, VK_IMAGE_LAYOUT_GENERAL);
+        if (VkCommandBuffer commands = gpu.BeginCommands())
+        {
+            InitLayout(commands, logo.image);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.imageExtent = { uint32_t(size), uint32_t(size), 1 };
+            vkCmdCopyBufferToImage(commands, upload.buffer, logo.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+            FullBarrier(commands);
+            if (gpu.SubmitAndWait(commands))
+                logo.set = ImGui_ImplVulkan_AddTexture(logo.image.view, VK_IMAGE_LAYOUT_GENERAL);
+            else
+                vkDeviceWaitIdle(gpu.device); // commands that failed to finish may still use the image and buffer
+        }
     }
     gpu.DestroyBuffer(upload);
     if (!logo.set)
@@ -703,8 +722,8 @@ void MoveMenu(App& app, const fs::path& preset)
     {
         const std::string name = menu.folderName;
         menu.presetError.clear();
-        if (name.find_first_of("/\\:") != std::string::npos || name[0] == '.')
-            menu.presetError = "Folder names cannot contain slashes or start with a dot.";
+        if (std::string problem = PresetNameProblem(name); !problem.empty())
+            menu.presetError = std::move(problem);
         else if (app.MovePreset(preset, PresetsDirectory() / name, menu.presetError))
             menu.folderName[0] = 0;
         menu.presetsListed = -10;
@@ -746,8 +765,24 @@ void PresetsTab(App& app)
     {
         menu.folders = app.PresetFolders();
         menu.presetsListed = glfwGetTime();
-        // A logo saved since, such as the icon of a game that just started, shows now.
-        std::erase_if(logos.byFolder, [](const auto& entry) { return !entry.second.set; });
+        // A logo saved since, such as the icon of a game that just started, shows now, and folders that are gone
+        // give theirs back.
+        const auto listed = [](const std::string& path) {
+            return std::any_of(menu.folders.begin(), menu.folders.end(), [&](const PresetFolder& folder) { return folder.path.string() == path; });
+        };
+        bool waited = false;
+        for (auto entry = logos.byFolder.begin(); entry != logos.byFolder.end();)
+        {
+            if (entry->second.set && listed(entry->first))
+            {
+                ++entry;
+                continue;
+            }
+            if (entry->second.set && !std::exchange(waited, true))
+                vkDeviceWaitIdle(gpu.device);
+            DestroyLogo(entry->second);
+            entry = logos.byFolder.erase(entry);
+        }
     }
     ImGui::BeginChild("presets", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 4));
     const ImGuiID unsavedPopup = ImGui::GetID("Unsaved changes");
@@ -989,6 +1024,19 @@ void Toast(App& app, ImVec2 display, float scale)
     ImGui::TextUnformatted(app.toast.c_str());
     ImGui::End();
 }
+
+// The interface's scale for the window's monitor. On X11 it is the same on every monitor.
+float WindowScale([[maybe_unused]] GLFWwindow* window)
+{
+#ifdef __APPLE__
+    // macOS reports the Retina factor as the content scale, which Dear ImGui applies through the framebuffer scale.
+    return 1.0f;
+#else
+    float scaleX = 1, scaleY = 1;
+    glfwGetWindowContentScale(window, &scaleX, &scaleY);
+    return std::max(1.0f, scaleX);
+#endif
+}
 } // namespace
 
 bool InitUi(UiWindow& ui, std::string& error)
@@ -999,15 +1047,13 @@ bool InitUi(UiWindow& ui, std::string& error)
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
 
-    float scaleX = 1, scaleY = 1;
-    glfwGetWindowContentScale(ui.window, &scaleX, &scaleY);
-#ifdef __APPLE__
-    // macOS reports the Retina factor here, which Dear ImGui applies through the framebuffer scale instead.
-    ui.scale = 1.0f;
-#else
-    ui.scale = std::max(1.0f, scaleX);
-#endif
+    ui.scale = WindowScale(ui.window);
     ApplyStyle(ImGui::GetStyle(), ui.scale);
+    // A monitor with another scale, or a new scale in the system's settings. BeginUi applies it.
+    glfwSetWindowUserPointer(ui.window, &ui);
+    glfwSetWindowContentScaleCallback(ui.window, [](GLFWwindow* window, float, float) {
+        static_cast<UiWindow*>(glfwGetWindowUserPointer(window))->rescale = true;
+    });
 
     const std::string font = platform::UiFont();
     if (font.empty() || !io.Fonts->AddFontFromFileTTF(font.c_str()))
@@ -1025,7 +1071,7 @@ bool InitUi(UiWindow& ui, std::string& error)
     info.Device = gpu.device;
     info.QueueFamily = gpu.queueFamily;
     info.Queue = gpu.queue;
-    info.DescriptorPoolSize = 64;
+    info.DescriptorPoolSize = kDescriptorPoolSize;
     info.MinImageCount = ui.surface.minImageCount;
     info.ImageCount = std::max(ui.surface.imageCount, ui.surface.minImageCount);
     info.PipelineInfoMain.RenderPass = ui.surface.renderPass;
@@ -1059,6 +1105,13 @@ void ShutdownUi(UiWindow& ui)
 void BeginUi(UiWindow& ui)
 {
     ImGui::SetCurrentContext(ui.context);
+    if (std::exchange(ui.rescale, false) && WindowScale(ui.window) != ui.scale)
+    {
+        // Dear ImGui draws its fonts at whatever size the style asks for, so the style is all that is made again.
+        ui.scale = WindowScale(ui.window);
+        ImGui::GetStyle() = ImGuiStyle();
+        ApplyStyle(ImGui::GetStyle(), ui.scale);
+    }
     if (ui.surface.recreated)
     {
         ImGui_ImplVulkan_SetMinImageCount(ui.surface.minImageCount);
@@ -1124,8 +1177,10 @@ void DrawLauncher(App& app)
     ImGui::SameLine();
     if (ImGui::TextLink("Screenshots"))
     {
-        fs::create_directories(ScreenshotDirectory());
-        platform::Open(ScreenshotDirectory().string());
+        const fs::path folder = ScreenshotDirectory();
+        std::error_code error;
+        fs::create_directories(folder, error);
+        platform::Open(folder.string());
     }
     ImGui::SameLine();
     if (ImGui::TextLink("Docs"))
@@ -1143,6 +1198,8 @@ void ResetMenu(App& app)
 
 void DrawOverlay(App& app)
 {
+    app.menuActiveUniform = nullptr;
+    app.menuHoveredUniform = nullptr;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     if (app.menuOpen)
         Menu(app, display, app.overlay.scale);

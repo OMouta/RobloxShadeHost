@@ -13,6 +13,35 @@ namespace
 constexpr DWORD kPassThroughStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
 constexpr DWORD kEditStyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
 
+// Whether the overlay sits directly above the game rather than above every window, for KeepEffectsVisible.
+bool aboveGameOnly = false;
+
+bool IsTopmost(HWND window)
+{
+    return (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+}
+
+bool IsCloaked(HWND window)
+{
+    DWORD cloaked = 0;
+    return SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked;
+}
+
+// Puts the overlay directly under the window above the game, so whatever covers the game also covers its effects.
+// Topmost windows stay above all others, so the overlay first joins the game's group: HWND_NOTOPMOST leaves the
+// topmost group and does nothing when already out of it.
+void PlaceAboveGame(const RECT& bounds)
+{
+    const bool topmost = IsTopmost(g.target);
+    HWND above = GetWindow(g.target, GW_HWNDPREV);
+    if (above == g.overlay)
+        above = GetWindow(g.overlay, GW_HWNDPREV);
+    SetWindowPos(g.overlay, topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    // Without a window of its own group above it, the game is the first of its group.
+    SetWindowPos(g.overlay, above && IsTopmost(above) == topmost ? above : HWND_TOP, bounds.left, bounds.top, bounds.right - bounds.left,
+                 bounds.bottom - bounds.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
 void OpenMenu()
 {
     if (g.editMode || !g.captureEnabled || !g.target || IsIconic(g.target))
@@ -126,8 +155,10 @@ void ToggleOverlay()
 void UpdateOverlay()
 {
     RECT bounds{};
-    bool visible = g.captureEnabled && g.target && IsWindowVisible(g.target) && !IsIconic(g.target) &&
-                   (g.editMode || GetForegroundWindow() == g.target) &&
+    const bool inFront = g.editMode || GetForegroundWindow() == g.target;
+    // A game that is visible behind other windows keeps its effects when the user asked for that.
+    const bool behind = !inFront && g.target && KeepEffectsVisible() && !IsCloaked(g.target);
+    bool visible = g.captureEnabled && g.target && IsWindowVisible(g.target) && !IsIconic(g.target) && (inFront || behind) &&
                    SUCCEEDED(DwmGetWindowAttribute(g.target, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)));
 
     if (!visible)
@@ -138,10 +169,24 @@ void UpdateOverlay()
         return;
     }
 
-    if (!g.overlayVisible || !EqualRect(&bounds, &g.overlayRect))
+    if (behind)
+    {
+        // Placed again only when the game moved or another window came between it and the overlay.
+        if (!g.overlayVisible || !aboveGameOnly || !EqualRect(&bounds, &g.overlayRect) || GetWindow(g.target, GW_HWNDPREV) != g.overlay)
+        {
+            PlaceAboveGame(bounds);
+            aboveGameOnly = true;
+            g.overlayRect = bounds;
+            g.overlayVisible = true;
+        }
+        return;
+    }
+
+    if (!g.overlayVisible || aboveGameOnly || !EqualRect(&bounds, &g.overlayRect))
     {
         SetWindowPos(g.overlay, HWND_TOPMOST, bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        aboveGameOnly = false;
         g.overlayRect = bounds;
         g.overlayVisible = true;
     }

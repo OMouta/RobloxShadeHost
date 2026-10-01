@@ -32,11 +32,11 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The EXE is at `build\Release\Unishade.exe`. See `installer/README.md` for building and testing the installer.
+The EXE is at `build\Release\Unishade.exe`. See `installer/README.md` for building and testing the installer, and [src/posix](src/posix/README.md) for macOS and Linux.
 
-GitHub Actions builds and tests the EXE for pushes and pull requests. You can also run **Build and release** manually from the Actions tab. Successful builds provide a `Unishade-windows-x64` artifact containing the EXE and the installer.
+GitHub Actions builds and tests the Windows, Linux and macOS versions for pushes and pull requests, and runs `tests/installer_tests.ps1` against the new Setup. You can also run **Build and release** manually from the Actions tab. Successful builds provide `Unishade-windows-x64` (the EXE and Setup), `Unishade-linux-x64` and `Unishade-macOS` artifacts.
 
-To publish a release, push a version tag such as `v0.1.0`. After the build and tests pass, the workflow creates a GitHub release with the EXE attached. Branch pushes and manual builds do not publish releases.
+To publish a release, push a tag `vX.Y.Z` that matches `project(Unishade VERSION X.Y.Z)` in `CMakeLists.txt`; the workflow refuses any other. After the builds and tests pass, it creates a GitHub release with Setup, the EXE, the macOS and Linux archives, `LICENSE` and `SHA256SUMS.txt`, which lists the SHA-256 of each file, and then rebuilds the website. Branch pushes and manual builds do not publish releases.
 
 ## Website
 
@@ -48,7 +48,22 @@ pnpm install
 pnpm dev
 ```
 
-The download buttons link to the newest release's Setup, which the build looks up on GitHub. Set `GITHUB_REPOSITORY` to build against another repository. A push to main that changes the site deploys it, and publishing a release deploys it again so the buttons point at the new Setup.
+The download buttons link to the newest release's files, which the build looks up on GitHub. If GitHub can't be reached, the build still succeeds and the buttons link to the Releases page. Set `GITHUB_TOKEN` to avoid GitHub's limit of 60 requests an hour, and `GITHUB_REPOSITORY` to build against another repository; links to the repository follow it too. Setting `GITHUB_API_URL` to an address that doesn't answer shows the site as it builds offline.
+
+In the Markdown pages, link to Discord and the other addresses in `website/src/links.ts` by name, as `[Discord](links:discord)`. A name that isn't in `links.ts` fails the build.
+
+Cloudflare builds and deploys the site from `main`, with these build settings:
+
+| Setting | Value |
+| --- | --- |
+| Root directory | `website` |
+| Build command | `pnpm build` |
+| Build output directory | `dist` |
+| Environment variables | `GITHUB_TOKEN`: a fine-grained token with read access to public repositories, since Cloudflare's builds share GitHub's 60-requests-an-hour limit with everyone else on Cloudflare. `ASTRO_TELEMETRY_DISABLED=1`. |
+
+pnpm and Node come from `packageManager` in `website/package.json` and `website/.node-version`, the same versions CI uses. Cloudflare sends the security headers in `website/public/_headers`. Keep Rocket Loader and automatic Web Analytics off: the pages' Content-Security-Policy only allows their own scripts.
+
+A release doesn't change `main`, so Cloudflare would keep linking the old files. Create a deploy hook for `main` in Cloudflare and save its address as the `CLOUDFLARE_DEPLOY_HOOK` secret: the release job calls it after publishing, and the Website workflow calls it when a release is published, edited or deleted by hand, or when you run it from the Actions tab. Pull requests that change the site are built by that workflow too, so a broken build shows up before it's merged.
 
 ## Code changes
 
@@ -57,13 +72,13 @@ Game discovery lives in `src/game_integration.cpp`. `FindGameTarget()` uses a ma
 - The host is C++20.
 - Builds use `/W4`. Fix warnings rather than suppressing them.
 - Hotkey parsing has tests in `tests/hotkey_tests.cpp`. Add a case when you change it.
-- Installer changes must pass `tests/installer_tests.ps1`. It downloads ReShade and all effect packages, so it takes a few minutes.
+- Installer changes must pass `tests/installer_tests.ps1`. It downloads ReShade and all effect packages, so it takes a few minutes. CI runs it too, with the presets from your commit.
 - Keep pull requests focused. Separate unrelated fixes into their own pull requests.
 - Do not bump the version. Releases are cut from tags by the maintainer.
 
 ## Pull requests
 
-CI builds the host, runs the unit tests, and builds the installer on every pull request. Describe what changed and how you tested it. For anything that affects what the user sees, include a screenshot.
+CI builds the Windows, Linux and macOS versions, runs the unit tests and the installer tests, renders the presets on Linux, and builds the website when it changes. Describe what changed and how you tested it. For anything that affects what the user sees, include a screenshot.
 
 ## License
 

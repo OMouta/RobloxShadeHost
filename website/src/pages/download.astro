@@ -1,42 +1,77 @@
 ---
 import Base from '../layouts/Base.astro';
 import { links } from '../links';
-import { megabytes, release } from '../release';
+import { megabytes, release, type Download } from '../release';
+import { requirements, steps } from '../site';
 
-const released = release.date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+const released = release.date?.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+// ", 2.1 MB", or nothing for a link to the Releases page.
+const size = (file: Download) => (file.size ? `, ${megabytes(file.size)}` : '');
+
+// The site describes the version in CMakeLists.txt, which may not be out yet.
+const note = release.upcoming
+  ? `Unishade ${release.upcoming} isn't out yet, so this is ${release.version}${release.oldName ? ', from when Unishade was still called RobloxShadeHost' : ''}. Some of what the docs describe comes with ${release.upcoming}.`
+  : release.oldName && `This release is from before the new name, so its files are still called RobloxShadeHost.`;
+
+const others = [
+  { name: 'macOS', file: release.macos, needs: requirements.macos },
+  { name: 'Linux', file: release.linux, needs: requirements.linux },
+];
 ---
 
-<Base title="Download | Unishade" description={`Download Unishade ${release.version} Setup for Windows 10 and 11.`}>
+<Base title="Download | Unishade" description="Download Unishade Setup for Windows 10 and 11, or Unishade for macOS and Linux.">
   <main class="download-page">
     <section class="main">
       <h1>Download Unishade</h1>
       <p>Unishade, ReShade and every official effect in one installer. Depth estimation and DLSS5 are optional.</p>
-      <a class="button button-primary" href={release.setup.url}>Download Setup {release.version}</a>
+      <a class="button button-primary" href={release.setup.url}>
+        {release.setup.name ? `Download Setup ${release.version}` : 'Download from GitHub Releases'}
+      </a>
       <dl>
-        <div>
-          <dt>Version</dt>
-          <dd>{release.version}, released {released}</dd>
-        </div>
-        <div>
-          <dt>Size</dt>
-          <dd>{megabytes(release.setup.size)}. ReShade and the effects download during install.</dd>
-        </div>
+        {
+          release.version && (
+            <div>
+              <dt>Version</dt>
+              <dd>
+                {release.version}, released {released}
+              </dd>
+            </div>
+          )
+        }
+        {
+          release.setup.name && (
+            <div>
+              <dt>File</dt>
+              <dd>{release.setup.name}{size(release.setup)}. ReShade and the effects download during install.</dd>
+            </div>
+          )
+        }
         <div>
           <dt>Needs</dt>
-          <dd>64-bit Windows 10 version 1903 or newer, or Windows 11</dd>
+          <dd>{requirements.windows}</dd>
         </div>
       </dl>
+      {note && <p>{note}</p>}
+      <p class="dim">
+        Setup isn't code-signed yet, so the first time Windows may say <strong>Windows protected your PC</strong>.{' '}
+        Click <strong>More info</strong>, then <strong>Run anyway</strong>.
+      </p>
       <p>
-        <a href={release.notes}>What's new in {release.version}</a> · <a href={links.releases}>Older versions</a>
+        {
+          release.version && (
+            <>
+              <a href={release.notes}>What's new in {release.version}</a> ·{' '}
+            </>
+          )
+        }
+        <a href={links.releases}>{release.version ? 'Older versions' : 'All versions'}</a>
       </p>
     </section>
 
     <section>
       <h2>After downloading</h2>
       <ol>
-        <li>Run Setup and pick your add-ons.</li>
-        <li>Open your game and add it in Unishade.</li>
-        <li>Press Home in the game.</li>
+        {steps.map((step) => <li>{step}</li>)}
       </ol>
       <a class="button button-secondary" href="/docs/">Read the install guide</a>
     </section>
@@ -49,42 +84,57 @@ const released = release.date.toLocaleDateString('en-US', { year: 'numeric', mon
       </p>
     </section>
 
-    {
-      (release.macos || release.linux) && (
-        <section>
-          <h2>macOS and Linux</h2>
-          <p>
-            {release.macos && (
-              <>
-                <a href={release.macos.url}>Unishade for macOS</a> ({megabytes(release.macos.size)}, macOS 13 or newer)
-              </>
-            )}
-            {release.macos && release.linux && ' · '}
-            {release.linux && (
-              <>
-                <a href={release.linux.url}>Unishade for Linux</a> ({megabytes(release.linux.size)}, X11 or XWayland)
-              </>
-            )}
-          </p>
-          <p>
-            ReShade only runs on Windows, so these run ReShade's effects themselves, with the same presets.{' '}
-            <a href="/docs/macos-linux/">How to set them up</a>
-          </p>
-        </section>
-      )
-    }
+    <section>
+      <h2 id="macos-and-linux">macOS and Linux</h2>
+      <p>ReShade only runs on Windows, so these run ReShade's effects themselves, with the same presets.</p>
+      <dl>
+        {
+          others.map(({ name, file, needs }) => (
+            <div>
+              <dt>{name}</dt>
+              <dd>
+                <p>
+                  {file ? (
+                    <>
+                      <a href={file.url}>Download for {name}</a> ({file.name}{size(file)})
+                    </>
+                  ) : release.version ? (
+                    <>
+                      Not in {release.version} yet. Look on <a href={links.releases}>GitHub Releases</a>, or{' '}
+                      <a href={links.build}>build it yourself</a>.
+                    </>
+                  ) : (
+                    <a href={links.releases}>Download from GitHub Releases</a>
+                  )}
+                </p>
+                <p class="dim">Needs {needs}.</p>
+              </dd>
+            </div>
+          ))
+        }
+      </dl>
+      <a href="/docs/macos-linux/">How to set them up</a>
+    </section>
 
-    {
-      release.host && (
-        <section>
-          <h2>Without Setup</h2>
-          <p>
-            <a href={release.host.url}>Unishade.exe</a> on its own ({megabytes(release.host.size)}), if you'd rather install ReShade yourself. The add-ons
-            need Setup. <a href="/docs/#installing-without-setup">How to install it</a>
-          </p>
-        </section>
-      )
-    }
+    <section>
+      <h2>Without Setup</h2>
+      <p>
+        {
+          release.host ? (
+            <>
+              <a href={release.host.url}>{release.host.name}</a> on its own ({megabytes(release.host.size ?? 0)}), if you'd rather install
+              ReShade yourself.
+            </>
+          ) : (
+            <>
+              The program on its own is on <a href={links.releases}>GitHub Releases</a>, if you'd rather install ReShade
+              yourself.
+            </>
+          )
+        }{' '}
+        The add-ons need Setup. <a href="/docs/#installing-without-setup">How to install it</a>
+      </p>
+    </section>
   </main>
 </Base>
 
@@ -125,6 +175,7 @@ const released = release.date.toLocaleDateString('en-US', { year: 'numeric', mon
 
   dd {
     margin: 0;
+    overflow-wrap: anywhere;
   }
 
   ol {

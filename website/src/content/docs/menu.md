@@ -26,7 +26,7 @@ If a preset uses effects that aren't installed, the Presets tab names them.
 
 **Ctrl+PageDown** and **Ctrl+PageUp** switch to the next and previous preset while you play. They skip closed groups, so other games' presets stay out of the way until you open them.
 
-People share presets on [Discord](https://discord.gg/wVbVUdENas).
+People share presets on [Discord](links:discord).
 
 ## Effects
 

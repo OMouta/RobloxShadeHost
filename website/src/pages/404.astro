@@ -1,0 +1,37 @@
+---
+import Base from '../layouts/Base.astro';
+---
+
+<Base title="Page not found | Unishade" description="There's nothing at this address." noindex>
+  <main class="not-found">
+    <h1>Page not found</h1>
+    <p>There's nothing at this address. The page may have moved, or the link has a typo.</p>
+    <div class="actions">
+      <a class="button button-primary" href="/download/">Download</a>
+      <a class="button button-secondary" href="/docs/">Read the docs</a>
+      <a href="/">Go to the home page</a>
+    </div>
+  </main>
+</Base>
+
+<style>
+  .not-found {
+    display: grid;
+    gap: 24px;
+    justify-items: start;
+    width: var(--page);
+    margin: clamp(56px, 10vw, 120px) auto 0;
+  }
+
+  .not-found p {
+    max-width: 52ch;
+    font-size: 1.15rem;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px 20px;
+  }
+</style>

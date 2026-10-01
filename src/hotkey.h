@@ -26,6 +26,11 @@ inline constexpr NamedKey kNamedKeys[] = {
     { L"Delete", VK_DELETE }, { L"PageUp", VK_PRIOR }, { L"PageDown", VK_NEXT },
     { L"Pause", VK_PAUSE }, { L"ScrollLock", VK_SCROLL }, { L"Space", VK_SPACE },
     { L"Tab", VK_TAB }, { L"Escape", VK_ESCAPE },
+    { L"Numpad0", VK_NUMPAD0 }, { L"Numpad1", VK_NUMPAD1 }, { L"Numpad2", VK_NUMPAD2 },
+    { L"Numpad3", VK_NUMPAD3 }, { L"Numpad4", VK_NUMPAD4 }, { L"Numpad5", VK_NUMPAD5 },
+    { L"Numpad6", VK_NUMPAD6 }, { L"Numpad7", VK_NUMPAD7 }, { L"Numpad8", VK_NUMPAD8 },
+    { L"Numpad9", VK_NUMPAD9 }, { L"NumpadMultiply", VK_MULTIPLY }, { L"NumpadAdd", VK_ADD },
+    { L"NumpadSubtract", VK_SUBTRACT }, { L"NumpadDecimal", VK_DECIMAL }, { L"NumpadDivide", VK_DIVIDE },
 };
 
 // The rules for writing shortcuts are shared with macOS and Linux. Shortcut names are ASCII.

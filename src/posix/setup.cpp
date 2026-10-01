@@ -1,20 +1,18 @@
 #include "setup.h"
 #include "config.h"
 #include "log.h"
+#include "package_files.h"
 #include "preset_ini.h"
-
-#include <miniz.h>
 
 #include <signal.h>
 #include <spawn.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <cstdio>
-#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -26,14 +24,26 @@ struct Cancelled
 {
 };
 
-// Downloads with curl, which macOS and nearly every Linux system have. Throws on failure or when cancelled.
-void Download(const std::string& url, const fs::path& path, const std::atomic<bool>& cancel)
+// Limits for what a download may bring, so a broken or hostile server cannot fill the disk or the memory. They are
+// far above what effect packages and presets need.
+constexpr uintmax_t kMaxListSize = 4 << 20; // the lists and presets
+constexpr uintmax_t kMaxPackageSize = 512 << 20;
+
+// Downloads with curl, which macOS and nearly every Linux system have. Only https, redirects included, except for
+// the sources given on the command line, which tests can point at local files. Throws on failure or when cancelled.
+void Download(const std::string& url, const fs::path& path, const std::atomic<bool>& cancel, uintmax_t limit, bool fromCommandLine = false)
 {
-    if (url.rfind("https://", 0) != 0 && url.rfind("file://", 0) != 0)
+    const bool local = fromCommandLine && url.rfind("file://", 0) == 0;
+    if (url.rfind("https://", 0) != 0 && !local)
         throw std::runtime_error("Refusing to download from " + url + ".");
     fs::create_directories(path.parent_path());
+    // So the size checked below is never that of an earlier download.
+    std::error_code error;
+    fs::remove(path, error);
     const std::string output = path.string();
-    const char* argv[] = { "curl", "-fsSL", "--retry", "2", "--connect-timeout", "20", "-o", output.c_str(), url.c_str(), nullptr };
+    const std::string maxSize = std::to_string(limit);
+    const char* argv[] = { "curl", "-fsSL", "--proto", local ? "=https,file" : "=https", "--proto-redir", "=https", "--max-filesize", maxSize.c_str(),
+                           "--retry", "2", "--connect-timeout", "20", "-o", output.c_str(), url.c_str(), nullptr };
     pid_t pid;
     if (posix_spawnp(&pid, "curl", nullptr, nullptr, const_cast<char* const*>(argv), environ) != 0)
         throw std::runtime_error("curl is needed to download effects. Install it and try again.");
@@ -48,113 +58,25 @@ void Download(const std::string& url, const fs::path& path, const std::atomic<bo
         }
         usleep(50'000);
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    // curl's own limit only works where the server says the size first, before curl 8.4.
+    const uintmax_t size = fs::file_size(path, error);
+    if ((WIFEXITED(status) && WEXITSTATUS(status) == 63) || (!error && size > limit))
+        throw std::runtime_error(url + " is larger than Unishade accepts.");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || error)
         throw std::runtime_error("Could not download " + url + ".");
 }
 
-bool IsInside(const fs::path& path, const fs::path& folder)
+// Downloads go to a new folder only this user can open, so other users cannot swap what is downloaded.
+fs::path MakeWorkFolder()
 {
-    const fs::path relative = path.lexically_normal().lexically_relative(folder.lexically_normal());
-    return !relative.empty() && *relative.begin() != "..";
-}
-
-void ExtractZip(const fs::path& zipPath, const fs::path& destination, const std::string& name)
-{
-    const std::string data = ReadFile(zipPath);
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_mem(&zip, data.data(), data.size(), 0))
-        throw std::runtime_error("The download of " + name + " is not a zip file.");
-    struct Closer
-    {
-        mz_zip_archive* zip;
-        ~Closer() { mz_zip_reader_end(zip); }
-    } closer{ &zip };
-
-    for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index)
-    {
-        mz_zip_archive_file_stat stat{};
-        if (!mz_zip_reader_file_stat(&zip, index, &stat) || stat.m_is_directory)
-            continue;
-        const fs::path target = (destination / stat.m_filename).lexically_normal();
-        if (!IsInside(target, destination))
-            throw std::runtime_error(name + " contains a file outside its own folder.");
-        size_t size = 0;
-        void* bytes = mz_zip_reader_extract_to_heap(&zip, index, &size, 0);
-        if (!bytes)
-            throw std::runtime_error("Could not extract " + name + ".");
-        const bool written = WriteFile(target, std::string(static_cast<const char*>(bytes), size));
-        mz_free(bytes);
-        if (!written)
-            throw std::runtime_error("Could not write " + target.string() + ".");
-    }
-}
-
-bool SameName(const fs::path& path, const char* name)
-{
-    return Lowercase(path.filename().string()) == name;
-}
-
-// Matches ReShade's own installer: folders named Shaders and Textures first, otherwise the shallowest folder
-// with effect or image files.
-void FindPackageFolders(const fs::path& directory, fs::path& shaders, fs::path& textures, fs::path& shaderFallback, fs::path& textureFallback)
-{
-    for (const auto& entry : fs::directory_iterator(directory))
-    {
-        const fs::path& path = entry.path();
-        if (entry.is_directory())
-        {
-            if (shaders.empty() && SameName(path, "shaders"))
-                shaders = path;
-            if (textures.empty() && SameName(path, "textures"))
-                textures = path;
-            FindPackageFolders(path, shaders, textures, shaderFallback, textureFallback);
-            continue;
-        }
-        const std::string extension = Lowercase(path.extension().string());
-        const auto shallower = [&](const fs::path& current) { return current.empty() || directory.native().size() < current.native().size(); };
-        if (extension == ".fx" && shallower(shaderFallback))
-            shaderFallback = directory;
-        if ((extension == ".png" || extension == ".jpg" || extension == ".jpeg") && shallower(textureFallback))
-            textureFallback = directory;
-    }
-}
-
-void CopyPackageFiles(const fs::path& source, const fs::path& destination, const std::string& denied)
-{
-    fs::create_directories(destination);
-    std::set<std::string> deniedNames;
-    for (std::string name : PresetIni::Split(denied))
-    {
-        name.erase(0, name.find_first_not_of(' '));
-        name.erase(name.find_last_not_of(' ') + 1);
-        deniedNames.insert(Lowercase(name));
-    }
-    for (const auto& entry : fs::directory_iterator(source))
-    {
-        const fs::path name = entry.path().filename();
-        if (entry.is_directory())
-        {
-            CopyPackageFiles(entry.path(), destination / name, denied);
-            continue;
-        }
-        const std::string extension = Lowercase(name.extension().string());
-        if (extension == ".addon" || extension == ".addon32" || extension == ".addon64" || extension == ".dll" || extension == ".exe" ||
-            deniedNames.count(Lowercase(name.string())))
-            continue;
-        fs::copy_file(entry.path(), destination / name, fs::copy_options::overwrite_existing);
-    }
-}
-
-// EffectPackages.ini writes Windows paths such as .\reshade-shaders\Shaders\OtisFX.
-fs::path PackageDestination(const std::string& relative, const char* kind, const std::string& package)
-{
-    std::string path = relative;
-    std::replace(path.begin(), path.end(), '\\', '/');
-    const fs::path destination = (DataDirectory() / path).lexically_normal();
-    const fs::path root = (EffectsDirectory() / kind).lexically_normal();
-    if (relative.empty() || (!IsInside(destination, root) && destination != root))
-        throw std::runtime_error("The effect package " + package + " has an invalid install folder.");
-    return destination;
+    std::error_code error;
+    fs::path temporary = fs::temp_directory_path(error);
+    if (error)
+        temporary = "/tmp";
+    std::string folder = (temporary / "unishade-setup-XXXXXX").string();
+    if (!mkdtemp(folder.data()))
+        throw std::runtime_error("Could not create a folder for downloads in " + temporary.string() + ".");
+    return folder;
 }
 
 // SHA-256, for the preset checksums.
@@ -270,18 +192,21 @@ void EffectSetup::Fraction(float fraction)
 
 void EffectSetup::Run()
 {
-    const fs::path work = fs::temp_directory_path() / ("unishade-setup-" + std::to_string(getpid()));
+    fs::path work;
     std::vector<std::string> notes;
     std::string error;
+    // One install at a time, also across processes, such as --install-effects while the launcher installs.
+    const FileLock lock(DataDirectory() / "setup.lock");
     try
     {
-        fs::remove_all(work);
-        fs::create_directories(work);
+        if (lock.Busy())
+            throw std::runtime_error("Another Unishade is installing effects. Try again when it has finished.");
+        work = MakeWorkFolder();
 
         // Effects
         Status("Downloading the list of effects");
         const fs::path catalogPath = work / "EffectPackages.ini";
-        Download(setupSources.effects, catalogPath, cancel);
+        Download(setupSources.effects, catalogPath, cancel, kMaxListSize, setupSources.fromCommandLine);
         const PresetIni catalog(ReadFile(catalogPath));
         const std::vector<std::string> sections = catalog.SectionNames();
         if (sections.empty())
@@ -301,19 +226,12 @@ void EffectSetup::Run()
                 const fs::path zip = work / "package.zip";
                 const fs::path extracted = work / "package";
                 fs::remove_all(extracted);
-                Download(url, zip, cancel);
-                ExtractZip(zip, extracted, name);
-                fs::path shaders, textures, shaderFallback, textureFallback;
-                FindPackageFolders(extracted, shaders, textures, shaderFallback, textureFallback);
-                if (shaders.empty())
-                    shaders = shaderFallback;
-                if (textures.empty())
-                    textures = textureFallback;
-                if (shaders.empty())
-                    throw std::runtime_error("The effect package " + name + " contains no effects.");
-                CopyPackageFiles(shaders, PackageDestination(installPath, "Shaders", name), denied);
-                if (!textures.empty())
-                    CopyPackageFiles(textures, PackageDestination(texturePath, "Textures", name), "");
+                Download(url, zip, cancel, kMaxPackageSize);
+                ExtractZip(ReadFile(zip), extracted, name);
+                const PackageFolders folders = FindPackageFolders(extracted, name);
+                CopyPackageFiles(folders.shaders, PackageDestination(DataDirectory(), installPath, "Shaders", name), denied);
+                if (!folders.textures.empty())
+                    CopyPackageFiles(folders.textures, PackageDestination(DataDirectory(), texturePath, "Textures", name), "");
                 fs::remove_all(extracted);
                 fs::remove(zip);
             }
@@ -329,7 +247,7 @@ void EffectSetup::Run()
         // Presets
         Status("Downloading presets");
         const fs::path presetList = work / "preset-downloads.ini";
-        Download(setupSources.presets + "/downloads.ini", presetList, cancel);
+        Download(setupSources.presets + "/downloads.ini", presetList, cancel, kMaxListSize, setupSources.fromCommandLine);
         const PresetIni presets(ReadFile(presetList));
         fs::create_directories(PresetsDirectory());
         for (const std::string& file : presets.SectionNames())
@@ -338,12 +256,13 @@ void EffectSetup::Run()
             if (fs::path(file).filename() != file || Lowercase(fs::path(file).extension().string()) != ".ini" || !presets.Get(file, "sha256", hash))
                 throw std::runtime_error("The preset list contains an invalid entry.");
             const fs::path downloaded = work / file;
-            Download(setupSources.presets + "/" + file, downloaded, cancel);
+            Download(setupSources.presets + "/" + file, downloaded, cancel, kMaxListSize, setupSources.fromCommandLine);
             const std::string contents = ReadFile(downloaded);
             if (Sha256(contents) != Lowercase(hash))
                 throw std::runtime_error("The preset " + file + " did not match its checksum.");
             // Presets the user already has may have changes of theirs.
-            if (!fs::exists(PresetsDirectory() / file) && !WriteFile(PresetsDirectory() / file, contents))
+            std::error_code missing;
+            if (!fs::exists(PresetsDirectory() / file, missing) && !WriteFile(PresetsDirectory() / file, contents))
                 throw std::runtime_error("Could not write the preset " + file + ".");
         }
         Fraction(1.0f);
@@ -359,8 +278,9 @@ void EffectSetup::Run()
         Log(LogLevel::Error, "Setup failed: %s", e.what());
     }
     std::error_code ignored;
-    fs::remove_all(work, ignored);
-    std::lock_guard lock(mutex);
+    if (!work.empty())
+        fs::remove_all(work, ignored);
+    std::lock_guard guard(mutex);
     state.running = false;
     state.finished = true;
     state.error = error;

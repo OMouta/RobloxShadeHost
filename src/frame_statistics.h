@@ -9,6 +9,8 @@
 struct FrameStatistics
 {
     using Clock = std::chrono::steady_clock;
+    // Samples kept for the graph, one a second.
+    static constexpr size_t kHistory = 60;
 
     struct Sample
     {
@@ -97,7 +99,7 @@ private:
     double processingTotalMs = 0;
     double processingPeakMs = 0;
     std::optional<int64_t> lastFrame;
-    std::array<Sample, 60> history{};
+    std::array<Sample, kHistory> history{};
     size_t historyNext = 0;
     size_t historyCount = 0;
 };
