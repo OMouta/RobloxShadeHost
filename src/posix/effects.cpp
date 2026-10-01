@@ -1,21 +1,32 @@
 #include "effects.h"
 #include "log.h"
-#include "preset_ini.h"
 
 #include <effect_codegen.hpp>
 #include <effect_parser.hpp>
 #include <effect_preprocessor.hpp>
 
 #include <stb_image.h>
+#include <stb_image_dds.h>
+#include <stb_image_resize2.h>
+
+#include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <set>
+#include <tuple>
+
+// A hash of ReShade's compiler sources, from posix.cmake, so a new or changed compiler starts a new cache.
+#ifndef UNISHADE_COMPILER_ID
+#define UNISHADE_COMPILER_ID "unknown"
+#endif
 
 namespace fx
 {
@@ -26,6 +37,8 @@ struct PassGpu
     bool toBackbuffer = false;
     bool clear = false;
     bool mipmaps = false;
+    bool stencil = false;      // uses the stencil attachment
+    bool clearStencil = false; // the technique's first pass that does
     uint32_t targetCount = 0;
     std::vector<const GpuImage*> written; // render targets and storage, for their mipmaps
     VkRenderPass renderPass = VK_NULL_HANDLE;
@@ -66,6 +79,13 @@ constexpr const char* kCompatibilityMacros =
     "#define tex2Dgather2 tex2DgatherB\n"
     "#define tex2Dgather3 tex2DgatherA\n";
 
+// A new size waits this long for the next before effects are compiled for it.
+constexpr auto kResizeDelay = std::chrono::milliseconds(250);
+// How long Update may spend preparing effects on the graphics card. Render prepares whatever is left.
+constexpr auto kPrepareBudget = std::chrono::milliseconds(8);
+// The compile cache drops the entries used longest ago beyond this.
+constexpr uintmax_t kCacheLimit = 256 * 1024 * 1024;
+
 const reshadefx::annotation* FindAnnotation(const std::vector<reshadefx::annotation>& annotations, std::string_view name)
 {
     for (const reshadefx::annotation& annotation : annotations)
@@ -104,6 +124,14 @@ int AnnotationInt(const std::vector<reshadefx::annotation>& annotations, std::st
     return annotation->type.is_numeric() ? annotation->value.as_int[0] : fallback;
 }
 
+std::string Uppercase(std::string text)
+{
+    for (char& c : text)
+        if (c >= 'a' && c <= 'z')
+            c = static_cast<char>(c - 'a' + 'A');
+    return text;
+}
+
 VkFormat TextureFormat(reshadefx::texture_format format)
 {
     using reshadefx::texture_format;
@@ -128,6 +156,16 @@ VkFormat TextureFormat(reshadefx::texture_format format)
     case texture_format::rgb10a2: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     case texture_format::rg11b10f: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
     default: return VK_FORMAT_UNDEFINED;
+    }
+}
+
+VkImageType ImageType(reshadefx::texture_type type)
+{
+    switch (type)
+    {
+    case reshadefx::texture_type::texture_1d: return VK_IMAGE_TYPE_1D;
+    case reshadefx::texture_type::texture_3d: return VK_IMAGE_TYPE_3D;
+    default: return VK_IMAGE_TYPE_2D;
     }
 }
 
@@ -162,6 +200,38 @@ VkBlendOp BlendOp(reshadefx::blend_op op)
     }
 }
 
+VkStencilOp StencilOp(reshadefx::stencil_op op)
+{
+    using reshadefx::stencil_op;
+    switch (op)
+    {
+    case stencil_op::zero: return VK_STENCIL_OP_ZERO;
+    case stencil_op::replace: return VK_STENCIL_OP_REPLACE;
+    case stencil_op::increment_saturate: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+    case stencil_op::decrement_saturate: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+    case stencil_op::invert: return VK_STENCIL_OP_INVERT;
+    case stencil_op::increment: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+    case stencil_op::decrement: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+    default: return VK_STENCIL_OP_KEEP;
+    }
+}
+
+VkCompareOp CompareOp(reshadefx::stencil_func func)
+{
+    using reshadefx::stencil_func;
+    switch (func)
+    {
+    case stencil_func::never: return VK_COMPARE_OP_NEVER;
+    case stencil_func::less: return VK_COMPARE_OP_LESS;
+    case stencil_func::equal: return VK_COMPARE_OP_EQUAL;
+    case stencil_func::less_equal: return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case stencil_func::greater: return VK_COMPARE_OP_GREATER;
+    case stencil_func::not_equal: return VK_COMPARE_OP_NOT_EQUAL;
+    case stencil_func::greater_equal: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    default: return VK_COMPARE_OP_ALWAYS;
+    }
+}
+
 VkPrimitiveTopology Topology(reshadefx::primitive_topology topology)
 {
     using reshadefx::primitive_topology;
@@ -191,19 +261,12 @@ struct CompileJob
 {
     fs::path path;
     Definitions definitions;
-};
-
-struct CompileOptions
-{
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t vendor = 0;
-    uint32_t device = 0;
-    std::vector<fs::path> includePaths;
+    bool decode = false; // the preset uses it, so its images are decoded right away
 };
 
 void BuildUniforms(Effect& effect)
 {
+    effect.uniforms.clear();
     effect.uniformData.assign((effect.module.total_uniform_size + 15) & ~15u, 0);
     for (size_t i = 0; i < effect.module.uniforms.size(); ++i)
     {
@@ -241,69 +304,652 @@ void BuildUniforms(Effect& effect)
     }
 }
 
-bool Compile(Effect& effect, const CompileJob& job, const CompileOptions& options)
+// The compile cache
+
+uint64_t Hash(std::string_view data, uint64_t hash = 0xcbf29ce484222325)
 {
-    effect.path = job.path;
-    effect.file = job.path.filename().string();
+    for (const unsigned char c : data)
+        hash = (hash ^ c) * 0x100000001b3;
+    return hash;
+}
 
-    reshadefx::preprocessor pp;
-    // ReShade 6.8, running on Vulkan.
-    pp.add_macro_definition("__RESHADE__", "60800");
-    pp.add_macro_definition("__RESHADE_PERMUTATION__", "0");
-    pp.add_macro_definition("__RESHADE_PERFORMANCE_MODE__", "0");
-    pp.add_macro_definition("__VENDOR__", std::to_string(options.vendor));
-    pp.add_macro_definition("__DEVICE__", std::to_string(options.device));
-    pp.add_macro_definition("__RENDERER__", "131072"); // 0x20000, Vulkan
-    pp.add_macro_definition("__APPLICATION__", "0");
-    pp.add_macro_definition("BUFFER_WIDTH", std::to_string(options.width));
-    pp.add_macro_definition("BUFFER_HEIGHT", std::to_string(options.height));
-    pp.add_macro_definition("BUFFER_RCP_WIDTH", "(1.0 / BUFFER_WIDTH)");
-    pp.add_macro_definition("BUFFER_RCP_HEIGHT", "(1.0 / BUFFER_HEIGHT)");
-    pp.add_macro_definition("BUFFER_COLOR_SPACE", "1"); // sRGB
-    pp.add_macro_definition("BUFFER_COLOR_FORMAT", "87"); // B8G8R8A8_UNORM, in ReShade's numbering
-    pp.add_macro_definition("BUFFER_COLOR_BIT_DEPTH", "8");
-    // The first definition of a name wins, so the effect's own come first.
-    for (const auto& [name, value] : job.definitions)
-        if (!name.empty())
-            pp.add_macro_definition(name, value.empty() ? "1" : value);
-    pp.add_include_path(job.path.parent_path());
-    for (const fs::path& include : options.includePaths)
-        pp.add_include_path(include);
-    pp.append_string(kCompatibilityMacros);
+// Also hashes where each piece ends, so "ab" + "c" and "a" + "bc" differ.
+uint64_t HashPiece(std::string_view data, uint64_t hash)
+{
+    const uint64_t size = data.size();
+    return Hash(data, Hash(std::string_view(reinterpret_cast<const char*>(&size), sizeof(size)), hash));
+}
 
-    const bool preprocessed = pp.append_file(job.path);
-    effect.errors = pp.errors();
-    if (!preprocessed)
+// Bump when what the cache stores changes.
+constexpr uint32_t kCacheFormat = 1;
+constexpr char kCacheMagic[8] = "UNIFXC1";
+
+bool ReadText(const fs::path& path, std::string& text)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
         return false;
+    text.assign(std::istreambuf_iterator<char>(input), {});
+    return !input.bad();
+}
 
-    // Vulkan's clip space is upside down compared to Direct3D's, which effects are written for.
-    std::unique_ptr<reshadefx::codegen> codegen(reshadefx::create_codegen_spirv(true, false, false, false, true));
-    reshadefx::parser parser;
-    const bool parsed = parser.parse(pp.output(), codegen.get());
-    effect.errors += parser.errors();
-    if (!parsed)
-        return false;
-    effect.module = codegen->module();
-
-    for (const auto& [name, type] : effect.module.entry_points)
+// Writes through a file of its own, so two processes or threads writing the same entry cannot mix their data.
+bool WriteCacheFile(const fs::path& path, const std::string& contents)
+{
+    std::error_code error;
+    fs::create_directories(path.parent_path(), error);
+    const fs::path temporary = path.string() + "." + std::to_string(getpid()) + "-" +
+                               std::to_string(std::hash<std::thread::id>()(std::this_thread::get_id())) + ".tmp";
     {
-        std::string binary, assembly, errors;
-        if (!codegen->assemble_code_for_entry_point(name, binary, assembly, errors))
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output << contents;
+        if (!output.flush())
         {
-            effect.errors += errors;
+            output.close();
+            fs::remove(temporary, error);
             return false;
         }
-        std::vector<uint32_t>& code = effect.spirv[name];
-        code.resize(binary.size() / 4);
-        std::memcpy(code.data(), binary.data(), code.size() * 4);
     }
-    BuildUniforms(effect);
-    effect.compiled = true;
+    fs::rename(temporary, path, error);
+    if (error)
+        fs::remove(temporary, error);
+    return !error;
+}
+
+// Writes an effect for the cache and reads it back with the same Visit functions, so the two cannot drift apart.
+struct Writer
+{
+    std::string data;
+    template <class T>
+    void Raw(T& value) { data.append(reinterpret_cast<const char*>(&value), sizeof(T)); }
+    void Text(std::string& value)
+    {
+        uint64_t size = value.size();
+        Raw(size);
+        data += value;
+    }
+    void Bytes(const void* bytes, size_t size) { data.append(static_cast<const char*>(bytes), size); }
+    template <class T>
+    bool Count(std::vector<T>& values, size_t = 1)
+    {
+        uint64_t size = values.size();
+        Raw(size);
+        return true;
+    }
+};
+
+struct Reader
+{
+    std::string_view data;
+    size_t at = 0;
+    bool ok = true;
+
+    template <class T>
+    void Raw(T& value)
+    {
+        if (!ok || data.size() - at < sizeof(T))
+        {
+            ok = false;
+            value = T();
+            return;
+        }
+        std::memcpy(&value, data.data() + at, sizeof(T));
+        at += sizeof(T);
+    }
+    void Text(std::string& value)
+    {
+        uint64_t size = 0;
+        Raw(size);
+        if (!ok || data.size() - at < size)
+        {
+            ok = false;
+            return;
+        }
+        value.assign(data.substr(at, size));
+        at += size;
+    }
+    void Bytes(void* bytes, size_t size)
+    {
+        if (!ok || data.size() - at < size)
+        {
+            ok = false;
+            return;
+        }
+        std::memcpy(bytes, data.data() + at, size);
+        at += size;
+    }
+    // Every element takes at least a byte, which stops a damaged count from asking for too much memory.
+    template <class T>
+    bool Count(std::vector<T>& values, size_t elementSize = 1)
+    {
+        uint64_t size = 0;
+        Raw(size);
+        if (!ok || size > (data.size() - at) / elementSize)
+            return ok = false;
+        values.resize(size);
+        return true;
+    }
+};
+
+template <class A, class T>
+    requires std::is_arithmetic_v<T> || std::is_enum_v<T>
+void Visit(A& archive, T& value)
+{
+    archive.Raw(value);
+}
+
+template <class A>
+void Visit(A& archive, std::string& value)
+{
+    archive.Text(value);
+}
+
+template <class A, class T, size_t N>
+void Visit(A& archive, T (&values)[N])
+{
+    for (T& value : values)
+        Visit(archive, value);
+}
+
+template <class A, class T, class U>
+void Visit(A& archive, std::pair<T, U>& value)
+{
+    Visit(archive, value.first);
+    Visit(archive, value.second);
+}
+
+template <class A, class T>
+void Visit(A& archive, std::vector<T>& values)
+{
+    if (archive.Count(values))
+        for (T& value : values)
+            Visit(archive, value);
+}
+
+// Numbers in one piece, which SPIR-V is mostly made of.
+template <class A, class T>
+    requires std::is_arithmetic_v<T>
+void Visit(A& archive, std::vector<T>& values)
+{
+    if (archive.Count(values, sizeof(T)))
+        archive.Bytes(values.data(), values.size() * sizeof(T));
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::type& type)
+{
+    uint32_t base = type.base, rows = type.rows, cols = type.cols, qualifiers = type.qualifiers;
+    Visit(archive, base);
+    Visit(archive, rows);
+    Visit(archive, cols);
+    Visit(archive, qualifiers);
+    type.base = static_cast<reshadefx::type::datatype>(base);
+    type.rows = rows;
+    type.cols = cols;
+    type.qualifiers = qualifiers;
+    Visit(archive, type.array_length);
+    Visit(archive, type.struct_definition);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::constant& value)
+{
+    Visit(archive, value.as_uint);
+    Visit(archive, value.string_data);
+    Visit(archive, value.array_data);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::annotation& annotation)
+{
+    Visit(archive, annotation.type);
+    Visit(archive, annotation.name);
+    Visit(archive, annotation.value);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::texture& texture)
+{
+    Visit(archive, texture.width);
+    Visit(archive, texture.height);
+    Visit(archive, texture.depth);
+    Visit(archive, texture.levels);
+    Visit(archive, texture.type);
+    Visit(archive, texture.format);
+    Visit(archive, texture.id);
+    Visit(archive, texture.name);
+    Visit(archive, texture.unique_name);
+    Visit(archive, texture.semantic);
+    Visit(archive, texture.annotations);
+    Visit(archive, texture.render_target);
+    Visit(archive, texture.storage_access);
+    Visit(archive, texture.semantic_binding);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::sampler& sampler)
+{
+    Visit(archive, sampler.filter);
+    Visit(archive, sampler.address_u);
+    Visit(archive, sampler.address_v);
+    Visit(archive, sampler.address_w);
+    Visit(archive, sampler.min_lod);
+    Visit(archive, sampler.max_lod);
+    Visit(archive, sampler.lod_bias);
+    Visit(archive, sampler.type);
+    Visit(archive, sampler.id);
+    Visit(archive, sampler.name);
+    Visit(archive, sampler.unique_name);
+    Visit(archive, sampler.texture_name);
+    Visit(archive, sampler.annotations);
+    Visit(archive, sampler.srgb);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::storage& storage)
+{
+    Visit(archive, storage.level);
+    Visit(archive, storage.type);
+    Visit(archive, storage.id);
+    Visit(archive, storage.name);
+    Visit(archive, storage.unique_name);
+    Visit(archive, storage.texture_name);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::uniform& uniform)
+{
+    Visit(archive, uniform.type);
+    Visit(archive, uniform.name);
+    Visit(archive, uniform.unique_name);
+    Visit(archive, uniform.size);
+    Visit(archive, uniform.offset);
+    Visit(archive, uniform.annotations);
+    Visit(archive, uniform.has_initializer_value);
+    Visit(archive, uniform.initializer_value);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::texture_binding& binding)
+{
+    Visit(archive, binding.index);
+    Visit(archive, binding.entry_point_binding);
+    Visit(archive, binding.srgb);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::sampler_binding& binding)
+{
+    Visit(archive, binding.index);
+    Visit(archive, binding.entry_point_binding);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::storage_binding& binding)
+{
+    Visit(archive, binding.index);
+    Visit(archive, binding.entry_point_binding);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::pass& pass)
+{
+    Visit(archive, pass.name);
+    Visit(archive, pass.render_target_names);
+    Visit(archive, pass.vs_entry_point);
+    Visit(archive, pass.ps_entry_point);
+    Visit(archive, pass.cs_entry_point);
+    Visit(archive, pass.generate_mipmaps);
+    Visit(archive, pass.clear_render_targets);
+    Visit(archive, pass.blend_enable);
+    Visit(archive, pass.source_color_blend_factor);
+    Visit(archive, pass.dest_color_blend_factor);
+    Visit(archive, pass.color_blend_op);
+    Visit(archive, pass.source_alpha_blend_factor);
+    Visit(archive, pass.dest_alpha_blend_factor);
+    Visit(archive, pass.alpha_blend_op);
+    Visit(archive, pass.srgb_write_enable);
+    Visit(archive, pass.render_target_write_mask);
+    Visit(archive, pass.stencil_enable);
+    Visit(archive, pass.stencil_read_mask);
+    Visit(archive, pass.stencil_write_mask);
+    Visit(archive, pass.stencil_reference_value);
+    Visit(archive, pass.stencil_comparison_func);
+    Visit(archive, pass.stencil_pass_op);
+    Visit(archive, pass.stencil_fail_op);
+    Visit(archive, pass.stencil_depth_fail_op);
+    Visit(archive, pass.topology);
+    Visit(archive, pass.num_vertices);
+    Visit(archive, pass.viewport_width);
+    Visit(archive, pass.viewport_height);
+    Visit(archive, pass.viewport_dispatch_z);
+    Visit(archive, pass.texture_bindings);
+    Visit(archive, pass.sampler_bindings);
+    Visit(archive, pass.storage_bindings);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::technique& technique)
+{
+    Visit(archive, technique.name);
+    Visit(archive, technique.passes);
+    Visit(archive, technique.annotations);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::effect_module& module)
+{
+    Visit(archive, module.textures);
+    Visit(archive, module.samplers);
+    Visit(archive, module.storages);
+    Visit(archive, module.uniforms);
+    Visit(archive, module.spec_constants);
+    Visit(archive, module.total_uniform_size);
+    Visit(archive, module.techniques);
+    Visit(archive, module.entry_points);
+}
+
+// The compiled part of an effect: its module, SPIR-V and warnings.
+template <class A>
+void VisitCompiled(A& archive, Effect& effect)
+{
+    Visit(archive, effect.module);
+    std::vector<std::pair<std::string, std::vector<uint32_t>>> spirv(effect.spirv.begin(), effect.spirv.end());
+    Visit(archive, spirv);
+    effect.spirv = { spirv.begin(), spirv.end() };
+    Visit(archive, effect.errors);
+}
+
+// One entry per effect, set of macros and include folders. It lists the files the effect was compiled from,
+// which must still have the text they had then.
+fs::path CacheEntry(const CompileOptions& options, const fs::path& path, const Definitions& macros)
+{
+    uint64_t hash = HashPiece(UNISHADE_COMPILER_ID, Hash({}));
+    hash = HashPiece(path.string(), hash);
+    for (const auto& [name, value] : macros)
+        hash = HashPiece(value, HashPiece(name, hash));
+    for (const fs::path& include : options.includePaths)
+        hash = HashPiece(include.string(), hash);
+    char name[32];
+    std::snprintf(name, sizeof(name), "%016llx.bin", static_cast<unsigned long long>(hash));
+    return options.cacheDirectory / (path.stem().string() + "-" + name);
+}
+
+bool ReadCache(Effect& effect, const fs::path& entry, const Definitions& macros)
+{
+    std::string data;
+    if (!ReadText(entry, data))
+        return false;
+    Reader in{ data };
+    char magic[sizeof(kCacheMagic)]{};
+    uint32_t format = 0;
+    uint64_t key = 0, checksum = 0;
+    std::vector<std::string> paths;
+    Visit(in, magic);
+    Visit(in, format);
+    Visit(in, key);
+    Visit(in, paths);
+    Visit(in, checksum);
+    if (!in.ok || std::memcmp(magic, kCacheMagic, sizeof(magic)) != 0 || format != kCacheFormat || paths.empty() ||
+        Hash(std::string_view(data).substr(in.at)) != checksum)
+        return false;
+    std::vector<std::string> files(paths.size());
+    for (size_t i = 0; i < paths.size(); ++i)
+        if (!ReadText(paths[i], files[i]))
+            return false;
+    if (CompileKey(macros, files) != key)
+        return false;
+    VisitCompiled(in, effect);
+    if (!in.ok || in.at != data.size())
+        return false;
+    // The entry was used now, which keeps it when the cache is pruned.
+    std::error_code error;
+    fs::last_write_time(entry, fs::file_time_type::clock::now(), error);
     return true;
 }
 
-// Reads the values of a uniform in ReShade's layout: every array element and every matrix row starts on
-// 16 bytes.
+// A file changed after the compile started may not be what the effect was compiled from, so then nothing is kept.
+void WriteCache(Effect& effect, const fs::path& entry, const Definitions& macros, std::vector<std::string> paths, fs::file_time_type started)
+{
+    std::vector<std::string> files(paths.size());
+    std::error_code error;
+    for (size_t i = 0; i < paths.size(); ++i)
+        if (!ReadText(paths[i], files[i]) || fs::last_write_time(paths[i], error) > started || error)
+            return;
+    Writer payload;
+    VisitCompiled(payload, effect);
+    Writer out;
+    char magic[sizeof(kCacheMagic)];
+    std::memcpy(magic, kCacheMagic, sizeof(magic));
+    uint32_t format = kCacheFormat;
+    uint64_t key = CompileKey(macros, files), checksum = Hash(payload.data);
+    Visit(out, magic);
+    Visit(out, format);
+    Visit(out, key);
+    Visit(out, paths);
+    Visit(out, checksum);
+    WriteCacheFile(entry, out.data + payload.data);
+}
+
+// Keeps the compile cache under its limit, dropping the entries used longest ago.
+void PruneCache(const fs::path& directory)
+{
+    std::vector<std::tuple<fs::file_time_type, uintmax_t, fs::path>> entries;
+    uintmax_t total = 0;
+    std::error_code error;
+    for (const fs::directory_entry& entry : fs::directory_iterator(directory, error))
+    {
+        if (!entry.is_regular_file(error) || entry.path().extension() != ".bin")
+            continue;
+        const uintmax_t size = entry.file_size(error);
+        const fs::file_time_type time = entry.last_write_time(error);
+        if (error)
+            continue;
+        entries.emplace_back(time, size, entry.path());
+        total += size;
+    }
+    if (total <= kCacheLimit)
+        return;
+    std::sort(entries.begin(), entries.end());
+    for (const auto& [time, size, path] : entries)
+    {
+        if (total <= kCacheLimit / 4 * 3)
+            break;
+        if (fs::remove(path, error))
+            total -= size;
+    }
+}
+
+// Texture images
+
+using TextureIndex = std::vector<std::pair<std::string, fs::path>>; // lowercase relative path, full path
+
+TextureIndex ScanTextures(const std::vector<fs::path>& roots)
+{
+    TextureIndex files;
+    for (const fs::path& root : roots)
+    {
+        std::error_code error;
+        for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, error), end; it != end; it.increment(error))
+            if (!error && it->is_regular_file(error))
+                files.emplace_back(Lowercase(it->path().lexically_relative(root).generic_string()), it->path());
+    }
+    return files;
+}
+
+fs::path FindTextureIn(const TextureIndex& files, const std::string& source)
+{
+    std::string wanted = Lowercase(source);
+    std::replace(wanted.begin(), wanted.end(), '\\', '/');
+    for (const auto& [relative, path] : files)
+        if (relative == wanted)
+            return path;
+    // Effects in subfolders often name textures without the folder they are in.
+    const std::string name = fs::path(wanted).filename().string();
+    for (const auto& [relative, path] : files)
+        if (fs::path(relative).filename() == name)
+            return path;
+    return {};
+}
+
+// Loads an image into a texture's format and size, the way ReShade does: formats with 8 or 32-bit float
+// channels, DDS files, and stb_image_resize2's default filter for images of another size.
+TextureImage DecodeTexture(const reshadefx::texture_desc& texture, const fs::path& file)
+{
+    TextureImage result;
+    using reshadefx::texture_format;
+    uint32_t channels = 4;
+    const bool floating = texture.format == texture_format::r32f || texture.format == texture_format::rg32f || texture.format == texture_format::rgba32f;
+    switch (texture.format)
+    {
+    case texture_format::r8:
+    case texture_format::r32f:
+        channels = 1;
+        break;
+    case texture_format::rg8:
+    case texture_format::rg32f:
+        channels = 2;
+        break;
+    case texture_format::rgba8:
+    case texture_format::rgba32f:
+        break;
+    default:
+        result.error = "images load only into R8, RG8, RGBA8 and 32-bit float textures";
+        return result;
+    }
+    std::string data;
+    if (file.empty() || !ReadText(file, data) || data.size() > size_t(std::numeric_limits<int>::max()))
+    {
+        result.error = "the file is missing";
+        return result;
+    }
+    const auto* bytes = reinterpret_cast<const stbi_uc*>(data.data());
+    const int length = static_cast<int>(data.size());
+    int width = 0, height = 0, depth = 1, components = 0;
+    void* pixels = floating ? static_cast<void*>(stbi_loadf_from_memory(bytes, length, &width, &height, &components, 4))
+                   : stbi_dds_test_memory(bytes, length) ? stbi_dds_load_from_memory(bytes, length, &width, &height, &depth, &components, 4)
+                                                         : stbi_load_from_memory(bytes, length, &width, &height, &components, 4);
+    if (!pixels)
+    {
+        result.error = "it is not an image stb_image can read";
+        return result;
+    }
+    const size_t componentSize = floating ? 4 : 1, pixelSize = channels * componentSize;
+    const size_t count = size_t(width) * height * depth;
+    if (depth != std::max<int>(1, texture.depth) || (depth > 1 && (uint32_t(width) != texture.width || uint32_t(height) != texture.height)))
+    {
+        stbi_image_free(pixels);
+        result.error = "3D images cannot be resized";
+        return result;
+    }
+    // Only the channels the format has.
+    auto* source = static_cast<uint8_t*>(pixels);
+    for (size_t i = 0; i < count; ++i)
+        std::memmove(source + i * pixelSize, source + i * 4 * componentSize, pixelSize);
+
+    const uint32_t textureHeight = texture.type == reshadefx::texture_type::texture_1d ? 1 : texture.height;
+    result.pixels.resize(size_t(texture.width) * textureHeight * depth * pixelSize);
+    if (uint32_t(width) == texture.width && uint32_t(height) == textureHeight)
+        std::memcpy(result.pixels.data(), source, result.pixels.size());
+    else
+    {
+        const stbir_pixel_layout layout = channels == 1 ? STBIR_1CHANNEL : channels == 2 ? STBIR_2CHANNEL : STBIR_RGBA;
+        if (!stbir_resize(source, width, height, 0, result.pixels.data(), int(texture.width), int(textureHeight), 0, layout,
+                          floating ? STBIR_TYPE_FLOAT : STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_DEFAULT))
+        {
+            result.pixels.clear();
+            result.error = "it could not be resized";
+        }
+    }
+    stbi_image_free(pixels);
+    return result;
+}
+
+void DecodeImages(Effect& effect, const TextureIndex& files, const std::function<bool()>& cancelled)
+{
+    for (const reshadefx::texture& texture : effect.module.textures)
+    {
+        if (cancelled && cancelled())
+            return;
+        const std::string source = AnnotationString(texture.annotations, "source");
+        if (!source.empty() && texture.semantic.empty())
+            effect.images[texture.unique_name] = DecodeTexture(texture, FindTextureIn(files, source));
+    }
+}
+
+std::array<unsigned, 4> ParseKey(const std::string& text)
+{
+    std::array<unsigned, 4> key{};
+    const std::vector<std::string> items = PresetIni::Split(text);
+    for (size_t i = 0; i < key.size() && i < items.size(); ++i)
+        key[i] = static_cast<unsigned>(std::strtoul(items[i].c_str(), nullptr, 10));
+    return key;
+}
+
+std::string FormatKey(const std::array<unsigned, 4>& key)
+{
+    return std::to_string(key[0]) + "," + std::to_string(key[1]) + "," + std::to_string(key[2]) + "," + std::to_string(key[3]);
+}
+
+std::string FormatFloat(float value)
+{
+    return std::to_string(value);
+}
+
+fs::path CacheDirectory()
+{
+    return DataDirectory() / "cache";
+}
+} // namespace
+
+std::string TechniqueKey(const Technique& technique, const Effect& effect)
+{
+    return technique.name + "@" + effect.file;
+}
+
+void OrderTechniques(std::vector<Technique>& techniques, const std::vector<Effect>& effects, const std::vector<std::string>& sorting)
+{
+    std::unordered_map<std::string, size_t> listed;
+    for (size_t i = 0; i < sorting.size(); ++i)
+        listed.emplace(sorting[i], i);
+    struct Order
+    {
+        size_t rank;
+        std::string group;
+        size_t effect;
+        size_t index;
+    };
+    std::vector<Order> order(techniques.size());
+    // An effect's techniques at one rank stay together, in the file's order, behind the label of the first. That
+    // keeps the order the same however the sort compares them.
+    std::map<std::pair<size_t, size_t>, std::pair<size_t, std::string>> groups;
+    for (size_t i = 0; i < techniques.size(); ++i)
+    {
+        const Technique& technique = techniques[i];
+        auto found = listed.find(TechniqueKey(technique, effects[technique.effect]));
+        if (found == listed.end())
+            found = listed.find(technique.name);
+        order[i] = { found == listed.end() ? sorting.size() : found->second, {}, technique.effect, technique.index };
+        const std::string label = Uppercase(technique.label.empty() ? technique.name : technique.label);
+        const auto [group, added] = groups.try_emplace({ technique.effect, order[i].rank }, technique.index, label);
+        if (!added && technique.index < group->second.first)
+            group->second = { technique.index, label };
+    }
+    for (Order& entry : order)
+        entry.group = groups.at({ entry.effect, entry.rank }).second;
+    std::vector<size_t> sorted(techniques.size());
+    std::iota(sorted.begin(), sorted.end(), size_t(0));
+    std::sort(sorted.begin(), sorted.end(), [&order](size_t a, size_t b) {
+        return std::tie(order[a].rank, order[a].group, order[a].effect, order[a].index) <
+               std::tie(order[b].rank, order[b].group, order[b].effect, order[b].index);
+    });
+    std::vector<Technique> result;
+    result.reserve(techniques.size());
+    for (size_t i : sorted)
+        result.push_back(std::move(techniques[i]));
+    techniques = std::move(result);
+}
+
 size_t ComponentOffset(const Uniform& uniform, size_t i)
 {
     const reshadefx::type& type = uniform.type;
@@ -322,24 +968,154 @@ size_t ComponentCount(const Uniform& uniform)
     return uniform.type.components() * (uniform.type.is_array() ? uniform.type.array_length : 1u);
 }
 
-std::string FormatFloat(float value)
+Definitions EffectMacros(const Definitions& definitions, const CompileOptions& options)
 {
-    return std::to_string(value);
+    // ReShade 6.8, running on Vulkan. The first definition of a name wins, so these cannot be replaced.
+    Definitions macros = {
+        { "__RESHADE__", "60800" },
+        { "__RESHADE_PERMUTATION__", "0" },
+        { "__RESHADE_PERFORMANCE_MODE__", "0" },
+        { "__VENDOR__", std::to_string(options.vendor) },
+        { "__DEVICE__", std::to_string(options.device) },
+        { "__RENDERER__", "131072" }, // 0x20000, Vulkan
+        { "__APPLICATION__", "0" },
+        { "BUFFER_WIDTH", std::to_string(options.width) },
+        { "BUFFER_HEIGHT", std::to_string(options.height) },
+        { "BUFFER_RCP_WIDTH", "(1.0 / BUFFER_WIDTH)" },
+        { "BUFFER_RCP_HEIGHT", "(1.0 / BUFFER_HEIGHT)" },
+        { "BUFFER_COLOR_SPACE", "1" },   // sRGB
+        { "BUFFER_COLOR_FORMAT", "87" }, // B8G8R8A8_UNORM, in ReShade's numbering
+        { "BUFFER_COLOR_BIT_DEPTH", "8" },
+    };
+    for (const auto& [name, value] : definitions)
+        if (!name.empty())
+            macros.emplace_back(name, value.empty() ? "1" : value);
+    return macros;
 }
-} // namespace
 
-std::string TechniqueKey(const Technique& technique, const Effect& effect)
+uint64_t CompileKey(const Definitions& macros, const std::vector<std::string>& files)
 {
-    return technique.name + "@" + effect.file;
+    uint64_t hash = HashPiece(UNISHADE_COMPILER_ID, Hash({}));
+    const uint32_t format = kCacheFormat;
+    hash = Hash(std::string_view(reinterpret_cast<const char*>(&format), sizeof(format)), hash);
+    for (const auto& [name, value] : macros)
+        hash = HashPiece(value, HashPiece(name, hash));
+    for (const std::string& file : files)
+        hash = HashPiece(file, hash);
+    return hash;
+}
+
+bool CompileEffect(Effect& effect, const fs::path& path, const Definitions& definitions, const CompileOptions& options,
+                   const std::function<bool()>& cancelled)
+{
+    effect.path = path;
+    effect.file = path.filename().string();
+    const Definitions macros = EffectMacros(definitions, options);
+    fs::path entry;
+    if (!options.cacheDirectory.empty())
+    {
+        entry = CacheEntry(options, path, macros);
+        if (ReadCache(effect, entry, macros))
+        {
+            BuildUniforms(effect);
+            effect.compiled = effect.cached = true;
+            return true;
+        }
+        effect = {};
+        effect.path = path;
+        effect.file = path.filename().string();
+    }
+
+    const fs::file_time_type started = fs::file_time_type::clock::now();
+    reshadefx::preprocessor pp;
+    for (const auto& [name, value] : macros)
+        pp.add_macro_definition(name, value);
+    pp.add_include_path(path.parent_path());
+    for (const fs::path& include : options.includePaths)
+        pp.add_include_path(include);
+    pp.append_string(kCompatibilityMacros);
+
+    const bool preprocessed = pp.append_file(path);
+    effect.errors = pp.errors();
+    if (!preprocessed || (cancelled && cancelled()))
+        return false;
+
+    // Vulkan's clip space is upside down compared to Direct3D's, which effects are written for.
+    std::unique_ptr<reshadefx::codegen> codegen(reshadefx::create_codegen_spirv(true, false, false, false, true));
+    reshadefx::parser parser;
+    const bool parsed = parser.parse(pp.output(), codegen.get());
+    effect.errors += parser.errors();
+    if (!parsed)
+        return false;
+    effect.module = codegen->module();
+
+    for (const auto& [name, type] : effect.module.entry_points)
+    {
+        if (cancelled && cancelled())
+            return false;
+        std::string binary, assembly, errors;
+        if (!codegen->assemble_code_for_entry_point(name, binary, assembly, errors))
+        {
+            effect.errors += errors;
+            return false;
+        }
+        std::vector<uint32_t>& code = effect.spirv[name];
+        code.resize(binary.size() / 4);
+        std::memcpy(code.data(), binary.data(), code.size() * 4);
+    }
+    BuildUniforms(effect);
+    effect.compiled = true;
+
+    if (!entry.empty())
+    {
+        std::vector<std::string> paths{ path.string() };
+        for (const fs::path& included : pp.included_files())
+            paths.push_back(included.string());
+        std::sort(paths.begin() + 1, paths.end());
+        WriteCache(effect, entry, macros, std::move(paths), started);
+    }
+    return true;
+}
+
+Runtime::~Runtime()
+{
+    StopLoader();
+    JoinLoaders(true);
 }
 
 bool Runtime::Init(const Settings& initial)
 {
     settings = initial;
+    // The smallest format with stencil, which effects such as SMAA use to skip pixels. Depth goes unused.
+    for (VkFormat format : { VK_FORMAT_S8_UINT, VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT })
+        if (gpu.Supports(format, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        {
+            stencilFormat = format;
+            break;
+        }
+
+    // Pipelines made before, so effects start faster. Data from another driver or graphics card is left out:
+    // drivers should ignore it, but not all do.
+    std::string data;
+    ReadText(CacheDirectory() / "pipelines.bin", data);
+    uint32_t header[4]{};
+    if (data.size() >= sizeof(header) + VK_UUID_SIZE)
+        std::memcpy(header, data.data(), sizeof(header));
+    if (header[1] != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || header[2] != gpu.properties.vendorID || header[3] != gpu.properties.deviceID ||
+        std::memcmp(data.data() + sizeof(header), gpu.properties.pipelineCacheUUID, VK_UUID_SIZE) != 0)
+        data.clear();
+    VkPipelineCacheCreateInfo cacheInfo{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+    cacheInfo.initialDataSize = data.size();
+    cacheInfo.pInitialData = data.data();
+    if (vkCreatePipelineCache(gpu.device, &cacheInfo, nullptr, &pipelineCache) != VK_SUCCESS)
+        pipelineCache = VK_NULL_HANDLE;
+
     if (!gpu.CreateImage(depth, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
         !gpu.CreateImage(blank, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
     VkCommandBuffer commands = gpu.BeginCommands();
+    if (!commands)
+        return false;
     const VkClearColorValue zero{};
     const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     for (const GpuImage* image : { &depth, &blank })
@@ -347,41 +1123,64 @@ bool Runtime::Init(const Settings& initial)
         InitLayout(commands, *image);
         vkCmdClearColorImage(commands, image->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
     }
-    gpu.SubmitAndWait(commands);
-    return true;
+    return gpu.SubmitAndWait(commands);
 }
 
 void Runtime::Shutdown()
 {
     StopLoader();
+    JoinLoaders(true);
     if (!gpu.device)
         return;
     vkDeviceWaitIdle(gpu.device);
     DestroyAllGpu();
+    SavePipelineCache();
+    if (pipelineCache)
+        vkDestroyPipelineCache(gpu.device, pipelineCache, nullptr);
+    pipelineCache = VK_NULL_HANDLE;
     for (auto& [desc, sampler] : samplers)
         vkDestroySampler(gpu.device, sampler, nullptr);
     samplers.clear();
-    for (GpuImage* image : { &backbuffer, &color, &depth, &blank })
+    for (GpuImage* image : { &backbuffer, &color, &depth, &blank, &stencil })
         gpu.DestroyImage(*image);
     gpu.DestroyBuffer(staging);
     gpu.DestroyBuffer(readback);
 }
 
+void Runtime::SavePipelineCache()
+{
+    size_t size = 0;
+    if (!pipelineCache || vkGetPipelineCacheData(gpu.device, pipelineCache, &size, nullptr) != VK_SUCCESS || !size)
+        return;
+    std::string data(size, '\0');
+    if (vkGetPipelineCacheData(gpu.device, pipelineCache, &size, data.data()) == VK_SUCCESS)
+        WriteCacheFile(CacheDirectory() / "pipelines.bin", data.substr(0, size));
+}
+
+// Does not wait for the loader: it stops after the step it is on, and Update joins it once it has.
 void Runtime::StopLoader()
 {
-    cancel = true;
-    if (loader.joinable())
-        loader.join();
-    cancel = false;
-    loaderRunning = false;
     std::lock_guard lock(finishedMutex);
+    ++generation;
+    loaderRunning = false;
+    summaryPending = false;
     finished.clear();
+}
+
+void Runtime::JoinLoaders(bool wait)
+{
+    std::erase_if(loaders, [wait](const std::unique_ptr<Loader>& loader) {
+        if (!wait && !loader->done)
+            return false;
+        loader->thread.join();
+        return true;
+    });
 }
 
 bool Runtime::CreateTargets()
 {
     vkDeviceWaitIdle(gpu.device);
-    for (GpuImage* image : { &backbuffer, &color })
+    for (GpuImage* image : { &backbuffer, &color, &stencil })
         gpu.DestroyImage(*image);
     gpu.DestroyBuffer(staging);
     const VkImageUsageFlags transfer = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -392,50 +1191,84 @@ bool Runtime::CreateTargets()
         Log(LogLevel::Error, "Could not create %ux%u images for effects.", width, height);
         return false;
     }
+    // Without it, passes that use stencil run on every pixel, which ReShade accepts too.
+    if (stencilFormat != VK_FORMAT_UNDEFINED && !gpu.CreateImage(stencil, width, height, 1, stencilFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        Log(LogLevel::Warning, "Could not create a %ux%u stencil image for effects.", width, height);
     VkCommandBuffer commands = gpu.BeginCommands();
-    InitLayout(commands, backbuffer);
-    InitLayout(commands, color);
-    gpu.SubmitAndWait(commands);
-    return true;
+    if (!commands)
+        return false;
+    for (const GpuImage* image : { &backbuffer, &color, &stencil })
+        if (image->image)
+            InitLayout(commands, *image);
+    return gpu.SubmitAndWait(commands);
 }
 
 void Runtime::SetSize(uint32_t newWidth, uint32_t newHeight)
 {
+    const auto now = std::chrono::steady_clock::now();
     if (newWidth == width && newHeight == height)
+    {
+        if (resizePending && now - resizeTime >= kResizeDelay)
+            ReloadNow();
         return;
-    StopLoader();
+    }
+    // The first size applies right away. After that the picture goes on without effects until the size has
+    // stayed the same for a moment, so dragging a window's corner does not compile every effect for every size
+    // on the way.
+    const bool first = !width || !height;
     DestroyAllGpu();
     width = newWidth;
     height = newHeight;
     if (!CreateTargets())
     {
-        width = height = 0;
+        StopLoader();
+        width = height = compiledWidth = compiledHeight = 0;
+        resizePending = false;
         return;
     }
-    // Right away: the size changes before the frame records any pass, so nothing uses the old effects yet.
-    ReloadNow();
+    if (first)
+        ReloadNow();
+    else if (width == compiledWidth && height == compiledHeight)
+    {
+        // Back at the size the effects have.
+        resizePending = false;
+        loadedCount = totalCount.load();
+    }
+    else
+    {
+        // A load for the old size is no use anymore, and the effects it left out make that size need a new one.
+        if (loaderRunning)
+        {
+            StopLoader();
+            compiledWidth = compiledHeight = 0;
+        }
+        resizePending = true;
+        resizeTime = now;
+        loadedCount = 0;
+    }
 }
 
 void Runtime::ReloadNow()
 {
     reloadRequested = false;
+    resizePending = false;
     StopLoader();
     if (!width || !height)
         return;
     vkDeviceWaitIdle(gpu.device);
     DestroyAllGpu();
+    SavePipelineCache();
     effects.clear();
     techniques.clear();
+    sharedTextures.clear();
     textureFilesScanned = false;
+    compiledWidth = width;
+    compiledHeight = height;
 
     // Effects the preset uses compile first, so the picture has its effects as soon as possible.
-    const PresetIni preset(ReadFile(presetPath));
-    std::string value;
     std::set<std::string> used;
-    if (preset.Get("", "Techniques", value))
-        for (const std::string& technique : PresetIni::Split(value))
-            if (const size_t at = technique.find('@'); at != std::string::npos)
-                used.insert(Lowercase(technique.substr(at + 1)));
+    for (const std::string& file : PresetEffectFiles(presetIni))
+        used.insert(Lowercase(file));
 
     std::vector<CompileJob> jobs;
     std::set<std::string> seen;
@@ -448,11 +1281,12 @@ void Runtime::ReloadNow()
                 break;
             if (!it->is_regular_file(error) || Lowercase(it->path().extension().string()) != ".fx")
                 continue;
-            // Presets name effects by file, so the first file of a name wins, as in ReShade.
-            if (!seen.insert(Lowercase(it->path().filename().string())).second)
-                continue;
-            CompileJob job{ it->path(), {} };
             const std::string file = it->path().filename().string();
+            // Presets name effects by file, so the first file of a name wins, as in ReShade.
+            if (!seen.insert(Lowercase(file)).second)
+                continue;
+            CompileJob job{ it->path(), {}, used.count(Lowercase(file)) != 0 };
+            // The first definition of a name wins, so the effect's own come first.
             if (const auto found = presetDefinitions.effects.find(file); found != presetDefinitions.effects.end())
                 job.definitions = found->second;
             job.definitions.insert(job.definitions.end(), presetDefinitions.global.begin(), presetDefinitions.global.end());
@@ -460,9 +1294,7 @@ void Runtime::ReloadNow()
             jobs.push_back(std::move(job));
         }
     }
-    std::stable_sort(jobs.begin(), jobs.end(), [&used](const CompileJob& a, const CompileJob& b) {
-        return used.count(Lowercase(a.path.filename().string())) > used.count(Lowercase(b.path.filename().string()));
-    });
+    std::stable_sort(jobs.begin(), jobs.end(), [](const CompileJob& a, const CompileJob& b) { return a.decode > b.decode; });
 
     CompileOptions options;
     options.width = width;
@@ -470,6 +1302,7 @@ void Runtime::ReloadNow()
     options.vendor = gpu.properties.vendorID;
     options.device = gpu.properties.deviceID;
     options.includePaths = settings.effectPaths;
+    options.cacheDirectory = CacheDirectory() / "effects";
 
     loadedCount = 0;
     totalCount = jobs.size();
@@ -479,55 +1312,77 @@ void Runtime::ReloadNow()
         return;
     }
     Log(LogLevel::Info, "Compiling %zu effects for %ux%u...", jobs.size(), width, height);
+    const uint64_t current = generation;
     loaderRunning = true;
-    loader = std::thread([this, jobs = std::move(jobs), options] {
+    summaryPending = true;
+    Loader& loader = *loaders.emplace_back(std::make_unique<Loader>());
+    loader.thread = std::thread([this, &loader, jobs = std::move(jobs), options, texturePaths = settings.texturePaths, current] {
+        const auto cancelled = [this, current] { return generation != current; };
+        const TextureIndex textureIndex = ScanTextures(texturePaths);
         std::atomic<size_t> next = 0;
         std::vector<std::thread> workers;
         const unsigned count = std::max(1u, std::min(std::thread::hardware_concurrency(), 8u));
         for (unsigned i = 0; i < count; ++i)
             workers.emplace_back([&] {
-                for (size_t index; !cancel && (index = next++) < jobs.size();)
+                for (size_t index; !cancelled() && (index = next++) < jobs.size();)
                 {
                     Effect effect;
-                    Compile(effect, jobs[index], options);
-                    ++loadedCount;
+                    CompileEffect(effect, jobs[index].path, jobs[index].definitions, options, cancelled);
+                    if (effect.compiled && jobs[index].decode)
+                        DecodeImages(effect, textureIndex, cancelled);
                     std::lock_guard lock(finishedMutex);
+                    if (cancelled())
+                        return;
+                    ++loadedCount;
                     finished.push_back(std::move(effect));
                 }
             });
         for (std::thread& worker : workers)
             worker.join();
-        loaderRunning = false;
+        if (!cancelled())
+            PruneCache(options.cacheDirectory);
+        {
+            std::lock_guard lock(finishedMutex);
+            if (!cancelled())
+                loaderRunning = false;
+        }
+        loader.done = true;
     });
 }
 
 void Runtime::Update()
 {
+    JoinLoaders(false);
+    if (resizePending && std::chrono::steady_clock::now() - resizeTime >= kResizeDelay)
+        ReloadNow();
     if (reloadRequested)
         ReloadNow();
     std::deque<Effect> arrived;
+    bool running;
     {
         std::lock_guard lock(finishedMutex);
         arrived.swap(finished);
+        running = loaderRunning;
     }
-    if (arrived.empty())
-        return;
     for (Effect& effect : arrived)
         AddEffect(std::move(effect));
-    SortTechniques();
-    if (!loaderRunning)
+    if (!arrived.empty())
+        SortTechniques();
+    // The loader is done once it stops running and everything it finished has been taken.
+    if (summaryPending && !running)
     {
-        std::lock_guard lock(finishedMutex);
-        if (finished.empty())
+        summaryPending = false;
+        size_t failed = 0, cached = 0;
+        for (const Effect& effect : effects)
         {
-            size_t failed = 0;
-            for (const Effect& effect : effects)
-                failed += !effect.compiled;
-            Log(LogLevel::Info, "Effects loaded: %zu compiled, %zu failed.", effects.size() - failed, failed);
-            for (const std::string& missing : MissingTechniques())
-                Report(LogLevel::Warning, "The preset uses %s, which is not installed.", missing.c_str());
+            failed += !effect.compiled;
+            cached += effect.cached;
         }
+        Log(LogLevel::Info, "Effects loaded: %zu compiled (%zu from the cache), %zu failed.", effects.size() - failed, cached, failed);
+        for (const std::string& missing : MissingTechniques())
+            Report(LogLevel::Warning, "The preset uses %s, which is not installed.", missing.c_str());
     }
+    PrepareEffects(kPrepareBudget);
 }
 
 void Runtime::AddEffect(Effect&& effect)
@@ -543,6 +1398,7 @@ void Runtime::AddEffect(Effect&& effect)
     Effect& added = effects.back();
     if (!added.compiled)
         return;
+    ShareTextures(added, index);
     for (size_t i = 0; i < added.module.techniques.size(); ++i)
     {
         const reshadefx::technique& declared = added.module.techniques[i];
@@ -552,6 +1408,8 @@ void Runtime::AddEffect(Effect&& effect)
         technique.tooltip = AnnotationString(declared.annotations, "ui_tooltip");
         technique.hidden = AnnotationInt(declared.annotations, "hidden", 0) != 0;
         technique.enabledByDefault = AnnotationInt(declared.annotations, "enabled", 0) != 0;
+        technique.enabledInScreenshot = AnnotationInt(declared.annotations, "enabled_in_screenshot", 1) != 0;
+        technique.timeout = std::max(0, AnnotationInt(declared.annotations, "timeout", 0));
         technique.effect = index;
         technique.index = i;
         techniques.push_back(std::move(technique));
@@ -559,47 +1417,99 @@ void Runtime::AddEffect(Effect&& effect)
     ApplyPreset(added, index);
 }
 
-// Presets list the techniques that are on and, optionally, the order of all of them. Techniques neither lists
-// keep their file's order and otherwise go by name, as in ReShade.
+// Textures of the same name are one texture in every effect that declares them alike, and pooled ones are shared
+// with another effect's of the same kind, as in ReShade. Either way it is made for every use any of them has.
+void Runtime::ShareTextures(Effect& effect, size_t index)
+{
+    for (const reshadefx::texture& texture : effect.module.textures)
+    {
+        if (!texture.semantic.empty())
+            continue;
+        const std::string source = AnnotationString(texture.annotations, "source");
+        const bool pooled = AnnotationInt(texture.annotations, "pooled", 0) != 0;
+        const auto alike = [&](const SharedTexture& shared) {
+            const reshadefx::texture_desc& desc = shared.desc;
+            return desc.width == texture.width && desc.height == texture.height && desc.depth == texture.depth && desc.levels == texture.levels &&
+                   desc.format == texture.format && desc.type == texture.type && shared.source == source;
+        };
+        std::string key = texture.unique_name;
+        auto found = sharedTextures.find(key);
+        if (found != sharedTextures.end() && !alike(found->second))
+        {
+            // Another effect has a texture of the same name that differs, so this one gets its own.
+            key += "@" + effect.file;
+            found = sharedTextures.find(key);
+        }
+        if (found == sharedTextures.end() && pooled)
+            found = std::find_if(sharedTextures.begin(), sharedTextures.end(), [&](const auto& entry) {
+                const SharedTexture& shared = entry.second;
+                return shared.pooled && alike(shared) && std::find(shared.users.begin(), shared.users.end(), index) == shared.users.end();
+            });
+        if (found == sharedTextures.end())
+        {
+            found = sharedTextures.emplace(key, SharedTexture{}).first;
+            found->second.desc = texture;
+            found->second.source = source;
+            found->second.pooled = pooled;
+        }
+        SharedTexture& shared = found->second;
+        shared.renderTarget |= texture.render_target;
+        shared.storage |= texture.storage_access;
+        if (std::find(shared.users.begin(), shared.users.end(), index) == shared.users.end())
+            shared.users.push_back(index);
+        effect.textures[texture.unique_name] = found->first;
+        // Images decoded with the effect wait for the texture to be made.
+        if (const auto image = effect.images.find(texture.unique_name); image != effect.images.end() && !shared.image.image &&
+                                                                         shared.loaded.pixels.empty() && shared.loaded.error.empty())
+            shared.loaded = std::move(image->second);
+    }
+    effect.images.clear();
+}
+
 void Runtime::SortTechniques()
 {
-    const auto rank = [this](const Technique& technique) {
-        const std::string key = TechniqueKey(technique, effects[technique.effect]);
-        auto it = std::find(sorting.begin(), sorting.end(), key);
-        if (it == sorting.end())
-            it = std::find(sorting.begin(), sorting.end(), technique.name);
-        return static_cast<size_t>(it - sorting.begin());
-    };
-    std::stable_sort(techniques.begin(), techniques.end(), [&](const Technique& a, const Technique& b) {
-        const size_t left = rank(a), right = rank(b);
-        if (left != right)
-            return left < right;
-        if (a.effect == b.effect)
-            return a.index < b.index;
-        return Lowercase(a.label.empty() ? a.name : a.label) < Lowercase(b.label.empty() ? b.name : b.label);
-    });
+    OrderTechniques(techniques, effects, sorting);
+}
+
+void Runtime::Enable(Technique& technique, bool enabled)
+{
+    technique.enabled = enabled;
+    technique.timeLeft = enabled ? static_cast<float>(technique.timeout) : 0.0f;
 }
 
 void Runtime::ApplyPreset(Effect& effect, size_t effectIndex)
 {
-    const PresetIni preset(ReadFile(presetPath));
     std::string value;
     std::vector<std::string> enabled;
-    if (preset.Get("", "Techniques", value))
+    if (presetIni.Get("", "Techniques", value))
         enabled = PresetIni::Split(value);
     for (Technique& technique : techniques)
         if (technique.effect == effectIndex)
         {
             const std::string key = TechniqueKey(technique, effect);
-            technique.enabled = std::find(enabled.begin(), enabled.end(), key) != enabled.end() ||
-                                std::find(enabled.begin(), enabled.end(), technique.name) != enabled.end() ||
-                                (technique.hidden && technique.enabledByDefault);
+            Enable(technique, std::find(enabled.begin(), enabled.end(), key) != enabled.end() ||
+                                  std::find(enabled.begin(), enabled.end(), technique.name) != enabled.end() ||
+                                  (technique.hidden && technique.enabledByDefault));
+            // The preset's shortcut, as ReShade writes it, or the one the effect suggests in older ReShade's way.
+            technique.toggleKeyInPreset = presetIni.Get("", "Key" + key, value) || presetIni.Get("", "Key" + technique.name, value);
+            if (technique.toggleKeyInPreset)
+                technique.toggleKey = ParseKey(value);
+            else
+            {
+                const auto& annotations = effect.module.techniques[technique.index].annotations;
+                technique.toggleKey = { static_cast<unsigned>(std::max(0, AnnotationInt(annotations, "toggle", 0))),
+                                        AnnotationInt(annotations, "togglectrl", 0) != 0, AnnotationInt(annotations, "toggleshift", 0) != 0,
+                                        AnnotationInt(annotations, "togglealt", 0) != 0 };
+            }
         }
 
     for (const Uniform& uniform : effect.uniforms)
     {
+        // Values the host sets keep theirs, such as a key's toggle state.
+        if (!uniform.source.empty())
+            continue;
         ResetValue(effect, uniform);
-        if (!uniform.source.empty() || !preset.Get(effect.file, uniform.name, value))
+        if (!presetIni.Get(effect.file, uniform.name, value))
             continue;
         const std::vector<std::string> items = PresetIni::Split(value);
         const size_t count = std::min(items.size(), ComponentCount(uniform));
@@ -624,20 +1534,20 @@ bool Runtime::LoadPreset(const fs::path& path)
 {
     presetPath = path;
     dirty = false;
-    const PresetIni preset(ReadFile(path));
+    presetIni = PresetIni(ReadFile(path));
     PresetDefinitions definitions;
     std::string value;
-    if (preset.Get("", "PreprocessorDefinitions", value))
+    if (presetIni.Get("", "PreprocessorDefinitions", value))
         definitions.global = ParseDefinitions(value);
     std::vector<std::string> sortingList;
-    if (preset.Get("", "TechniqueSorting", value))
+    if (presetIni.Get("", "TechniqueSorting", value))
         sortingList = PresetIni::Split(value);
-    if (sortingList.empty() && preset.Get("", "Techniques", value))
+    if (sortingList.empty() && presetIni.Get("", "Techniques", value))
         sortingList = PresetIni::Split(value);
     sorting = sortingList;
 
-    for (const std::string& file : preset.SectionNames())
-        if (preset.Get(file, "PreprocessorDefinitions", value))
+    for (const std::string& file : presetIni.SectionNames())
+        if (presetIni.Get(file, "PreprocessorDefinitions", value))
             definitions.effects[file] = ParseDefinitions(value);
 
     if (definitions != presetDefinitions || effects.empty())
@@ -657,7 +1567,12 @@ bool Runtime::SavePreset()
 {
     if (presetPath.empty())
         return false;
-    PresetIni preset(ReadFile(presetPath));
+    // The file as it is now, so only what the effects change in it changes.
+    return WritePreset(presetPath, PresetIni(ReadFile(presetPath)));
+}
+
+bool Runtime::WritePreset(const fs::path& path, PresetIni preset)
+{
     std::vector<std::string> enabled, order;
     std::set<size_t> used;
     for (const Technique& technique : techniques)
@@ -669,6 +1584,8 @@ bool Runtime::SavePreset()
             enabled.push_back(key);
             used.insert(technique.effect);
         }
+        if (technique.toggleKeyInPreset)
+            preset.Set("", "Key" + key, FormatKey(technique.toggleKey));
     }
     // Techniques whose effect did not load stay in the preset, so it still works where they are installed.
     std::string value;
@@ -678,7 +1595,6 @@ bool Runtime::SavePreset()
                 enabled.push_back(key);
     preset.Set("", "Techniques", PresetIni::Join(enabled));
     preset.Set("", "TechniqueSorting", PresetIni::Join(order));
-    sorting = order;
 
     for (size_t index = 0; index < effects.size(); ++index)
     {
@@ -708,31 +1624,31 @@ bool Runtime::SavePreset()
             preset.Set(effect.file, uniform.name, text);
         }
     }
-    if (!WriteFile(presetPath, preset.Text()))
+    if (!WriteFile(path, preset.Text()))
     {
-        Log(LogLevel::Warning, "Could not save the preset %s.", presetPath.c_str());
+        Log(LogLevel::Warning, "Could not save the preset %s.", path.c_str());
         return false;
     }
+    sorting = order;
+    presetIni = std::move(preset);
     dirty = false;
     return true;
 }
 
 bool Runtime::SavePresetAs(const fs::path& path)
 {
-    const fs::path previous = presetPath;
+    // The current preset with the effects as they are, so its definitions and shortcuts come along.
+    if (!WritePreset(path, presetIni))
+        return false;
     presetPath = path;
-    if (SavePreset())
-        return true;
-    presetPath = previous;
-    return false;
+    return true;
 }
 
 std::vector<std::string> Runtime::MissingTechniques() const
 {
-    const PresetIni preset(ReadFile(presetPath));
     std::string value;
     std::vector<std::string> missing;
-    if (!preset.Get("", "Techniques", value))
+    if (!presetIni.Get("", "Techniques", value))
         return missing;
     for (const std::string& key : PresetIni::Split(value))
     {
@@ -751,7 +1667,7 @@ void Runtime::SetEnabled(size_t index, bool enabled)
 {
     if (index < techniques.size() && techniques[index].enabled != enabled)
     {
-        techniques[index].enabled = enabled;
+        Enable(techniques[index], enabled);
         dirty = true;
     }
 }
@@ -875,10 +1791,38 @@ void Runtime::ResetValue(Effect& effect, const Uniform& uniform)
     }
 }
 
-// Values the host sets every frame, named by the source annotation.
+// Technique shortcuts. As in ReShade, they wait while effects load and need the modifiers exactly.
+void Runtime::HandleToggleKeys()
+{
+    if (Loading())
+        return;
+    const auto down = [this](std::initializer_list<int> keys) {
+        return std::any_of(keys.begin(), keys.end(), [this](int key) { return input.keysDown[key]; });
+    };
+    const bool ctrl = down({ 0x11, 0xA2, 0xA3 }), shift = down({ 0x10, 0xA0, 0xA1 }), alt = down({ 0x12, 0xA4, 0xA5 });
+    for (Technique& technique : techniques)
+    {
+        const std::array<unsigned, 4>& key = technique.toggleKey;
+        if (key[0] == 0 || key[0] >= input.keysPressed.size() || !input.keysPressed[key[0]] || (key[1] != 0) != ctrl || (key[2] != 0) != shift ||
+            (key[3] != 0) != alt)
+            continue;
+        Enable(technique, !technique.enabled);
+        dirty = true;
+    }
+}
+
+// Values the host sets every frame, named by the source annotation, as ReShade 6.8 sets them.
 void Runtime::UpdateSpecialUniforms(Effect& effect)
 {
     static std::mt19937 random(std::random_device{}());
+    // overlay_active and overlay_hovered: 1 + the index of the effect's own variable whose control is in use or
+    // under the cursor, or 0. When the menu does not say which, any control counts as the first.
+    const auto control = [&effect](const Uniform* uniform, bool any) {
+        for (size_t i = 0; i < effect.uniforms.size(); ++i)
+            if (&effect.uniforms[i] == uniform)
+                return static_cast<int>(i + 1);
+        return !uniform && any ? 1 : 0;
+    };
     for (const Uniform& uniform : effect.uniforms)
     {
         if (uniform.source.empty())
@@ -898,7 +1842,7 @@ void Runtime::UpdateSpecialUniforms(Effect& effect)
             }
             else
             {
-                const int value = static_cast<int>(frameCount);
+                const int value = uniform.type.is_boolean() ? frameCount % 2 == 0 : static_cast<int>(frameCount);
                 SetValue(effect, uniform, &value, 1);
             }
         }
@@ -918,13 +1862,13 @@ void Runtime::UpdateSpecialUniforms(Effect& effect)
         else if (source == "random")
         {
             const int low = AnnotationInt(annotations, "min", 0), high = AnnotationInt(annotations, "max", 32767);
-            const int value = low + static_cast<int>(random() % static_cast<unsigned>(std::max(high - low + 1, 1)));
+            const int value = low + static_cast<int>(random() % static_cast<unsigned>(std::abs(high - low) + 1));
             SetValue(effect, uniform, &value, 1);
         }
         else if (source == "pingpong")
         {
             const float low = AnnotationFloat(annotations, "min", 0.0f), high = AnnotationFloat(annotations, "max", 1.0f);
-            const float stepLow = AnnotationFloat(annotations, "step", 1.0f, 0), stepHigh = AnnotationFloat(annotations, "step", 0.0f, 1);
+            const float stepLow = AnnotationFloat(annotations, "step", 0.0f, 0), stepHigh = AnnotationFloat(annotations, "step", 0.0f, 1);
             const float smoothing = AnnotationFloat(annotations, "smoothing", 0.0f);
             float value[2];
             GetValue(effect, uniform, value, 2);
@@ -944,9 +1888,25 @@ void Runtime::UpdateSpecialUniforms(Effect& effect)
             }
             SetValue(effect, uniform, value, 2);
         }
-        else if (source == "overlay_open")
+        else if (source == "key" || source == "mousebutton")
         {
-            const int value = menuOpen;
+            // A Windows virtual-key code, or a mouse button from 0 to 4. ReShade leaves the first codes, which are
+            // the mouse's, to mousebutton.
+            const bool key = source == "key";
+            const int code = AnnotationInt(annotations, "keycode", 0);
+            if (key ? code <= 7 || code >= 256 : code < 0 || code >= 5)
+                continue;
+            const bool isDown = key ? input.keysDown[code] : input.buttonsDown[code];
+            const bool pressed = key ? input.keysPressed[code] : input.buttonsPressed[code];
+            const std::string mode = AnnotationString(annotations, "mode");
+            int value = isDown;
+            if (mode == "toggle" || AnnotationInt(annotations, "toggle", 0) != 0)
+            {
+                GetValue(effect, uniform, &value, 1);
+                value = pressed ? !value : value != 0;
+            }
+            else if (mode == "press")
+                value = pressed;
             SetValue(effect, uniform, &value, 1);
         }
         else if (source == "mousepoint")
@@ -954,11 +1914,46 @@ void Runtime::UpdateSpecialUniforms(Effect& effect)
             const float value[2] = { mouseX, mouseY };
             SetValue(effect, uniform, value, 2);
         }
-        else
+        else if (source == "mousedelta")
         {
-            // Keys, the mouse buttons and wheel, and depth, which the host cannot provide, stay zero.
-            ResetValue(effect, uniform);
+            const float value[2] = { input.cursorDeltaX, input.cursorDeltaY };
+            SetValue(effect, uniform, value, 2);
         }
+        else if (source == "mousewheel")
+        {
+            const float low = AnnotationFloat(annotations, "min", 0.0f), high = AnnotationFloat(annotations, "max", 0.0f);
+            float step = AnnotationFloat(annotations, "step", 0.0f);
+            if (step == 0.0f)
+                step = 1.0f;
+            float value[2];
+            GetValue(effect, uniform, value, 2);
+            value[1] = input.wheelDelta;
+            value[0] += value[1] * step;
+            if (low != high)
+                value[0] = std::clamp(value[0], std::min(low, high), std::max(low, high));
+            SetValue(effect, uniform, value, 2);
+        }
+        else if (source == "overlay_open" || source == "ui_open")
+        {
+            const int value = menuOpen;
+            SetValue(effect, uniform, &value, 1);
+        }
+        else if (source == "overlay_active" || source == "ui_active")
+        {
+            const int value = menuOpen ? control(input.activeUniform, input.overlayActive) : 0;
+            SetValue(effect, uniform, &value, 1);
+        }
+        else if (source == "overlay_hovered" || source == "ui_hovered")
+        {
+            const int value = menuOpen ? control(input.hoveredUniform, input.overlayHovered) : 0;
+            SetValue(effect, uniform, &value, 1);
+        }
+        else if (source == "screenshot")
+        {
+            const int value = input.screenshot;
+            SetValue(effect, uniform, &value, 1);
+        }
+        // Others, such as depth the host cannot provide, stay zero.
     }
 }
 
@@ -991,7 +1986,8 @@ VkSampler Runtime::Sampler(const reshadefx::sampler_desc& desc)
     info.maxLod = std::clamp(desc.max_lod, info.minLod, 1000.0f);
     info.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
     VkSampler sampler = VK_NULL_HANDLE;
-    vkCreateSampler(gpu.device, &info, nullptr, &sampler);
+    if (vkCreateSampler(gpu.device, &info, nullptr, &sampler) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
     samplers.emplace_back(std::move(key), sampler);
     return sampler;
 }
@@ -1000,27 +1996,60 @@ fs::path Runtime::FindTexture(const std::string& source)
 {
     if (!textureFilesScanned)
     {
-        textureFiles.clear();
-        for (const fs::path& root : settings.texturePaths)
-        {
-            std::error_code error;
-            for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, error), end; it != end; it.increment(error))
-                if (!error && it->is_regular_file(error))
-                    textureFiles.emplace_back(Lowercase(it->path().lexically_relative(root).generic_string()), it->path());
-        }
+        textureFiles = ScanTextures(settings.texturePaths);
         textureFilesScanned = true;
     }
-    std::string wanted = Lowercase(source);
-    std::replace(wanted.begin(), wanted.end(), '\\', '/');
-    for (const auto& [relative, path] : textureFiles)
-        if (relative == wanted)
-            return path;
-    // Effects in subfolders often name textures without the folder they are in.
-    const std::string name = fs::path(wanted).filename().string();
-    for (const auto& [relative, path] : textureFiles)
-        if (fs::path(relative).filename() == name)
-            return path;
-    return {};
+    return FindTextureIn(textureFiles, source);
+}
+
+VkCommandBuffer Runtime::SetupCommands()
+{
+    if (!setup.commands)
+        setup.commands = gpu.BeginCommands();
+    return setup.commands;
+}
+
+// Submits what was recorded for new textures without waiting. Frames are submitted later on the same queue and
+// start with a barrier, which orders them after it.
+void Runtime::SubmitSetup()
+{
+    if (!setup.commands)
+        return;
+    VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &setup.commands;
+    VkResult result = vkEndCommandBuffer(setup.commands);
+    if (result == VK_SUCCESS)
+        result = vkCreateFence(gpu.device, &fenceInfo, nullptr, &setup.fence);
+    if (result == VK_SUCCESS)
+        result = vkQueueSubmit(gpu.queue, 1, &submit, setup.fence);
+    setups.push_back(std::move(setup));
+    setup = {};
+    if (result == VK_SUCCESS)
+        return;
+    // The new textures never got their first layout, so no effect may use them.
+    if (result == VK_ERROR_DEVICE_LOST)
+        gpu.ReportLost();
+    else
+        Report(LogLevel::Warning, "The graphics card could not prepare effects (Vulkan error %d).", result);
+    DestroyAllGpu();
+    for (Effect& effect : effects)
+        effect.gpuFailed = effect.compiled;
+}
+
+void Runtime::ReleaseSetups(bool wait)
+{
+    std::erase_if(setups, [wait](Setup& done) {
+        if (!wait && done.fence && vkGetFenceStatus(gpu.device, done.fence) == VK_NOT_READY)
+            return false;
+        if (done.fence)
+            vkDestroyFence(gpu.device, done.fence, nullptr);
+        vkFreeCommandBuffers(gpu.device, gpu.commandPool, 1, &done.commands);
+        for (GpuBuffer& buffer : done.buffers)
+            gpu.DestroyBuffer(buffer);
+        return true;
+    });
 }
 
 GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
@@ -1032,37 +2061,32 @@ GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
     if (!texture.semantic.empty())
         return &blank;
 
-    std::string key = texture.unique_name;
-    if (const auto found = sharedTextures.find(key); found != sharedTextures.end())
-    {
-        const reshadefx::texture_desc& desc = found->second.desc;
-        if (desc.width == texture.width && desc.height == texture.height && desc.depth == texture.depth && desc.levels == texture.levels &&
-            desc.format == texture.format && desc.type == texture.type)
-            return &found->second.image;
-        // Another effect has a texture of the same name that differs, so this one gets its own.
-        key += "@" + effect.file;
-        if (const auto own = sharedTextures.find(key); own != sharedTextures.end())
-            return &own->second.image;
-    }
+    const auto key = effect.textures.find(texture.unique_name);
+    const auto found = key == effect.textures.end() ? sharedTextures.end() : sharedTextures.find(key->second);
+    if (found == sharedTextures.end())
+        return nullptr;
+    SharedTexture& shared = found->second;
+    GpuImage& image = shared.image;
+    if (image.image && (!shared.renderTarget || image.target) && (!shared.storage || !image.storage.empty()))
+        return &image;
 
-    const VkFormat format = TextureFormat(texture.format);
-    const VkImageType type = texture.type == reshadefx::texture_type::texture_1d ? VK_IMAGE_TYPE_1D
-                           : texture.type == reshadefx::texture_type::texture_3d ? VK_IMAGE_TYPE_3D
-                                                                                 : VK_IMAGE_TYPE_2D;
+    const reshadefx::texture_desc& desc = shared.desc;
+    const VkFormat format = TextureFormat(desc.format);
+    const VkImageType type = ImageType(desc.type);
     // Render targets are 2D in ReShade too.
-    if (format == VK_FORMAT_UNDEFINED || (texture.render_target && type != VK_IMAGE_TYPE_2D))
+    if (format == VK_FORMAT_UNDEFINED || (shared.renderTarget && type != VK_IMAGE_TYPE_2D))
     {
         Log(LogLevel::Warning, "%s: texture %s has a format or shape the host does not support.", effect.file.c_str(), texture.name.c_str());
         return nullptr;
     }
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VkFormatFeatureFlags features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-    if (texture.render_target)
+    if (shared.renderTarget)
     {
         usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         features |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
     }
-    if (texture.storage_access)
+    if (shared.storage)
     {
         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         features |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
@@ -1073,74 +2097,77 @@ GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
         return nullptr;
     }
 
-    SharedTexture& shared = sharedTextures[key];
-    shared.desc = texture;
-    const uint32_t levels = std::max<uint32_t>(1, texture.levels);
-    if (!gpu.CreateImage(shared.image, texture.width, texture.height, levels, format, usage, type, texture.depth))
+    if (image.image)
     {
-        sharedTextures.erase(key);
+        // An effect that came later uses the texture in a new way, so it is made again for every use, as ReShade
+        // does. The effects that use it already make their objects again too.
+        SubmitSetup();
+        vkDeviceWaitIdle(gpu.device);
+        ReleaseSetups(true);
+        for (size_t user : shared.users)
+            if (&effects[user] != &effect)
+                DestroyGpu(effects[user]);
+        gpu.DestroyImage(image);
+        texturesRemade = true;
+    }
+
+    const uint32_t levels = std::max<uint32_t>(1, desc.levels);
+    VkCommandBuffer commands = SetupCommands();
+    if (!commands || !gpu.CreateImage(image, desc.width, desc.height, levels, format, usage, type, desc.depth))
+    {
+        gpu.DestroyImage(image);
         Log(LogLevel::Warning, "%s: could not create texture %s.", effect.file.c_str(), texture.name.c_str());
         return nullptr;
     }
-
-    VkCommandBuffer commands = gpu.BeginCommands();
-    InitLayout(commands, shared.image);
+    InitLayout(commands, image);
     const VkClearColorValue zero{};
     const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1 };
-    vkCmdClearColorImage(commands, shared.image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+    vkCmdClearColorImage(commands, image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+    if (shared.source.empty())
+        return &image;
 
+    // Decoded before, unless the texture is made again for another use.
+    TextureImage loaded = std::move(shared.loaded);
+    shared.loaded = {};
+    if (loaded.pixels.empty() && loaded.error.empty())
+        loaded = DecodeTexture(desc, FindTexture(shared.source));
     GpuBuffer upload;
-    for (const reshadefx::annotation& annotation : texture.annotations)
+    if (!loaded.error.empty())
+        Log(LogLevel::Warning, "%s: could not load %s into texture %s: %s.", effect.file.c_str(), shared.source.c_str(), texture.name.c_str(),
+            loaded.error.c_str());
+    else if (gpu.CreateBuffer(upload, loaded.pixels.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true))
     {
-        if (annotation.name != "source" || annotation.type.base != reshadefx::type::t_string || type != VK_IMAGE_TYPE_2D)
-            continue;
-        const fs::path file = FindTexture(annotation.value.string_data);
-        int w = 0, h = 0, channels = 0;
-        stbi_uc* pixels = file.empty() ? nullptr : stbi_load(file.c_str(), &w, &h, &channels, 4);
-        if (!pixels)
-        {
-            Log(LogLevel::Warning, "%s: could not load texture %s.", effect.file.c_str(), annotation.value.string_data.c_str());
-            break;
-        }
-        // Resized to the size the effect declares, like ReShade does.
-        const uint32_t tw = texture.width, th = texture.height;
-        const uint32_t pixelSize = texture.format == reshadefx::texture_format::r8 ? 1 : texture.format == reshadefx::texture_format::rg8 ? 2 : 4;
-        if (texture.format != reshadefx::texture_format::rgba8 && pixelSize == 4)
-        {
-            Log(LogLevel::Warning, "%s: texture %s must be RGBA8 to load an image.", effect.file.c_str(), texture.name.c_str());
-            stbi_image_free(pixels);
-            break;
-        }
-        std::vector<uint8_t> data(size_t(tw) * th * pixelSize);
-        for (uint32_t y = 0; y < th; ++y)
-            for (uint32_t x = 0; x < tw; ++x)
-            {
-                const uint32_t sx = std::min<uint32_t>(x * w / tw, w - 1), sy = std::min<uint32_t>(y * h / th, h - 1);
-                std::memcpy(&data[(size_t(y) * tw + x) * pixelSize], &pixels[(size_t(sy) * w + sx) * 4], pixelSize);
-            }
-        stbi_image_free(pixels);
-        if (!gpu.CreateBuffer(upload, data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true))
-            break;
-        std::memcpy(upload.mapped, data.data(), data.size());
+        std::memcpy(upload.mapped, loaded.pixels.data(), loaded.pixels.size());
         FullBarrier(commands);
         VkBufferImageCopy copy{};
         copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copy.imageExtent = { tw, th, 1 };
-        vkCmdCopyBufferToImage(commands, upload.buffer, shared.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        copy.imageExtent = { image.width, image.height, image.depth };
+        vkCmdCopyBufferToImage(commands, upload.buffer, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
         FullBarrier(commands);
-        GenerateMipmaps(commands, shared.image);
-        break;
+        GenerateMipmaps(commands, image);
+        setup.buffers.push_back(upload);
     }
-    gpu.SubmitAndWait(commands);
-    gpu.DestroyBuffer(upload);
-    return &shared.image;
+    return &image;
 }
 
 void Runtime::GenerateMipmaps(VkCommandBuffer commands, const GpuImage& image)
 {
-    if (image.levels <= 1 || !gpu.Supports(image.format, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
-                                                              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+    if (image.levels <= 1)
         return;
+    // Formats that cannot be filtered, such as integer ones, scale by picking pixels instead. Those that cannot
+    // be scaled at all keep empty mipmaps.
+    VkFilter filter = VK_FILTER_LINEAR;
+    if (!gpu.Supports(image.format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+        filter = VK_FILTER_NEAREST;
+    if (!gpu.Supports(image.format, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT))
+    {
+        if (std::find(mipmapWarnings.begin(), mipmapWarnings.end(), image.format) == mipmapWarnings.end())
+        {
+            mipmapWarnings.push_back(image.format);
+            Log(LogLevel::Warning, "The graphics card cannot make mipmaps of format %d, so effects see them empty.", image.format);
+        }
+        return;
+    }
     for (uint32_t level = 1; level < image.levels; ++level)
     {
         VkImageBlit blit{};
@@ -1149,7 +2176,7 @@ void Runtime::GenerateMipmaps(VkCommandBuffer commands, const GpuImage& image)
                                std::max(1, int(image.depth >> (level - 1))) };
         blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 };
         blit.dstOffsets[1] = { std::max(1, int(image.width >> level)), std::max(1, int(image.height >> level)), std::max(1, int(image.depth >> level)) };
-        vkCmdBlitImage(commands, image.image, VK_IMAGE_LAYOUT_GENERAL, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
+        vkCmdBlitImage(commands, image.image, VK_IMAGE_LAYOUT_GENERAL, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, filter);
         FullBarrier(commands);
     }
 }
@@ -1198,7 +2225,8 @@ bool Runtime::CreateGpu(Effect& effect)
     poolInfo.maxSets = std::max(1u, passCount * 3);
     poolInfo.poolSizeCount = static_cast<uint32_t>(sizes.size());
     poolInfo.pPoolSizes = sizes.data();
-    vkCreateDescriptorPool(gpu.device, &poolInfo, nullptr, &g.pool);
+    if (vkCreateDescriptorPool(gpu.device, &poolInfo, nullptr, &g.pool) != VK_SUCCESS)
+        return fail("out of descriptors", effect.file);
 
     const auto findTexture = [&module](const std::string& uniqueName) -> const reshadefx::texture* {
         for (const reshadefx::texture& texture : module.textures)
@@ -1209,6 +2237,8 @@ bool Runtime::CreateGpu(Effect& effect)
 
     g.techniques.resize(module.techniques.size());
     for (size_t t = 0; t < module.techniques.size(); ++t)
+    {
+        bool stencilCleared = false;
         for (const reshadefx::pass& pass : module.techniques[t].passes)
         {
             PassGpu& p = g.techniques[t].emplace_back();
@@ -1245,7 +2275,7 @@ bool Runtime::CreateGpu(Effect& effect)
                         }
                         else if (texture)
                             image = Texture(*texture, effect);
-                        if (!image || image == &blank || image == &depth)
+                        if (!image || image == &blank || image == &depth || !image->target)
                             return fail("a render target is missing", where);
                     }
                     targets.push_back(image);
@@ -1272,12 +2302,14 @@ bool Runtime::CreateGpu(Effect& effect)
                 VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
                 layoutInfo.bindingCount = static_cast<uint32_t>(bindings[set].size());
                 layoutInfo.pBindings = bindings[set].data();
-                vkCreateDescriptorSetLayout(gpu.device, &layoutInfo, nullptr, &p.setLayouts[set]);
+                if (vkCreateDescriptorSetLayout(gpu.device, &layoutInfo, nullptr, &p.setLayouts[set]) != VK_SUCCESS)
+                    return fail("out of memory", where);
             }
             VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
             layoutInfo.setLayoutCount = 3;
             layoutInfo.pSetLayouts = p.setLayouts;
-            vkCreatePipelineLayout(gpu.device, &layoutInfo, nullptr, &p.layout);
+            if (vkCreatePipelineLayout(gpu.device, &layoutInfo, nullptr, &p.layout) != VK_SUCCESS)
+                return fail("out of memory", where);
 
             VkDescriptorSetAllocateInfo allocation{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
             allocation.descriptorPool = g.pool;
@@ -1310,6 +2342,8 @@ bool Runtime::CreateGpu(Effect& effect)
                     image = &blank;
                 VkDescriptorImageInfo info{};
                 info.sampler = Sampler(sampler);
+                if (!info.sampler)
+                    return fail("out of samplers", where);
                 info.imageView = binding.srgb ? image->srgbView : image->view;
                 info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 images.push_back(info);
@@ -1354,7 +2388,7 @@ bool Runtime::CreateGpu(Effect& effect)
                 info.stage.module = shader->second;
                 info.stage.pName = pass.cs_entry_point.c_str();
                 info.layout = p.layout;
-                if (vkCreateComputePipelines(gpu.device, VK_NULL_HANDLE, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
+                if (vkCreateComputePipelines(gpu.device, pipelineCache, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
                     return fail("the graphics card rejected a compute shader", where);
                 p.dispatch[0] = std::max(1u, pass.viewport_width);
                 p.dispatch[1] = std::max(1u, pass.viewport_height);
@@ -1362,8 +2396,28 @@ bool Runtime::CreateGpu(Effect& effect)
                 continue;
             }
 
+            VkFramebufferCreateInfo framebufferInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            framebufferInfo.width = p.extent.width;
+            framebufferInfo.height = p.extent.height;
+            framebufferInfo.layers = 1;
+            for (const GpuImage* target : targets)
+            {
+                framebufferInfo.width = std::min(framebufferInfo.width, target->width);
+                framebufferInfo.height = std::min(framebufferInfo.height, target->height);
+            }
+            const VkViewport viewport{ 0, 0, float(pass.viewport_width ? pass.viewport_width : framebufferInfo.width),
+                                       float(pass.viewport_height ? pass.viewport_height : framebufferInfo.height), 0, 1 };
+
+            // Passes as big as the picture use the stencil, as in ReShade, and the first of a technique clears it.
             if (pass.stencil_enable)
-                Log(LogLevel::Info, "%s (%s) uses stencil, which the host ignores.", effect.file.c_str(), where.c_str());
+            {
+                p.stencil = stencil.image && viewport.width == float(width) && viewport.height == float(height) &&
+                            framebufferInfo.width == width && framebufferInfo.height == height;
+                p.clearStencil = p.stencil && !stencilCleared;
+                stencilCleared |= p.stencil;
+                if (!stencil.image)
+                    Log(LogLevel::Info, "%s (%s) uses stencil, which the graphics card does not have.", effect.file.c_str(), where.c_str());
+            }
 
             std::vector<VkAttachmentDescription> attachments;
             std::vector<VkAttachmentReference> references;
@@ -1381,30 +2435,39 @@ bool Runtime::CreateGpu(Effect& effect)
                 attachments.push_back(attachment);
                 references.push_back({ i, VK_IMAGE_LAYOUT_GENERAL });
             }
+            const VkAttachmentReference stencilReference{ p.targetCount, VK_IMAGE_LAYOUT_GENERAL };
+            if (p.stencil)
+            {
+                VkAttachmentDescription attachment{};
+                attachment.format = stencilFormat;
+                attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+                attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                attachment.stencilLoadOp = p.clearStencil ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+                attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+                attachment.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+                attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+                attachments.push_back(attachment);
+                targetViews.push_back(stencil.target);
+            }
             VkSubpassDescription subpass{};
             subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
             subpass.colorAttachmentCount = p.targetCount;
             subpass.pColorAttachments = references.data();
+            subpass.pDepthStencilAttachment = p.stencil ? &stencilReference : nullptr;
             VkRenderPassCreateInfo passInfo{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
-            passInfo.attachmentCount = p.targetCount;
+            passInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
             passInfo.pAttachments = attachments.data();
             passInfo.subpassCount = 1;
             passInfo.pSubpasses = &subpass;
-            vkCreateRenderPass(gpu.device, &passInfo, nullptr, &p.renderPass);
+            if (vkCreateRenderPass(gpu.device, &passInfo, nullptr, &p.renderPass) != VK_SUCCESS)
+                return fail("out of memory", where);
 
-            VkFramebufferCreateInfo framebufferInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
             framebufferInfo.renderPass = p.renderPass;
-            framebufferInfo.attachmentCount = p.targetCount;
+            framebufferInfo.attachmentCount = static_cast<uint32_t>(targetViews.size());
             framebufferInfo.pAttachments = targetViews.data();
-            framebufferInfo.width = p.extent.width;
-            framebufferInfo.height = p.extent.height;
-            framebufferInfo.layers = 1;
-            for (const GpuImage* target : targets)
-            {
-                framebufferInfo.width = std::min(framebufferInfo.width, target->width);
-                framebufferInfo.height = std::min(framebufferInfo.height, target->height);
-            }
-            vkCreateFramebuffer(gpu.device, &framebufferInfo, nullptr, &p.framebuffer);
+            if (vkCreateFramebuffer(gpu.device, &framebufferInfo, nullptr, &p.framebuffer) != VK_SUCCESS)
+                return fail("out of memory", where);
 
             const auto vs = g.modules.find(pass.vs_entry_point);
             const auto ps = pass.ps_entry_point.empty() ? g.modules.end() : g.modules.find(pass.ps_entry_point);
@@ -1428,8 +2491,6 @@ bool Runtime::CreateGpu(Effect& effect)
             VkPipelineVertexInputStateCreateInfo vertexInput{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
             VkPipelineInputAssemblyStateCreateInfo assembly{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
             assembly.topology = Topology(pass.topology);
-            const VkViewport viewport{ 0, 0, float(pass.viewport_width ? pass.viewport_width : framebufferInfo.width),
-                                       float(pass.viewport_height ? pass.viewport_height : framebufferInfo.height), 0, 1 };
             const VkRect2D scissor{ { 0, 0 }, { framebufferInfo.width, framebufferInfo.height } };
             VkPipelineViewportStateCreateInfo viewportState{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
             viewportState.viewportCount = 1;
@@ -1459,6 +2520,14 @@ bool Runtime::CreateGpu(Effect& effect)
             VkPipelineColorBlendStateCreateInfo blend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
             blend.attachmentCount = p.targetCount;
             blend.pAttachments = blends;
+            // Depth is never tested: only the stencil part of the attachment is used.
+            VkPipelineDepthStencilStateCreateInfo depthStencil{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+            depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+            depthStencil.stencilTestEnable = VK_TRUE;
+            depthStencil.front = { StencilOp(pass.stencil_fail_op), StencilOp(pass.stencil_pass_op), StencilOp(pass.stencil_depth_fail_op),
+                                   CompareOp(pass.stencil_comparison_func), pass.stencil_read_mask, pass.stencil_write_mask,
+                                   pass.stencil_reference_value };
+            depthStencil.back = depthStencil.front;
 
             VkGraphicsPipelineCreateInfo info{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
             info.stageCount = stageCount;
@@ -1468,16 +2537,60 @@ bool Runtime::CreateGpu(Effect& effect)
             info.pViewportState = &viewportState;
             info.pRasterizationState = &raster;
             info.pMultisampleState = &multisample;
+            info.pDepthStencilState = p.stencil ? &depthStencil : nullptr;
             info.pColorBlendState = &blend;
             info.layout = p.layout;
             info.renderPass = p.renderPass;
-            if (vkCreateGraphicsPipelines(gpu.device, VK_NULL_HANDLE, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
+            if (vkCreateGraphicsPipelines(gpu.device, pipelineCache, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
                 return fail("the graphics card rejected a shader", where);
         }
+    }
 
     effect.gpu = std::move(result);
     Log(LogLevel::Info, "%s is ready.", effect.file.c_str());
     return true;
+}
+
+// Whether the images the effect's textures load are decoded. Those of effects the preset did not use when they
+// compiled are decoded on a thread of their own, and the effect waits for them.
+bool Runtime::ImagesReady(Effect& effect)
+{
+    bool ready = true;
+    for (const auto& [name, key] : effect.textures)
+    {
+        SharedTexture& shared = sharedTextures.at(key);
+        if (shared.source.empty() || shared.image.image || !shared.loaded.pixels.empty() || !shared.loaded.error.empty())
+            continue;
+        if (!shared.decoding.valid())
+        {
+            std::packaged_task<TextureImage()> task([desc = shared.desc, file = FindTexture(shared.source)] { return DecodeTexture(desc, file); });
+            shared.decoding = task.get_future();
+            std::thread(std::move(task)).detach();
+        }
+        if (shared.decoding.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            shared.loaded = shared.decoding.get();
+        else
+            ready = false;
+    }
+    return ready;
+}
+
+// Prepares the effects that are on outside the frame, as far as the time allows.
+void Runtime::PrepareEffects(std::chrono::steady_clock::duration budget)
+{
+    if (!width || !height || resizePending || gpu.lost)
+        return;
+    const auto start = std::chrono::steady_clock::now();
+    for (const Technique& technique : techniques)
+    {
+        Effect& effect = effects[technique.effect];
+        if (!technique.enabled || !effect.compiled || effect.gpu || effect.gpuFailed || !ImagesReady(effect))
+            continue;
+        if (std::chrono::steady_clock::now() - start > budget)
+            break;
+        CreateGpu(effect);
+    }
+    SubmitSetup();
 }
 
 void Runtime::DestroyGpu(Effect& effect)
@@ -1503,11 +2616,20 @@ void Runtime::DestroyGpu(Effect& effect)
     effect.gpu.reset();
 }
 
+// Keeps which effects share which texture, which the effects' own data refers to.
 void Runtime::DestroyAllGpu()
 {
     if (!gpu.device)
         return;
+    // Commands not submitted yet only prepare the textures destroyed here, so they are dropped.
+    if (setup.commands)
+    {
+        vkEndCommandBuffer(setup.commands);
+        setups.push_back(std::move(setup));
+        setup = {};
+    }
     vkDeviceWaitIdle(gpu.device);
+    ReleaseSetups(true);
     for (Effect& effect : effects)
     {
         DestroyGpu(effect);
@@ -1515,7 +2637,6 @@ void Runtime::DestroyAllGpu()
     }
     for (auto& [name, texture] : sharedTextures)
         gpu.DestroyImage(texture.image);
-    sharedTextures.clear();
 }
 
 // Rendering
@@ -1559,12 +2680,13 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
 {
     if (!width || !height)
         return;
+    ReleaseSetups(false);
     FullBarrier(commands);
     if (source.image)
         // Straight from the capture on the graphics card. Alpha is whatever the window has, as in games where
         // ReShade runs.
         CopySource(commands, source, backbuffer.image, width, height);
-    else
+    else if (source.pixels && staging.mapped)
     {
         std::memcpy(staging.mapped, source.pixels, size_t(width) * height * 4);
         VkBufferImageCopy copy{};
@@ -1578,18 +2700,35 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
     frameTime = std::chrono::duration<float, std::milli>(now - lastFrame).count();
     lastFrame = now;
     ++frameCount;
-    if (!enabled)
+    // Effects compiled for another size wait for the new one.
+    if (!enabled || resizePending)
         return;
+    HandleToggleKeys();
+
+    const auto runs = [this](const Technique& technique) {
+        const Effect& effect = effects[technique.effect];
+        return technique.enabled && !(input.screenshot && !technique.enabledInScreenshot) && effect.compiled && !effect.gpuFailed;
+    };
+    // Every effect that runs is prepared before any pass is recorded, since preparing one can make a texture it
+    // shares again, and with it the effects that already use it.
+    for (int round = 0; round < 3; ++round)
+    {
+        texturesRemade = false;
+        for (const Technique& technique : techniques)
+            if (runs(technique) && !effects[technique.effect].gpu && ImagesReady(effects[technique.effect]))
+                CreateGpu(effects[technique.effect]);
+        if (!texturesRemade)
+            break;
+    }
+    SubmitSetup();
 
     bool colorStale = true;
-    for (const Technique& technique : techniques)
+    for (Technique& technique : techniques)
     {
-        if (!technique.enabled)
+        if (!runs(technique))
             continue;
         Effect& effect = effects[technique.effect];
-        if (!effect.compiled || effect.gpuFailed)
-            continue;
-        if (!effect.gpu && !CreateGpu(effect))
+        if (!effect.gpu)
             continue;
         EffectGpu& g = *effect.gpu;
         if (g.updatedFrame != frameCount)
@@ -1619,12 +2758,13 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
                 vkCmdDispatch(commands, p.dispatch[0], p.dispatch[1], p.dispatch[2]);
             else
             {
-                VkClearValue clears[8]{};
+                // Clear values for the targets, then the stencil, which clears to zero.
+                VkClearValue clears[9]{};
                 VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
                 begin.renderPass = p.renderPass;
                 begin.framebuffer = p.framebuffer;
                 begin.renderArea.extent = p.extent;
-                begin.clearValueCount = p.clear ? p.targetCount : 0;
+                begin.clearValueCount = p.clearStencil ? p.targetCount + 1 : p.clear ? p.targetCount : 0;
                 begin.pClearValues = clears;
                 vkCmdBeginRenderPass(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
                 vkCmdDraw(commands, p.vertices, 1, 0, 0);
@@ -1637,6 +2777,9 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
                 for (const GpuImage* image : p.written)
                     GenerateMipmaps(commands, *image);
         }
+        // A technique with a timeout turns itself off once it has run that long.
+        if (technique.timeout > 0 && (technique.timeLeft -= frameTime) <= 0)
+            Enable(technique, false);
     }
 }
 
@@ -1650,21 +2793,23 @@ std::vector<uint8_t> Runtime::ReadSource(const Source& source)
     return source.image ? ReadImage(source.image, source.x, source.y, source.foreign) : std::vector<uint8_t>();
 }
 
-// Copies width by height pixels at (x, y) of a BGRA image into memory, as RGBA. Waits for the graphics card.
+// Copies width by height pixels at (x, y) of a BGRA image into memory, as RGBA. Waits for this copy only: the
+// barrier before it orders it after the frames submitted before.
 std::vector<uint8_t> Runtime::ReadImage(VkImage image, uint32_t x, uint32_t y, bool foreign)
 {
     std::vector<uint8_t> pixels;
-    if (!width || !height)
+    if (!width || !height || !image)
         return pixels;
     const VkDeviceSize size = VkDeviceSize(width) * height * 4;
     if (readback.size != size)
     {
         gpu.DestroyBuffer(readback);
-        if (!gpu.CreateBuffer(readback, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true))
+        if (!gpu.CreateBuffer(readback, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, true))
             return pixels;
     }
-    vkDeviceWaitIdle(gpu.device);
     VkCommandBuffer commands = gpu.BeginCommands();
+    if (!commands)
+        return pixels;
     FullBarrier(commands);
     if (foreign)
         TransferForeign(commands, image, true);
@@ -1675,14 +2820,18 @@ std::vector<uint8_t> Runtime::ReadImage(VkImage image, uint32_t x, uint32_t y, b
     vkCmdCopyImageToBuffer(commands, image, VK_IMAGE_LAYOUT_GENERAL, readback.buffer, 1, &copy);
     if (foreign)
         TransferForeign(commands, image, false);
-    gpu.SubmitAndWait(commands);
+    VkMemoryBarrier toHost{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
+    if (!gpu.SubmitAndWait(commands))
+        return pixels;
+    gpu.Invalidate(readback);
     pixels.resize(size);
-    const uint8_t* source = static_cast<const uint8_t*>(readback.mapped);
+    std::memcpy(pixels.data(), readback.mapped, size);
     for (size_t i = 0; i < size; i += 4)
     {
-        pixels[i] = source[i + 2];
-        pixels[i + 1] = source[i + 1];
-        pixels[i + 2] = source[i];
+        std::swap(pixels[i], pixels[i + 2]);
         pixels[i + 3] = 255;
     }
     return pixels;

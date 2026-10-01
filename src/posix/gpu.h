@@ -32,6 +32,7 @@ struct GpuBuffer
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize size = 0;
     void* mapped = nullptr; // host-visible buffers stay mapped
+    bool coherent = true;   // otherwise the graphics card's writes need Gpu::Invalidate before reading
 };
 
 class Gpu
@@ -41,16 +42,23 @@ public:
     bool Init(bool headless, std::string& error);
     void Shutdown();
 
-    // Every image the host makes is kept in VK_IMAGE_LAYOUT_GENERAL, so passes need only memory barriers.
+    // Every image the host makes is kept in VK_IMAGE_LAYOUT_GENERAL, so passes need only memory barriers. Depth
+    // and stencil formats make depth-stencil attachments.
     bool CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage,
                      VkImageType type = VK_IMAGE_TYPE_2D, uint32_t depth = 1);
     void DestroyImage(GpuImage& image);
-    bool CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible);
+    // Host-visible buffers are mapped. readback prefers memory the processor reads quickly, for results read back.
+    bool CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, bool readback = false);
     void DestroyBuffer(GpuBuffer& buffer);
+    // Makes what the graphics card wrote to a mapped buffer visible to the processor.
+    void Invalidate(const GpuBuffer& buffer);
 
-    // Records commands and waits for them to finish. For uploads outside a frame.
+    // Records commands and waits for them to finish. For uploads outside a frame. BeginCommands returns
+    // VK_NULL_HANDLE when the graphics card is out of memory.
     VkCommandBuffer BeginCommands();
-    void SubmitAndWait(VkCommandBuffer commands);
+    bool SubmitAndWait(VkCommandBuffer commands);
+    // Says that the graphics card stopped responding, once, and stops drawing.
+    void ReportLost();
 
     bool Supports(VkFormat format, VkFormatFeatureFlags features) const;
 
@@ -67,6 +75,7 @@ public:
     bool metalObjects = false; // IOSurfaces can back images (macOS)
     bool dmaBuf = false;       // dma-bufs can be imported as images (Linux)
     bool foreignQueue = false; // VK_EXT_queue_family_foreign, for handing dma-bufs back and forth
+    bool lost = false;         // the device was lost, so nothing can draw until Unishade starts again
 
     // Allocates device memory of the given type bits for an image or import. UINT32_MAX when none fits.
     uint32_t FindMemoryType(uint32_t bits, VkMemoryPropertyFlags flags) const { return MemoryType(bits, flags); }
@@ -85,6 +94,8 @@ VkFormat SrgbFormat(VkFormat format);
 void FullBarrier(VkCommandBuffer commands);
 // Moves a fresh image into VK_IMAGE_LAYOUT_GENERAL.
 void InitLayout(VkCommandBuffer commands, const GpuImage& image);
+// The aspects of a format: color, or depth and stencil.
+VkImageAspectFlags Aspects(VkFormat format);
 
 // A window's swapchain, with one frame in flight.
 class Surface
@@ -115,6 +126,9 @@ public:
 private:
     bool CreateSwapchain();
     void DestroySwapchain();
+    bool CreateSync();
+    void DestroySync();
+    void Recover();
 
     GLFWwindow* window = nullptr;
     bool lowLatency = false;
@@ -128,4 +142,5 @@ private:
     VkFence fence = VK_NULL_HANDLE;
     uint32_t index = 0;
     bool needsRecreate = false;
+    bool lostShown = false;
 };
