@@ -217,6 +217,13 @@ struct Menu
 
     // Handles become invalid when ReShade reloads effects, so everything is read again after a reload.
     bool techniquesDirty = true;
+    // ReShade lists no effects while it loads them, so the list is tried again now and then until it has some, or
+    // until it is clear none loaded: ReShade finished compiling a while ago, or there are no effect files at all.
+    ULONGLONG techniquesTried = 0;
+    ULONGLONG compiledAt = 0;
+    bool effectsEmpty = false;
+    bool effectCheckRequested = false;
+    std::optional<bool> effectFiles;
     std::vector<Technique> techniques;
     // Lowercase names of the effect files that loaded, hidden techniques included.
     std::set<std::string> effects;
@@ -321,10 +328,13 @@ struct PresetScanner
     ULONGLONG requestedAt = 0;
     // Icons to save as logos: the game's executable, then the logo's path.
     std::vector<std::pair<fs::path, fs::path>> icons;
+    // ReShade's effect search paths, to find out whether they hold any effect files.
+    std::optional<std::vector<std::string>> effectPaths;
     // What the last scan found, and when the request was made that it answers.
     std::vector<ScannedFolder> folders;
     ULONGLONG scannedAt = 0;
     unsigned version = 0;
+    std::optional<bool> effectFiles;
 };
 PresetScanner& scanner = *new PresetScanner;
 
@@ -332,6 +342,10 @@ PresetScanner& scanner = *new PresetScanner;
 constexpr ULONGLONG kScanInterval = 2000;
 // How long picked presets wait for the menu to open again after the import dialog.
 constexpr ULONGLONG kImportWait = 3000;
+// How often the effect list is tried while ReShade loads effects, and how long ReShade gets to create them after
+// compiling before an empty list counts as no effects.
+constexpr ULONGLONG kLoadRetry = 250;
+constexpr ULONGLONG kCreateWait = 5000;
 
 // Settings lists the shortcuts in the order of kShortcuts.
 constexpr struct
@@ -563,6 +577,38 @@ ScannedFolder ScanFolder(const fs::path& folder, ScanCache& cache, unsigned gene
     return scanned;
 }
 
+// Whether ReShade's effect search paths hold any effect files. A path ending in ** includes its folders, as in
+// ReShade.
+bool AnyEffectFiles(const std::vector<std::string>& searchPaths)
+{
+    const auto effect = [](const fs::directory_entry& entry) {
+        std::error_code ignored;
+        return !entry.is_directory(ignored) && (entry.path().extension() == L".fx" || entry.path().extension() == L".addonfx");
+    };
+    for (const std::string& searchPath : searchPaths)
+    {
+        fs::path path(Wide(searchPath));
+        const bool recursive = path.filename() == L"**";
+        if (recursive)
+            path = path.parent_path();
+        if (path.is_relative())
+            path = fs::path(ExeDirectory()) / path;
+        std::error_code error;
+        if (recursive)
+        {
+            for (fs::recursive_directory_iterator entry(path, fs::directory_options::skip_permission_denied, error), end; !error && entry != end;
+                 entry.increment(error))
+                if (effect(*entry))
+                    return true;
+        }
+        else
+            for (fs::directory_iterator entry(path, error), end; !error && entry != end; entry.increment(error))
+                if (effect(*entry))
+                    return true;
+    }
+    return false;
+}
+
 // The presets folder itself, then each folder in it.
 std::vector<ScannedFolder> ScanLibrary(ScanCache& cache, unsigned generation)
 {
@@ -584,6 +630,7 @@ void ScanThread()
     for (unsigned generation = 1;; ++generation)
     {
         std::vector<std::pair<fs::path, fs::path>> icons;
+        std::optional<std::vector<std::string>> effectPaths;
         ULONGLONG requestedAt = 0;
         {
             std::unique_lock lock(scanner.mutex);
@@ -591,6 +638,7 @@ void ScanThread()
             scanner.requested = false;
             requestedAt = scanner.requestedAt;
             icons.swap(scanner.icons);
+            effectPaths.swap(scanner.effectPaths);
         }
         try
         {
@@ -603,9 +651,12 @@ void ScanThread()
                 SaveExecutableIcon(executable, logo);
             }
             std::vector<ScannedFolder> folders = ScanLibrary(cache, generation);
+            const std::optional<bool> effectFiles = effectPaths ? std::optional(AnyEffectFiles(*effectPaths)) : std::nullopt;
             std::lock_guard lock(scanner.mutex);
             scanner.folders = std::move(folders);
             scanner.scannedAt = requestedAt;
+            if (effectFiles)
+                scanner.effectFiles = effectFiles;
             ++scanner.version;
         }
         catch (const std::exception& e)
@@ -645,6 +696,40 @@ void TakeScan()
     m.scanVersion = scanner.version;
     m.scannedAt = scanner.scannedAt;
     m.foldersDirty = true;
+    if (scanner.effectFiles)
+    {
+        m.effectFiles = std::exchange(scanner.effectFiles, std::nullopt);
+        m.techniquesTried = 0;
+    }
+}
+
+// Asks the scanner whether ReShade's effect search paths hold any effect files.
+void RequestEffectCheck()
+{
+    std::vector<std::string> paths;
+    size_t size = 0;
+    if (reshade::get_config_value(m.runtime, "GENERAL", "EffectSearchPaths", nullptr, &size) && size)
+    {
+        std::string value(size, '\0');
+        reshade::get_config_value(m.runtime, "GENERAL", "EffectSearchPaths", value.data(), &size);
+        value.resize(std::min(size, value.size()));
+        // One path after another, each ended by a zero.
+        for (size_t start = 0, end; start < value.size(); start = end + 1)
+        {
+            end = std::min(value.find('\0', start), value.size());
+            if (end > start)
+                paths.push_back(value.substr(start, end - start));
+        }
+    }
+    // ReShade looks beside itself when no path is set.
+    if (paths.empty())
+        paths.push_back(".\\");
+    {
+        std::lock_guard lock(scanner.mutex);
+        scanner.effectPaths = std::move(paths);
+    }
+    m.effectCheckRequested = true;
+    RequestScan();
 }
 
 // Drawing helpers
@@ -1923,7 +2008,7 @@ void UnsavedDialog(const fs::path& current)
     EndDialog();
 }
 
-void LoadTechniques();
+void UpdateTechniques();
 
 void PresetsTab()
 {
@@ -1944,8 +2029,7 @@ void PresetsTab()
     }
     ImGui::Dummy(ImVec2(0, S(2)));
 
-    if (m.techniquesDirty)
-        LoadTechniques();
+    UpdateTechniques();
     const std::vector<std::string> missing = MissingEffects(current);
     if (!missing.empty())
     {
@@ -2027,7 +2111,27 @@ void LoadTechniques()
         m.byName[i] = i;
     std::sort(m.byName.begin(), m.byName.end(),
               [](size_t a, size_t b) { return _stricmp(m.techniques[a].label.c_str(), m.techniques[b].label.c_str()) < 0; });
-    m.techniquesDirty = m.techniques.empty();
+    m.techniquesTried = GetTickCount64();
+    m.techniquesDirty = m.effects.empty();
+    m.effectsEmpty = m.techniques.empty();
+    if (!m.techniquesDirty)
+        return;
+    m.effectsEmpty = false;
+    // After compiling, ReShade still creates the effects that are on, one a frame, and lists nothing until done.
+    if ((m.compiledAt && m.techniquesTried - m.compiledAt > kCreateWait) || m.effectFiles == false)
+    {
+        m.effectsEmpty = true;
+        m.techniquesDirty = false;
+    }
+    else if (!m.effectCheckRequested)
+        RequestEffectCheck();
+}
+
+// Effects are listed again after a reload, and tried this often while ReShade loads them.
+void UpdateTechniques()
+{
+    if (m.techniquesDirty && GetTickCount64() - m.techniquesTried >= kLoadRetry)
+        LoadTechniques();
 }
 
 void LoadParameters(const std::string& effect)
@@ -2293,14 +2397,21 @@ void TechniqueRow(Technique& technique)
 
 void EffectsTab()
 {
-    if (m.techniquesDirty)
-        LoadTechniques();
+    UpdateTechniques();
 
     PushSize(14.5f);
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::InputTextWithHint("##search", "Search effects", m.search, sizeof(m.search));
     ImGui::PopFont();
 
+    if (m.techniques.empty() && m.effectsEmpty)
+    {
+        ImGui::Dummy(ImVec2(0, S(6)));
+        Text(m.effectFiles == false ? "No effects are installed. Run Unishade Setup again to download them."
+                                    : "No effects loaded. The ReShade button below opens ReShade's menu, which shows why.",
+             kDim, 14);
+        return;
+    }
     if (m.techniques.empty())
     {
         ImGui::Dummy(ImVec2(0, S(6)));
@@ -3239,11 +3350,26 @@ void OnDestroyDevice(reshade::api::device* destroyed)
     m.device = nullptr;
 }
 
+// Runs when ReShade starts loading effects again, and when it has created them all.
 void OnReloadedEffects(effect_runtime*)
 {
     m.techniquesDirty = true;
+    m.techniquesTried = 0;
+    m.compiledAt = 0;
+    m.effectFiles.reset();
+    m.effectCheckRequested = false;
     m.parameters.clear();
     m.parametersEffect.clear();
+}
+
+// Runs when ReShade finished compiling effects, and when its own menu switches presets.
+void OnSetPresetPath(effect_runtime* runtime, const char*)
+{
+    if (runtime != m.runtime || !m.techniques.empty())
+        return;
+    m.compiledAt = GetTickCount64();
+    m.techniquesDirty = true;
+    m.techniquesTried = 0;
 }
 
 // Keys pressed while the menu waits for a shortcut still reach ReShade. This keeps End, ReShade's effects
@@ -3265,6 +3391,7 @@ void InitMenu()
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
     reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
     reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
+    reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(OnSetPresetPath);
     reshade::register_event<reshade::addon_event::reshade_set_effects_state>(OnSetEffectsState);
     reshade::register_event<reshade::addon_event::reshade_begin_effects>(OnBeginEffects);
     reshade::register_event<reshade::addon_event::reshade_overlay>(OnOverlay);
