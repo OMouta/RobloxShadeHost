@@ -113,19 +113,21 @@ void App::Run()
         TakeScreenshots();
 
         UpdateTarget();
-        inFront = active && (platform::ProcessInFront(active->pid) || glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED));
+        // Once per pass, since on X11 each asks the X server.
+        const bool overlayFocused = glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED);
+        inFront = active && (platform::ProcessInFront(active->pid) || overlayFocused);
         UpdateGameHotkeys();
         UpdateOverlay();
 
         if (menuOpen)
         {
             // Another window took focus, as the menu closes on Windows when the host loses it.
-            if (glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED))
+            if (overlayFocused)
                 menuFocused = true;
             else if (menuFocused)
                 CloseMenu(false);
         }
-        else if (overlayVisible && glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED) && active)
+        else if (overlayVisible && overlayFocused && active)
             platform::Activate(*active); // the window manager focused the overlay, which should never have it
 
         const bool newFrame = active && platform::TakeFrame(frame);
@@ -189,6 +191,8 @@ void App::StartCapture(const platform::Window& window)
         return;
     }
     active = window;
+    activeExecutable = platform::ProcessExecutable(window.pid);
+    activeCommand = platform::ProcessCommand(window.pid);
     frame = {};
     lastCaptureError.clear();
     Log(LogLevel::Info, "Capturing %s", window.title.c_str());
@@ -213,6 +217,8 @@ void App::StopCapture()
     if (active)
         Log(LogLevel::Info, "Stopped capturing %s.", active->title.c_str());
     active.reset();
+    activeExecutable.clear();
+    activeCommand.clear();
     game.clear();
     if (overlayVisible)
         platform::ShowOverlay(overlay.window, false);
@@ -241,17 +247,76 @@ void App::UpdateTarget()
         captureRetry = Now() + 2;
     }
 
-    if ((active && (selected || menuOpen)) || Now() < nextSearch || Now() < captureRetry)
+    // Nothing else is looked for while the game is in front or the menu is open, or while a picked window is.
+    if ((active && (selected || menuOpen || inFront)) || Now() < nextSearch || Now() < captureRetry)
         return;
     nextSearch = Now() + 0.5;
-    const platform::WindowId foreground = platform::ForegroundWindow();
-    const std::optional<platform::Window> game = FindGameTarget(selected, autoGames, foreground);
-    if (game && (!active || game->id != active->id) && (!active || game->id == foreground))
+    std::optional<platform::Window> found;
+    if (selected)
+        found = FindGameTarget(selected, autoGames, 0);
+    else
+    {
+        // The window in front first, which is quick to check. Every process only while no game is attached, and
+        // only now and then, since that reads all of them.
+        found = GameInFront();
+        if (!found && !active && Now() >= nextScan)
+        {
+            nextScan = Now() + 2;
+            std::vector<GameProcess> windowless;
+            found = FindGameTarget(std::nullopt, autoGames, platform::ForegroundWindow(), &windowless);
+            NoticeWindowless(windowless);
+        }
+    }
+    if (found && (!active || found->id != active->id))
     {
         if (active)
             StopCapture();
-        StartCapture(*game);
+        StartCapture(*found);
     }
+}
+
+// The saved game whose window is in front, other than the one attached.
+std::optional<platform::Window> App::GameInFront()
+{
+    const platform::WindowId foreground = platform::ForegroundWindow();
+    if (!foreground || foreground == notGame || (active && foreground == active->id))
+        return std::nullopt;
+    std::optional<platform::Window> window = platform::ListedWindow(foreground);
+    if (!window)
+        return std::nullopt;
+    const int index = MatchingGame(autoGames, platform::ProcessExecutable(window->pid), platform::ProcessCommand(window->pid));
+    if (index < 0)
+    {
+        notGame = foreground;
+        return std::nullopt;
+    }
+    window->title = autoGames[index].name;
+    return window;
+}
+
+// Under Wayland, a game that draws to Wayland directly has no X11 window, which looks like a game that never opens.
+// That is said once per process, after a while, since games also start without a window.
+void App::NoticeWindowless(const std::vector<GameProcess>& processes)
+{
+    std::map<int, double> since;
+    if (!processes.empty() && platform::WaylandDesktop())
+    {
+        const std::set<int> owners = platform::WindowOwners();
+        for (const GameProcess& process : processes)
+        {
+            if (owners.count(process.pid))
+                continue;
+            const auto known = windowlessSince.find(process.pid);
+            const double first = known != windowlessSince.end() ? known->second : Now();
+            since[process.pid] = first;
+            if (Now() - first >= 10 && windowlessNoticed.insert(process.pid).second)
+                Report(LogLevel::Warning,
+                       "%s is running without an X11 window, so Unishade cannot see it. Unishade works with games that run through "
+                       "XWayland: start this one with SDL_VIDEODRIVER=x11, or turn off Wayland in Wine, Proton or the game's launcher.",
+                       autoGames[process.game].name.c_str());
+        }
+    }
+    windowlessSince = std::move(since);
 }
 
 void App::Select(std::optional<platform::Window> window)
@@ -277,6 +342,8 @@ void App::AddActiveGame()
 
 void App::SaveGames()
 {
+    // The window in front may be one of the games now.
+    notGame = 0;
     if (!SaveAutoGames(DataDirectory() / "games.ini", autoGames))
         Report(LogLevel::Warning, "Could not save the game list.");
 }
@@ -297,6 +364,7 @@ void App::UpdateOverlay()
 {
     platform::Rect bounds;
     const bool visible = captureEnabled && active && HasFrame() && (menuOpen || inFront) && platform::WindowBounds(active->id, bounds);
+    platform::SetCaptureIdle(!visible);
     if (!visible)
     {
         if (overlayVisible)
@@ -639,10 +707,8 @@ bool App::MovePreset(const fs::path& preset, const fs::path& folder, std::string
 void App::FollowGame()
 {
     game.clear();
-    const std::string executable = platform::ProcessExecutable(active->pid);
-    const std::string command = platform::ProcessCommand(active->pid);
     for (const AutoGame& saved : autoGames)
-        if (MatchesProcess(saved, executable, command))
+        if (MatchesProcess(saved, activeExecutable, activeCommand))
         {
             game = FolderName(saved.name);
             break;

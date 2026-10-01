@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <thread>
@@ -51,6 +52,7 @@ struct CaptureState
     uint32_t configHeight = 0;
     bool reconfiguring = false;
     std::atomic<bool> onGpu = false; // frames go to the main thread as IOSurfaces instead of pixels
+    std::atomic<bool> idle = false;  // nobody sees the frames, so a few a second do
 };
 CaptureState capture;
 
@@ -76,11 +78,16 @@ void FailCapture(uint64_t generation, const std::string& message)
 {
     // The frame being filled. Only this stream's callbacks use it, one at a time on the capture queue.
     platform::Frame _back;
+    std::chrono::steady_clock::time_point _handedOver;
 }
 
 - (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type
 {
     if (type != SCStreamOutputTypeScreen || self.generation != capture.generation || !CMSampleBufferIsValid(sampleBuffer))
+        return;
+    // While the overlay is hidden, a few frames a second keep it from showing an old one when it comes back.
+    const auto now = std::chrono::steady_clock::now();
+    if (capture.idle && now - _handedOver < std::chrono::milliseconds(200))
         return;
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
     if (!attachments || CFArrayGetCount(attachments) == 0)
@@ -199,7 +206,10 @@ void FailCapture(uint64_t generation, const std::string& message)
     // A frame the main thread skipped goes back to ScreenCaptureKit's pool now, as does one of a stopped capture.
     back.hold.reset();
     if (current)
+    {
+        _handedOver = now;
         glfwPostEmptyEvent();
+    }
 }
 
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error
@@ -314,6 +324,23 @@ NSArray* WindowList(CGWindowListOption options, CGWindowID window)
     return CFBridgingRelease(CGWindowListCopyWindowInfo(options, window));
 }
 
+// The main loop asks about the game's window more than once in each pass, which one answer serves.
+NSDictionary* WindowInfo(CGWindowID window)
+{
+    static CGWindowID cachedWindow = kCGNullWindowID;
+    static NSDictionary* cached = nil;
+    static std::chrono::steady_clock::time_point cachedTime;
+    const auto now = std::chrono::steady_clock::now();
+    if (window != cachedWindow || now - cachedTime > std::chrono::milliseconds(10))
+    {
+        NSArray* list = WindowList(kCGWindowListOptionIncludingWindow, window);
+        cached = list.count > 0 ? list[0] : nil;
+        cachedWindow = window;
+        cachedTime = now;
+    }
+    return cached;
+}
+
 bool Bounds(NSDictionary* info, Rect& bounds)
 {
     CGRect rect;
@@ -322,6 +349,23 @@ bool Bounds(NSDictionary* info, Rect& bounds)
     bounds = { int(std::lround(rect.origin.x)), int(std::lround(rect.origin.y)), int(std::lround(rect.size.width)),
                int(std::lround(rect.size.height)) };
     return true;
+}
+
+// The window as ListWindows lists it.
+std::optional<Window> Listed(NSDictionary* info)
+{
+    const int pid = [info[(id)kCGWindowOwnerPID] intValue];
+    Rect bounds;
+    if ([info[(id)kCGWindowLayer] intValue] != 0 || pid == getpid() || [info[(id)kCGWindowAlpha] doubleValue] <= 0 || !Bounds(info, bounds) ||
+        bounds.width < 64 || bounds.height < 64)
+        return std::nullopt;
+    // Window titles need the screen recording permission. The program's name stands in without it.
+    NSString* name = info[(id)kCGWindowName];
+    NSString* owner = info[(id)kCGWindowOwnerName];
+    NSString* title = name.length ? name : owner;
+    if (!title.length)
+        return std::nullopt;
+    return Window{ [info[(id)kCGWindowNumber] unsignedLongLongValue], title.UTF8String, pid };
 }
 
 std::string ProcessArgument(int pid)
@@ -419,37 +463,38 @@ void Shutdown()
 std::vector<Window> ListWindows()
 {
     std::vector<Window> windows;
-    const int self = getpid();
     for (NSDictionary* info in WindowList(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID))
-    {
-        const int pid = [info[(id)kCGWindowOwnerPID] intValue];
-        Rect bounds;
-        if ([info[(id)kCGWindowLayer] intValue] != 0 || pid == self || [info[(id)kCGWindowAlpha] doubleValue] <= 0 || !Bounds(info, bounds) ||
-            bounds.width < 64 || bounds.height < 64)
-            continue;
-        // Window titles need the screen recording permission. The program's name stands in without it.
-        NSString* name = info[(id)kCGWindowName];
-        NSString* owner = info[(id)kCGWindowOwnerName];
-        NSString* title = name.length ? name : owner;
-        if (!title.length)
-            continue;
-        windows.push_back({ [info[(id)kCGWindowNumber] unsignedLongLongValue], title.UTF8String, pid });
-    }
+        if (std::optional<Window> window = Listed(info))
+            windows.push_back(std::move(*window));
     std::sort(windows.begin(), windows.end(), [](const Window& a, const Window& b) { return strcasecmp(a.title.c_str(), b.title.c_str()) < 0; });
     return windows;
 }
 
+std::optional<Window> ListedWindow(WindowId window)
+{
+    NSDictionary* info = WindowInfo(CGWindowID(window));
+    return info && [info[(id)kCGWindowIsOnscreen] boolValue] ? Listed(info) : std::nullopt;
+}
+
+std::set<int> WindowOwners()
+{
+    std::set<int> owners;
+    for (NSDictionary* info in WindowList(kCGWindowListOptionAll, kCGNullWindowID))
+        owners.insert([info[(id)kCGWindowOwnerPID] intValue]);
+    return owners;
+}
+
 bool WindowExists(const Window& window)
 {
-    NSArray* list = WindowList(kCGWindowListOptionIncludingWindow, CGWindowID(window.id));
-    return list.count > 0 && [list[0][(id)kCGWindowOwnerPID] intValue] == window.pid;
+    NSDictionary* info = WindowInfo(CGWindowID(window.id));
+    return info && [info[(id)kCGWindowOwnerPID] intValue] == window.pid;
 }
 
 // The whole window, title bar included, since that is what ScreenCaptureKit copies of a single window.
 bool WindowBounds(WindowId window, Rect& bounds)
 {
-    NSArray* list = WindowList(kCGWindowListOptionIncludingWindow, CGWindowID(window));
-    return list.count > 0 && [list[0][(id)kCGWindowIsOnscreen] boolValue] && Bounds(list[0], bounds) && bounds.width > 0 && bounds.height > 0;
+    NSDictionary* info = WindowInfo(CGWindowID(window));
+    return info && [info[(id)kCGWindowIsOnscreen] boolValue] && Bounds(info, bounds) && bounds.width > 0 && bounds.height > 0;
 }
 
 WindowId ForegroundWindow()
@@ -695,6 +740,11 @@ bool Capturing()
     return capture.running;
 }
 
+void SetCaptureIdle(bool idle)
+{
+    capture.idle = idle;
+}
+
 bool TakeFrame(Frame& frame)
 {
     {
@@ -785,6 +835,11 @@ std::string UiFont()
         if (access(path, R_OK) == 0)
             return path;
     return {};
+}
+
+bool WaylandDesktop()
+{
+    return false;
 }
 
 bool DisplayDrmDevice(int64_t&, int64_t&)

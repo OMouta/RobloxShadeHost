@@ -10,6 +10,7 @@
 #include <future>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -85,6 +86,9 @@ public:
     std::vector<AutoGame> autoGames;
     std::optional<platform::Window> selected;
     std::optional<platform::Window> active;
+    // How the active window's process was started, read once for matching saved games.
+    std::string activeExecutable;
+    std::string activeCommand;
     // The saved game being played, by its folder's name. Empty for a window picked for this session only.
     std::string game;
     // Folders opened or closed by hand, by path.
@@ -104,6 +108,8 @@ public:
 private:
     void OnHotkey(int id, bool pressed);
     void UpdateTarget();
+    std::optional<platform::Window> GameInFront();
+    void NoticeWindowless(const std::vector<GameProcess>& processes);
     void UpdateOverlay();
     void UpdateGameHotkeys();
     void RenderOverlay();
@@ -136,6 +142,10 @@ private:
     std::string screenshotStamp;                        // the second of the last screenshot
     int screenshotsInStamp = 0;
     double nextSearch = 0;
+    double nextScan = 0;                   // of every process
+    platform::WindowId notGame = 0;        // the window in front, when it was not a saved game's
+    std::map<int, double> windowlessSince; // saved games' processes without a window, since when
+    std::set<int> windowlessNoticed;
     double lastOverlayFrame = 0;
     double lastLauncherFrame = 0;
     double lastAutoSave = 0;

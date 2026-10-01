@@ -26,6 +26,8 @@ bool SaveAutoGames(const std::filesystem::path& path, std::span<const AutoGame> 
 // also match the first argument of the command line, which names the .exe of games that run through Wine or
 // Proton. Filenames are compared without case.
 bool MatchesProcess(const AutoGame& game, const std::string& executable, const std::string& command);
+// The index of the first enabled game the process matches, or -1.
+int MatchingGame(std::span<const AutoGame> games, const std::string& executable, const std::string& command);
 
 // A game's presets are in a folder named after it, without what Windows does not allow in names, so the folder
 // also works there.
@@ -34,7 +36,15 @@ std::string FolderName(std::string name);
 // Adds the game that owns the window, or turns it back on. Returns false when its process is gone.
 bool AddAutoGame(std::vector<AutoGame>& games, const platform::Window& window);
 
+// A saved game's running process, by its index in the list.
+struct GameProcess
+{
+    int pid;
+    size_t game;
+};
+
 // An empty selection finds any enabled saved game, preferring the window in front. A closed selection does not
-// attach to another game.
+// attach to another game. Looks through every process, so the host only does it now and then. Processes of saved
+// games that have no window to attach to are added to windowless.
 std::optional<platform::Window> FindGameTarget(const std::optional<platform::Window>& selection, std::span<const AutoGame> games,
-                                              platform::WindowId preferred);
+                                              platform::WindowId preferred, std::vector<GameProcess>* windowless = nullptr);

@@ -250,10 +250,9 @@ void GamesCard(App& app)
         }
         if (app.active)
         {
-            const std::string executable = platform::ProcessExecutable(app.active->pid);
-            const std::string command = platform::ProcessCommand(app.active->pid);
-            const bool saved = std::any_of(app.autoGames.begin(), app.autoGames.end(),
-                                           [&](const AutoGame& game) { return game.enabled && MatchesProcess(game, executable, command); });
+            const bool saved = std::any_of(app.autoGames.begin(), app.autoGames.end(), [&](const AutoGame& game) {
+                return game.enabled && MatchesProcess(game, app.activeExecutable, app.activeCommand);
+            });
             if (!saved && ImGui::Button(("Attach to " + app.active->title + " automatically").c_str()))
                 app.AddActiveGame();
         }

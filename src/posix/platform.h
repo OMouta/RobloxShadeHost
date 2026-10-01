@@ -8,6 +8,8 @@
 #include <memory>
 #include <functional>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -40,6 +42,10 @@ void Shutdown();
 
 // Visible top-level windows of other programs with a title, sorted by title.
 std::vector<Window> ListWindows();
+// The window as ListWindows lists it, or nothing when ListWindows would leave it out.
+std::optional<Window> ListedWindow(WindowId window);
+// The processes that own a top-level window, shown or not.
+std::set<int> WindowOwners();
 bool WindowExists(const Window& window);
 // False when the window is minimized, hidden or gone.
 bool WindowBounds(WindowId window, Rect& bounds);
@@ -55,7 +61,7 @@ void Activate(const Window& window);
 // when the process is gone.
 std::string ProcessExecutable(int pid);
 std::string ProcessCommand(int pid);
-// Every process with its identifiers, for matching saved games.
+// Every process with its identifiers, for matching saved games. Reads every process, so it is slow.
 struct Process
 {
     int pid;
@@ -96,6 +102,9 @@ struct Frame
 bool StartCapture(const Window& window, std::string& error);
 void StopCapture();
 bool Capturing();
+// Slows capture down while nobody sees its frames, such as while another program is in front. Frames keep
+// coming a few times a second, so the overlay has a recent one when it shows again.
+void SetCaptureIdle(bool idle);
 // Swaps in the newest frame when it is newer than frame.serial. Returns whether it did.
 bool TakeFrame(Frame& frame);
 // Set when capture stopped by itself, such as when the window closed. Cleared by StartCapture.
@@ -105,14 +114,19 @@ std::string CaptureError();
 bool HasCapturePermission();
 void RequestCapturePermission();
 
-// Global shortcuts. The callback runs on the main thread from PollHotkeys (X11) or the application's event loop
-// (macOS), with pressed false when the key is let go.
+// Global shortcuts. The callback runs on the main thread from PollHotkeys, with pressed false when the key is let
+// go.
 using HotkeyCallback = std::function<void(int id, bool pressed)>;
 void SetHotkeyCallback(HotkeyCallback callback);
 // Returns false when another program holds the shortcut.
 bool RegisterHotkey(int id, const Hotkey& hotkey);
 void UnregisterHotkey(int id);
+// Handles what happened since the last call: shortcuts, and on X11 the changes to the game's window and the window
+// in front that the functions above keep track of. Call at the start of every pass of the main loop.
 void PollHotkeys();
+
+// Whether this is a Wayland desktop, where games that draw to Wayland directly have no X11 window to capture.
+bool WaylandDesktop();
 
 // Opens a folder or a web page with the system's default program.
 void Open(const std::string& target);

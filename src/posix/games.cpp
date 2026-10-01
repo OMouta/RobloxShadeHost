@@ -34,6 +34,14 @@ bool MatchesProcess(const AutoGame& game, const std::string& executable, const s
            (!command.empty() && !strcasecmp(BaseName(command).c_str(), game.executable.c_str()));
 }
 
+int MatchingGame(std::span<const AutoGame> games, const std::string& executable, const std::string& command)
+{
+    for (size_t i = 0; i < games.size(); ++i)
+        if (games[i].enabled && MatchesProcess(games[i], executable, command))
+            return static_cast<int>(i);
+    return -1;
+}
+
 std::string FolderName(std::string name)
 {
     for (char& c : name)
@@ -86,35 +94,37 @@ bool AddAutoGame(std::vector<AutoGame>& games, const platform::Window& window)
 }
 
 std::optional<platform::Window> FindGameTarget(const std::optional<platform::Window>& selection, std::span<const AutoGame> games,
-                                              platform::WindowId preferred)
+                                              platform::WindowId preferred, std::vector<GameProcess>* windowless)
 {
     if (selection)
         return platform::WindowExists(*selection) ? selection : std::nullopt;
     if (std::none_of(games.begin(), games.end(), [](const AutoGame& game) { return game.enabled; }))
         return std::nullopt;
 
-    std::vector<std::pair<int, size_t>> processes;
+    std::vector<GameProcess> processes;
     for (const platform::Process& process : platform::ListProcesses())
-        for (size_t i = 0; i < games.size(); ++i)
-            if (games[i].enabled && MatchesProcess(games[i], process.executable, process.command))
-            {
-                processes.emplace_back(process.pid, i);
-                break;
-            }
+        if (const int index = MatchingGame(games, process.executable, process.command); index >= 0)
+            processes.push_back({ process.pid, size_t(index) });
     if (processes.empty())
         return std::nullopt;
 
     std::optional<platform::Window> first;
+    std::vector<bool> found(processes.size());
     for (platform::Window window : platform::ListWindows())
-        for (const auto& [pid, index] : processes)
-            if (window.pid == pid)
+        for (size_t i = 0; i < processes.size(); ++i)
+            if (window.pid == processes[i].pid)
             {
-                window.title = games[index].name;
+                found[i] = true;
+                window.title = games[processes[i].game].name;
                 if (window.id == preferred)
                     return window;
                 if (!first)
                     first = window;
                 break;
             }
+    if (windowless)
+        for (size_t i = 0; i < processes.size(); ++i)
+            if (!found[i])
+                windowless->push_back(processes[i]);
     return first;
 }
