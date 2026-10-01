@@ -708,11 +708,13 @@ bool ReadCache(Effect& effect, const fs::path& entry, const Definitions& macros)
     return true;
 }
 
-void WriteCache(Effect& effect, const fs::path& entry, const Definitions& macros, std::vector<std::string> paths)
+// A file changed after the compile started may not be what the effect was compiled from, so then nothing is kept.
+void WriteCache(Effect& effect, const fs::path& entry, const Definitions& macros, std::vector<std::string> paths, fs::file_time_type started)
 {
     std::vector<std::string> files(paths.size());
+    std::error_code error;
     for (size_t i = 0; i < paths.size(); ++i)
-        if (!ReadText(paths[i], files[i]))
+        if (!ReadText(paths[i], files[i]) || fs::last_write_time(paths[i], error) > started || error)
             return;
     Writer payload;
     VisitCompiled(payload, effect);
@@ -740,7 +742,10 @@ void PruneCache(const fs::path& directory)
         if (!entry.is_regular_file(error) || entry.path().extension() != ".bin")
             continue;
         const uintmax_t size = entry.file_size(error);
-        entries.emplace_back(entry.last_write_time(error), size, entry.path());
+        const fs::file_time_type time = entry.last_write_time(error);
+        if (error)
+            continue;
+        entries.emplace_back(time, size, entry.path());
         total += size;
     }
     if (total <= kCacheLimit)
@@ -1021,6 +1026,7 @@ bool CompileEffect(Effect& effect, const fs::path& path, const Definitions& defi
         effect.file = path.filename().string();
     }
 
+    const fs::file_time_type started = fs::file_time_type::clock::now();
     reshadefx::preprocessor pp;
     for (const auto& [name, value] : macros)
         pp.add_macro_definition(name, value);
@@ -1066,7 +1072,7 @@ bool CompileEffect(Effect& effect, const fs::path& path, const Definitions& defi
         for (const fs::path& included : pp.included_files())
             paths.push_back(included.string());
         std::sort(paths.begin() + 1, paths.end());
-        WriteCache(effect, entry, macros, std::move(paths));
+        WriteCache(effect, entry, macros, std::move(paths), started);
     }
     return true;
 }
