@@ -1233,8 +1233,8 @@ void Uninstall(const fs::path& directory, bool deleteUserFiles)
             remaining.insert(file);
     }
     bool failed = !remaining.empty();
-    for (const wchar_t* log : kLogs)
-        if (!DeleteInside(root, directory / log, false))
+    for (const wchar_t* logName : kLogs)
+        if (!DeleteInside(root, directory / logName, false))
             failed = true;
     if (deleteUserFiles)
     {
@@ -1278,14 +1278,14 @@ void DeleteMovedSetup()
         return;
     // Gives Setup two seconds to exit, then deletes it. The paths reach cmd.exe through the environment, which it
     // expands once, and stand in quotes, so neither % signs nor other characters in them mean anything to it.
-    const fs::path system = SystemFolder();
-    const fs::path cmd = system / L"cmd.exe";
-    SetEnvironmentVariableW(L"UNISHADE_PING", (system / L"PING.EXE").c_str());
+    const fs::path system32 = SystemFolder();
+    const fs::path cmd = system32 / L"cmd.exe";
+    SetEnvironmentVariableW(L"UNISHADE_PING", (system32 / L"PING.EXE").c_str());
     SetEnvironmentVariableW(L"UNISHADE_SETUP_COPY", movedSetup.c_str());
     std::wstring command = L"\"" + cmd.wstring() + L"\" /d /v:off /s /c \"\"%UNISHADE_PING%\" -n 3 127.0.0.1 >nul & del /f /q \"%UNISHADE_SETUP_COPY%\"\"";
     STARTUPINFOW startup{ sizeof(startup) };
     PROCESS_INFORMATION process{};
-    if (CreateProcessW(cmd.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, system.c_str(), &startup, &process))
+    if (CreateProcessW(cmd.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, system32.c_str(), &startup, &process))
     {
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
