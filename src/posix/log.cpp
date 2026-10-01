@@ -3,6 +3,7 @@
 
 #include <sys/utsname.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
@@ -10,10 +11,11 @@
 
 namespace
 {
+constexpr size_t kMaxNotices = 40;
+
 std::mutex mutex;
 FILE* file = nullptr;
 std::vector<Notice> notices;
-unsigned version = 0;
 std::filesystem::path path;
 
 const char* LevelName(LogLevel level)
@@ -49,14 +51,14 @@ void Write(LogLevel level, bool report, const char* format, va_list args)
             fprintf(out, "%s %-7s %s\n", stamp, LevelName(level), text);
             fflush(out);
         }
-    if (report || level == LogLevel::Warning || level == LogLevel::Error)
-    {
-        for (const Notice& notice : notices)
-            if (notice.level == level && notice.text == text)
-                return;
-        notices.push_back({ level, text });
-        ++version;
-    }
+    if (!report && level != LogLevel::Warning && level != LogLevel::Error)
+        return;
+    // Retries, such as a capture that keeps failing, would otherwise fill the list with one message.
+    if (std::any_of(notices.begin(), notices.end(), [&](const Notice& notice) { return notice.text == text; }))
+        return;
+    if (notices.size() == kMaxNotices)
+        notices.erase(notices.begin());
+    notices.push_back({ level, text });
 }
 } // namespace
 
@@ -92,12 +94,6 @@ std::vector<Notice> Notices()
 {
     std::lock_guard lock(mutex);
     return notices;
-}
-
-unsigned NoticeVersion()
-{
-    std::lock_guard lock(mutex);
-    return version;
 }
 
 const std::filesystem::path& LogPath()

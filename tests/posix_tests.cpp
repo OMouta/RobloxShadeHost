@@ -1,15 +1,17 @@
-// Tests for the macOS and Linux host's parts that need no window: shortcuts, presets, the saved game list and
-// the checksum Setup verifies presets with.
+// Tests for the macOS and Linux host's parts that need no window: shortcuts, presets, the saved game list, file
+// names, notices and the checksum Setup verifies presets with.
 
 #include "config.h"
 #include "game_list.h"
 #include "games.h"
 #include "hotkeys.h"
+#include "log.h"
 #include "preset_ini.h"
 #include "setup.h"
 
 #include <cstdio>
 #include <stdexcept>
+#include <string>
 
 namespace
 {
@@ -106,6 +108,13 @@ int main()
     ok &= Check(FolderName("Half-Life: Alyx") == "Half-Life  Alyx" && FolderName("a/b\\c") == "a b c", "replaces what Windows does not allow");
     ok &= Check(FolderName("Pok\xC3\xA9mon \xE2\x98\x85") == "Pok\xC3\xA9mon \xE2\x98\x85", "keeps UTF-8 letters");
     ok &= Check(FolderName("  Game... ") == "Game" && FolderName("\t?*") == "", "trims the ends Windows drops");
+
+    // Notices keep the last 40, each message once.
+    for (int i = 0; i < 50; ++i)
+        Report(LogLevel::Info, "Notice %d", i);
+    Report(LogLevel::Warning, "Notice %d", 49);
+    const std::vector<Notice> notices = Notices();
+    ok &= Check(notices.size() == 40 && notices.front().text == "Notice 10" && notices.back().text == "Notice 49", "keeps the last 40 notices once each");
 
     // SHA-256, from the standard's own examples.
     ok &= Check(Sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "hashes nothing");
