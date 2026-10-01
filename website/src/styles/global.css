@@ -1,5 +1,3 @@
-@import '@fontsource-variable/archivo/wdth.css';
-
 :root {
   --night: #0f1024;
   --night-raised: #161834;
@@ -19,7 +17,7 @@
   color-scheme: dark;
   /* Links to a heading stop below the navigation. */
   scroll-padding-top: calc(var(--nav-height) + 24px);
-  font-family: 'Archivo Variable', system-ui, sans-serif;
+  font-family: var(--font-archivo);
   font-size: 106.25%;
   line-height: 1.6;
   color: var(--ink);

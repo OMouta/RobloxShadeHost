@@ -1,5 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises';
-import { defineConfig } from 'astro/config';
+import { defineConfig, fontProviders } from 'astro/config';
 import { satteri } from '@astrojs/markdown-satteri';
 import sitemap from '@astrojs/sitemap';
 import { links } from './src/links.ts';
@@ -10,6 +10,17 @@ const siteLinks = {
   link(node, context) {
     const url = node.url.startsWith('links:') && links[node.url.slice('links:'.length)];
     if (url) context.setProperty(node, 'url', url);
+  },
+};
+
+// Screenshots in the docs are at most as wide as the docs column, so phones and 2x screens get the size they show.
+const imageSizes = {
+  name: 'image-sizes',
+  element: {
+    filter: ['img'],
+    visit(node, context) {
+      context.setProperty(node, 'sizes', '(min-width: 860px) 720px, 100vw');
+    },
   },
 };
 
@@ -36,6 +47,28 @@ export default defineConfig({
   trailingSlash: 'always',
   // The sitemap leaves out the redirects and the 404 page.
   integrations: [checkLinks, sitemap()],
-  markdown: { processor: satteri({ mdastPlugins: [siteLinks] }) },
+  // Archivo from @fontsource-variable/archivo, its Latin letters only. <Font preload /> in Base.astro preloads it, and the
+  // fallback is Arial resized to Archivo's measurements, so the text barely moves when Archivo arrives.
+  fonts: [
+    {
+      provider: fontProviders.local(),
+      name: 'Archivo',
+      cssVariable: '--font-archivo',
+      fallbacks: ['system-ui', 'sans-serif'],
+      options: {
+        variants: [
+          {
+            src: ['@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2'],
+            weight: '100 900',
+            style: 'normal',
+            stretch: '62% 125%',
+          },
+        ],
+      },
+    },
+  ],
+  // Images get a srcset of sizes up to the original's.
+  image: { layout: 'constrained' },
+  markdown: { processor: satteri({ mdastPlugins: [siteLinks], hastPlugins: [imageSizes] }) },
   vite: { server: { fs: { allow: ['..'] } } },
 });

@@ -17,7 +17,7 @@ import setup from '../content/docs/images/setup-addons.png';
   <main>
     <section class="hero">
       <div class="stage">
-        <Image src={banner} widths={[900, 1800]} sizes="100vw" alt="Six games with Unishade effects" class="banner" loading="eager" />
+        <Image src={banner} widths={[900, 1800]} sizes="100vw" alt="Six games with Unishade effects" class="banner" priority />
       </div>
       <div class="lede">
         <h1>Universal post-processing without injection.</h1>
@@ -33,7 +33,7 @@ import setup from '../content/docs/images/setup-addons.png';
         <p class="dim">Works with games in windowed or borderless mode.</p>
         <a href="/docs/games/">More about games</a>
       </div>
-      <Image src={launcher} widths={[620, 1240]} sizes="(max-width: 900px) 100vw, 620px" alt="The Unishade window with three saved games" class="shot" />
+      <Image src={launcher} sizes="(max-width: 900px) 100vw, 620px" alt="The Unishade window with three saved games" class="shot" />
     </section>
 
     <section class="menu">
@@ -60,7 +60,7 @@ import setup from '../content/docs/images/setup-addons.png';
         <DownloadButton />
         <a href="/docs/">Read the install guide</a>
       </div>
-      <Image src={setup} widths={[900, 1800]} sizes="(max-width: 900px) 100vw, 55vw" alt="Setup's add-ons page" class="shot" />
+      <Image src={setup} sizes="(max-width: 900px) 100vw, 55vw" alt="Setup's add-ons page" class="shot" />
     </section>
   </main>
 </Base>
