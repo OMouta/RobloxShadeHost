@@ -113,6 +113,7 @@ private:
     void NoticeWindowless(const std::vector<GameProcess>& processes);
     void UpdateOverlay();
     void UpdateGameHotkeys();
+    void UpdateInput();
     void RenderOverlay();
     void RenderLauncher();
     void SaveScreenshot();
@@ -145,6 +146,13 @@ private:
     // A picture size the effects could not make room for. The overlay stays hidden until the size changes.
     uint32_t failedWidth = 0;
     uint32_t failedHeight = 0;
+    // For effects: the cursor in the previous frame, and the menu's state in its last frame.
+    float lastMouseX = 0;
+    float lastMouseY = 0;
+    bool cursorKnown = false;
+    float menuWheel = 0;
+    bool menuActive = false;
+    bool menuHovered = false;
     double nextSearch = 0;
     double nextScan = 0;                   // of every process
     platform::WindowId notGame = 0;        // the window in front, when it was not a saved game's

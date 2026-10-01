@@ -422,6 +422,33 @@ UInt32 KeyCode(ImGuiKey key)
     return found == codes.end() ? UINT32_MAX : found->second;
 }
 
+// Windows virtual-key codes, which ReShade's effects and presets use, by key code.
+constexpr std::pair<CGKeyCode, uint8_t> kVirtualKeys[] = {
+    { kVK_ANSI_A, 'A' }, { kVK_ANSI_B, 'B' }, { kVK_ANSI_C, 'C' }, { kVK_ANSI_D, 'D' }, { kVK_ANSI_E, 'E' }, { kVK_ANSI_F, 'F' },
+    { kVK_ANSI_G, 'G' }, { kVK_ANSI_H, 'H' }, { kVK_ANSI_I, 'I' }, { kVK_ANSI_J, 'J' }, { kVK_ANSI_K, 'K' }, { kVK_ANSI_L, 'L' },
+    { kVK_ANSI_M, 'M' }, { kVK_ANSI_N, 'N' }, { kVK_ANSI_O, 'O' }, { kVK_ANSI_P, 'P' }, { kVK_ANSI_Q, 'Q' }, { kVK_ANSI_R, 'R' },
+    { kVK_ANSI_S, 'S' }, { kVK_ANSI_T, 'T' }, { kVK_ANSI_U, 'U' }, { kVK_ANSI_V, 'V' }, { kVK_ANSI_W, 'W' }, { kVK_ANSI_X, 'X' },
+    { kVK_ANSI_Y, 'Y' }, { kVK_ANSI_Z, 'Z' },
+    { kVK_ANSI_0, '0' }, { kVK_ANSI_1, '1' }, { kVK_ANSI_2, '2' }, { kVK_ANSI_3, '3' }, { kVK_ANSI_4, '4' },
+    { kVK_ANSI_5, '5' }, { kVK_ANSI_6, '6' }, { kVK_ANSI_7, '7' }, { kVK_ANSI_8, '8' }, { kVK_ANSI_9, '9' },
+    { kVK_F1, 0x70 }, { kVK_F2, 0x71 }, { kVK_F3, 0x72 }, { kVK_F4, 0x73 }, { kVK_F5, 0x74 }, { kVK_F6, 0x75 }, { kVK_F7, 0x76 },
+    { kVK_F8, 0x77 }, { kVK_F9, 0x78 }, { kVK_F10, 0x79 }, { kVK_F11, 0x7A }, { kVK_F12, 0x7B }, { kVK_F13, 0x7C }, { kVK_F14, 0x7D },
+    { kVK_F15, 0x7E }, { kVK_F16, 0x7F }, { kVK_F17, 0x80 }, { kVK_F18, 0x81 }, { kVK_F19, 0x82 }, { kVK_F20, 0x83 },
+    { kVK_Delete, 0x08 }, { kVK_Tab, 0x09 }, { kVK_Return, 0x0D }, { kVK_ANSI_KeypadEnter, 0x0D }, { kVK_CapsLock, 0x14 },
+    { kVK_Escape, 0x1B }, { kVK_Space, 0x20 }, { kVK_PageUp, 0x21 }, { kVK_PageDown, 0x22 }, { kVK_End, 0x23 }, { kVK_Home, 0x24 },
+    { kVK_LeftArrow, 0x25 }, { kVK_UpArrow, 0x26 }, { kVK_RightArrow, 0x27 }, { kVK_DownArrow, 0x28 }, { kVK_Help, 0x2D },
+    { kVK_ForwardDelete, 0x2E }, { kVK_Command, 0x5B }, { kVK_RightCommand, 0x5C },
+    { kVK_ANSI_Keypad0, 0x60 }, { kVK_ANSI_Keypad1, 0x61 }, { kVK_ANSI_Keypad2, 0x62 }, { kVK_ANSI_Keypad3, 0x63 }, { kVK_ANSI_Keypad4, 0x64 },
+    { kVK_ANSI_Keypad5, 0x65 }, { kVK_ANSI_Keypad6, 0x66 }, { kVK_ANSI_Keypad7, 0x67 }, { kVK_ANSI_Keypad8, 0x68 }, { kVK_ANSI_Keypad9, 0x69 },
+    { kVK_ANSI_KeypadMultiply, 0x6A }, { kVK_ANSI_KeypadPlus, 0x6B }, { kVK_ANSI_KeypadMinus, 0x6D }, { kVK_ANSI_KeypadDecimal, 0x6E },
+    { kVK_ANSI_KeypadDivide, 0x6F },
+    { kVK_Shift, 0xA0 }, { kVK_RightShift, 0xA1 }, { kVK_Control, 0xA2 }, { kVK_RightControl, 0xA3 }, { kVK_Option, 0xA4 },
+    { kVK_RightOption, 0xA5 },
+    { kVK_ANSI_Semicolon, 0xBA }, { kVK_ANSI_Equal, 0xBB }, { kVK_ANSI_Comma, 0xBC }, { kVK_ANSI_Minus, 0xBD }, { kVK_ANSI_Period, 0xBE },
+    { kVK_ANSI_Slash, 0xBF }, { kVK_ANSI_Grave, 0xC0 }, { kVK_ANSI_LeftBracket, 0xDB }, { kVK_ANSI_Backslash, 0xDC },
+    { kVK_ANSI_RightBracket, 0xDD }, { kVK_ANSI_Quote, 0xDE },
+};
+
 OSStatus OnHotkey(EventHandlerCallRef, EventRef event, void*)
 {
     EventHotKeyID id{};
@@ -835,6 +862,17 @@ std::string UiFont()
         if (access(path, R_OK) == 0)
             return path;
     return {};
+}
+
+void ReadInput(std::array<bool, 256>& keys, std::array<bool, 5>& buttons)
+{
+    keys = {};
+    for (const auto& [code, key] : kVirtualKeys)
+        if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, code))
+            keys[key] = true;
+    const CGMouseButton mouseButtons[] = { kCGMouseButtonLeft, kCGMouseButtonRight, kCGMouseButtonCenter, CGMouseButton(3), CGMouseButton(4) };
+    for (size_t i = 0; i < buttons.size(); ++i)
+        buttons[i] = CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, mouseButtons[i]);
 }
 
 bool WaylandDesktop()

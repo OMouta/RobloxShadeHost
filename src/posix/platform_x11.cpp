@@ -750,6 +750,92 @@ unsigned XModifiers(unsigned modifiers)
 constexpr unsigned kLockVariants[] = { 0, LockMask, Mod2Mask, LockMask | Mod2Mask };
 constexpr unsigned kRelevantModifiers = ControlMask | Mod1Mask | ShiftMask | Mod4Mask;
 
+// The Windows virtual-key code of a keysym, or 0.
+int VirtualKey(KeySym sym)
+{
+    if (sym >= XK_a && sym <= XK_z)
+        return 'A' + int(sym - XK_a);
+    if (sym >= XK_A && sym <= XK_Z)
+        return 'A' + int(sym - XK_A);
+    if (sym >= XK_0 && sym <= XK_9)
+        return '0' + int(sym - XK_0);
+    if (sym >= XK_KP_0 && sym <= XK_KP_9)
+        return 0x60 + int(sym - XK_KP_0);
+    if (sym >= XK_F1 && sym <= XK_F24)
+        return 0x70 + int(sym - XK_F1);
+    switch (sym)
+    {
+    case XK_BackSpace: return 0x08;
+    case XK_Tab: case XK_ISO_Left_Tab: return 0x09;
+    case XK_Return: case XK_KP_Enter: return 0x0D;
+    case XK_Pause: return 0x13;
+    case XK_Caps_Lock: return 0x14;
+    case XK_Escape: return 0x1B;
+    case XK_space: return 0x20;
+    case XK_Prior: return 0x21;
+    case XK_Next: return 0x22;
+    case XK_End: return 0x23;
+    case XK_Home: return 0x24;
+    case XK_Left: return 0x25;
+    case XK_Up: return 0x26;
+    case XK_Right: return 0x27;
+    case XK_Down: return 0x28;
+    case XK_Print: return 0x2C;
+    case XK_Insert: return 0x2D;
+    case XK_Delete: return 0x2E;
+    case XK_Super_L: return 0x5B;
+    case XK_Super_R: return 0x5C;
+    case XK_Menu: return 0x5D;
+    case XK_KP_Multiply: return 0x6A;
+    case XK_KP_Add: return 0x6B;
+    case XK_KP_Separator: return 0x6C;
+    case XK_KP_Subtract: return 0x6D;
+    case XK_KP_Decimal: return 0x6E;
+    case XK_KP_Divide: return 0x6F;
+    case XK_Num_Lock: return 0x90;
+    case XK_Scroll_Lock: return 0x91;
+    case XK_Shift_L: return 0xA0;
+    case XK_Shift_R: return 0xA1;
+    case XK_Control_L: return 0xA2;
+    case XK_Control_R: return 0xA3;
+    case XK_Alt_L: return 0xA4;
+    case XK_Alt_R: case XK_ISO_Level3_Shift: return 0xA5;
+    case XK_semicolon: return 0xBA;
+    case XK_equal: return 0xBB;
+    case XK_comma: return 0xBC;
+    case XK_minus: return 0xBD;
+    case XK_period: return 0xBE;
+    case XK_slash: return 0xBF;
+    case XK_grave: return 0xC0;
+    case XK_bracketleft: return 0xDB;
+    case XK_backslash: return 0xDC;
+    case XK_bracketright: return 0xDD;
+    case XK_apostrophe: return 0xDE;
+    case XK_less: return 0xE2;
+    default: return 0;
+    }
+}
+
+// Virtual-key codes by X11 keycode, for ReadInput. Made again when the keyboard mapping changes.
+std::array<uint8_t, 256> virtualKeys{};
+bool virtualKeysKnown = false;
+
+void MapVirtualKeys()
+{
+    virtualKeys = {};
+    int first = 0, last = 0;
+    XDisplayKeycodes(display, &first, &last);
+    for (int code = std::max(first, 0); code <= std::min(last, 255); ++code)
+    {
+        // A key's code comes from its first level, such as a for the A key, or from its second where only that has
+        // one, such as the digits of a French keyboard. Number pad keys count as such with Num Lock off too.
+        const int base = VirtualKey(XkbKeycodeToKeysym(display, KeyCode(code), 0, 0));
+        const int shifted = VirtualKey(XkbKeycodeToKeysym(display, KeyCode(code), 0, 1));
+        virtualKeys[code] = uint8_t(shifted >= 0x60 && shifted <= 0x6F ? shifted : base ? base : shifted);
+    }
+    virtualKeysKnown = true;
+}
+
 // The game's window, which the main loop asks about on every pass. The answers are kept until the X server sends an
 // event about the window or the window manager's frame around it, and asked for again every second in case a change
 // sends none.
@@ -874,6 +960,7 @@ void HandleEvent(XEvent& event)
         break;
     case MappingNotify:
         XRefreshKeyboardMapping(&event.xmapping);
+        virtualKeysKnown = false;
         break;
     }
 }
@@ -1653,6 +1740,28 @@ std::string UiFont()
         if (access(path, R_OK) == 0)
             return path;
     return {};
+}
+
+void ReadInput(std::array<bool, 256>& keys, std::array<bool, 5>& buttons)
+{
+    keys = {};
+    buttons = {};
+    if (!virtualKeysKnown)
+        MapVirtualKeys();
+    char state[32] = {};
+    XQueryKeymap(display, state);
+    for (int code = 0; code < 256; ++code)
+        if (((static_cast<unsigned char>(state[code / 8]) >> (code % 8)) & 1) && virtualKeys[code])
+            keys[virtualKeys[code]] = true;
+    ::Window rootReturn = 0, child = 0;
+    int rootX = 0, rootY = 0, x = 0, y = 0;
+    unsigned int mask = 0;
+    if (XQueryPointer(display, root, &rootReturn, &child, &rootX, &rootY, &x, &y, &mask))
+    {
+        buttons[0] = mask & Button1Mask;
+        buttons[1] = mask & Button3Mask;
+        buttons[2] = mask & Button2Mask;
+    }
 }
 
 bool WaylandDesktop()

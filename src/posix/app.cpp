@@ -7,6 +7,7 @@
 #include <stb_image_write.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -195,6 +196,7 @@ void App::StartCapture(const platform::Window& window)
     activeCommand = platform::ProcessCommand(window.pid);
     frame = {};
     failedWidth = failedHeight = 0;
+    cursorKnown = false;
     lastCaptureError.clear();
     Log(LogLevel::Info, "Capturing %s", window.title.c_str());
     FollowGame();
@@ -418,6 +420,7 @@ void App::RenderOverlay()
     glfwGetWindowSize(overlay.window, &width, &height);
     runtime.mouseX = static_cast<float>(x * frame.width / std::max(width, 1));
     runtime.mouseY = static_cast<float>(y * frame.height / std::max(height, 1));
+    UpdateInput();
 
     runtime.Render(surface.commands, Source(), effectsEnabled && !comparing && !compareButton);
     FullBarrier(surface.commands);
@@ -432,10 +435,55 @@ void App::RenderOverlay()
 
     BeginUi(overlay);
     DrawOverlay(*this);
+    // For effects in the next frame. The wheel only reaches the overlay while the menu is open.
+    const ImGuiIO& io = ImGui::GetIO();
+    menuWheel = io.MouseWheel;
+    menuActive = ImGui::IsAnyItemActive();
+    menuHovered = io.WantCaptureMouse;
     EndUi(overlay);
 
     if (screenshotRequested)
         SaveScreenshot();
+}
+
+// What effects read of the keyboard and mouse. Keys are read for the whole system, so only while they go to the game
+// or the menu.
+void App::UpdateInput()
+{
+    std::array<bool, 256> keys{};
+    std::array<bool, 5> buttons{};
+    if (menuOpen || inFront)
+        platform::ReadInput(keys, buttons);
+    // Windows also has a code for Shift, Ctrl and Alt on either side, and counts the mouse buttons as keys.
+    keys[0x10] = keys[0xA0] || keys[0xA1];
+    keys[0x11] = keys[0xA2] || keys[0xA3];
+    keys[0x12] = keys[0xA4] || keys[0xA5];
+    keys[0x01] = buttons[0];
+    keys[0x02] = buttons[1];
+    keys[0x04] = buttons[2];
+    keys[0x05] = buttons[3];
+    keys[0x06] = buttons[4];
+
+    fx::EffectInput& input = runtime.input;
+    for (size_t i = 0; i < keys.size(); ++i)
+    {
+        input.keysPressed[i] = keys[i] && !input.keysDown[i];
+        input.keysDown[i] = keys[i];
+    }
+    for (size_t i = 0; i < buttons.size(); ++i)
+    {
+        input.buttonsPressed[i] = buttons[i] && !input.buttonsDown[i];
+        input.buttonsDown[i] = buttons[i];
+    }
+    // The first frame of a capture has nothing to compare with.
+    input.cursorDeltaX = cursorKnown ? runtime.mouseX - lastMouseX : 0;
+    input.cursorDeltaY = cursorKnown ? runtime.mouseY - lastMouseY : 0;
+    lastMouseX = runtime.mouseX;
+    lastMouseY = runtime.mouseY;
+    cursorKnown = true;
+    input.wheelDelta = menuOpen ? menuWheel : 0;
+    input.overlayActive = menuOpen && menuActive;
+    input.overlayHovered = menuOpen && menuHovered;
 }
 
 void App::RenderLauncher()

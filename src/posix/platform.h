@@ -4,6 +4,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <functional>
@@ -124,6 +125,11 @@ void UnregisterHotkey(int id);
 // Handles what happened since the last call: shortcuts, and on X11 the changes to the game's window and the window
 // in front that the functions above keep track of. Call at the start of every pass of the main loop.
 void PollHotkeys();
+
+// The keys and mouse buttons held down now, wherever the focus is, for effects. Keys are indexed by Windows
+// virtual-key code, as ReShade's effects and presets name them. Buttons are left, right, middle, back and
+// forward. X11 cannot tell the back and forward buttons.
+void ReadInput(std::array<bool, 256>& keys, std::array<bool, 5>& buttons);
 
 // Whether this is a Wayland desktop, where games that draw to Wayland directly have no X11 window to capture.
 bool WaylandDesktop();
