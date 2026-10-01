@@ -31,7 +31,7 @@ LPCWSTR MenuCursor();
 // host exits, so it asks about them first.
 bool MenuHasUnsavedChanges();
 
-// The name of the active preset, for asking about its unsaved changes. Empty without the add-on.
+// The name of the active preset, for asking about its unsaved changes. Empty while ReShade runs no effects.
 std::wstring ActivePresetName();
 
 // Writes preset changes to disk now. ReShade writes them from its present a second after they happen, so they are
