@@ -16,10 +16,36 @@
 #include "state.h"
 #include "update.h"
 
+#include <algorithm>
+#include <map>
+#include <optional>
+
 State g;
 
 namespace
 {
+// While nothing is attached, every window is looked at this often. While a game is attached, only the window in front.
+constexpr ULONGLONG kSearchInterval = 1000;
+// A capture that fails to start is tried again after this, doubling each time up to kMaxCaptureRetry.
+constexpr ULONGLONG kFirstCaptureRetry = 2000;
+constexpr ULONGLONG kMaxCaptureRetry = 30000;
+
+struct CaptureRetry
+{
+    ULONGLONG at = 0;
+    ULONGLONG delay = 0;
+    unsigned failures = 0;
+};
+
+struct Loop
+{
+    ULONGLONG nextSearch = 0;
+    HWND lastForeground = nullptr;
+    HWND lastTarget = nullptr;
+    std::map<HWND, CaptureRetry> captureRetries;
+};
+Loop loop;
+
 void ShowError(const std::wstring& message)
 {
     MessageBoxW(g.launcher, (message + L"\n\nMore details are in " + LogPath() + L".").c_str(), L"Unishade", MB_ICONERROR);
@@ -45,6 +71,72 @@ void LoadGames()
                                       L"the list replaces games.ini.",
                    e.what());
     }
+}
+
+// A window whose capture fails to start is tried again less and less often, and the failure is logged once.
+void Attach(const GameWindow& game)
+{
+    const ULONGLONG now = GetTickCount64();
+    if (const auto retry = loop.captureRetries.find(game.window); retry != loop.captureRetries.end() && now < retry->second.at)
+        return;
+    if (g.target)
+        StopCapture();
+    g.activeGame = game;
+    try
+    {
+        StartCapture(game.window);
+        loop.captureRetries.erase(game.window);
+    }
+    catch (const winrt::hresult_error& e)
+    {
+        StopCapture();
+        CaptureRetry& retry = loop.captureRetries[game.window];
+        retry.delay = retry.delay ? std::min(retry.delay * 2, kMaxCaptureRetry) : kFirstCaptureRetry;
+        retry.at = now + retry.delay;
+        if (++retry.failures == 1)
+            Log(LogLevel::Error, L"Could not capture %ls: %ls (0x%08X)", game.name.c_str(), e.message().c_str(), static_cast<unsigned>(e.code()));
+        else if (retry.failures == 2)
+            Log(LogLevel::Info, L"Still could not capture %ls. Trying again less often, up to every %llu seconds.", game.name.c_str(),
+                kMaxCaptureRetry / 1000);
+    }
+}
+
+// Looks at every window only while nothing is attached. An attached game in front needs no search, and another saved
+// game coming to the front takes over, so only the window in front is checked then.
+void SearchForGame()
+{
+    // A game that was let go of may be followed by another right away.
+    if (!g.target && loop.lastTarget)
+        loop.nextSearch = 0;
+    loop.lastTarget = g.target;
+    const HWND foreground = GetForegroundWindow();
+    const bool foregroundChanged = foreground != loop.lastForeground;
+    loop.lastForeground = foreground;
+    if (g.target && (g.selectedGame || g.editMode))
+        return;
+
+    const ULONGLONG now = GetTickCount64();
+    std::optional<GameWindow> game;
+    if (!g.target && g.selectedGame)
+        game = FindGameTarget(g.selectedGame, g.autoGames);
+    else if (!g.target)
+    {
+        if (foregroundChanged)
+            game = MatchGameWindow(foreground, g.autoGames);
+        if (!game && now >= loop.nextSearch)
+        {
+            loop.nextSearch = now + kSearchInterval;
+            std::erase_if(loop.captureRetries, [](const auto& retry) { return !IsWindow(retry.first); });
+            game = FindGameTarget(std::nullopt, g.autoGames, foreground);
+        }
+    }
+    else if (foreground != g.target && (foregroundChanged || now >= loop.nextSearch))
+    {
+        loop.nextSearch = now + kSearchInterval;
+        game = MatchGameWindow(foreground, g.autoGames);
+    }
+    if (game && game->window != g.target)
+        Attach(*game);
 }
 
 int Run()
@@ -75,7 +167,6 @@ int Run()
     CreateLauncher();
     Log(LogLevel::Info, L"Waiting for a supported game...");
 
-    ULONGLONG nextSearch = 0;
     for (;;)
     {
         MSG msg;
@@ -101,27 +192,8 @@ int Run()
             StopCapture();
         }
 
-        if (g.captureEnabled && (!g.target || (!g.selectedGame && !g.editMode)) && GetTickCount64() >= nextSearch)
-        {
-            nextSearch = GetTickCount64() + 500;
-            const HWND foreground = GetForegroundWindow();
-            if (const auto game = FindGameTarget(g.selectedGame, g.autoGames, foreground);
-                game && game->window != g.target && (!g.target || game->window == foreground))
-            {
-                if (g.target)
-                    StopCapture();
-                g.activeGame = game;
-                try
-                {
-                    StartCapture(game->window);
-                }
-                catch (const winrt::hresult_error& e)
-                {
-                    Log(LogLevel::Error, L"Could not capture %ls: %ls (0x%08X)", game->name.c_str(), e.message().c_str(), static_cast<unsigned>(e.code()));
-                    StopCapture();
-                }
-            }
-        }
+        if (g.captureEnabled)
+            SearchForGame();
 
         UpdateOverlay();
         if (!g.overlayVisible)
