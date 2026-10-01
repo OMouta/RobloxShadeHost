@@ -54,7 +54,18 @@ The download buttons link to the newest release's files, which the build looks u
 
 In the Markdown pages, link to Discord and the other addresses in `website/src/links.ts` by name, as `[Discord](links:discord)`. A name that isn't in `links.ts` fails the build.
 
-Pull requests that change the site build it. A push to main that changes it deploys it, and publishing, editing or deleting a release deploys it again so the buttons point at the newest files.
+Cloudflare builds and deploys the site from `main`, with these build settings:
+
+| Setting | Value |
+| --- | --- |
+| Root directory | `website` |
+| Build command | `pnpm build` |
+| Build output directory | `dist` |
+| Environment variables | `GITHUB_TOKEN`: a fine-grained token with read access to public repositories, since Cloudflare's builds share GitHub's 60-requests-an-hour limit with everyone else on Cloudflare. `ASTRO_TELEMETRY_DISABLED=1`. |
+
+pnpm and Node come from `packageManager` in `website/package.json` and `website/.node-version`, the same versions CI uses. Cloudflare sends the security headers in `website/public/_headers`. Keep Rocket Loader and automatic Web Analytics off: the pages' Content-Security-Policy only allows their own scripts.
+
+A release doesn't change `main`, so Cloudflare would keep linking the old files. Create a deploy hook for `main` in Cloudflare and save its address as the `CLOUDFLARE_DEPLOY_HOOK` secret: the release job calls it after publishing, and the Website workflow calls it when a release is published, edited or deleted by hand, or when you run it from the Actions tab. Pull requests that change the site are built by that workflow too, so a broken build shows up before it's merged.
 
 ## Code changes
 

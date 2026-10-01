@@ -45,8 +45,8 @@ export default defineConfig({
     '/dlss5': '/docs/add-ons/#dlss5',
   },
   trailingSlash: 'always',
-  // A Content-Security-Policy <meta> on every page, with hashes of the scripts and styles Astro inlines. GitHub Pages
-  // can't send headers, so frame-ancestors and reporting aren't possible.
+  // A Content-Security-Policy <meta> on every page, with hashes of the scripts and styles Astro inlines. A <meta> can't
+  // set frame-ancestors, so Cloudflare sends that and the other security headers from public/_headers.
   security: {
     csp: { directives: ["default-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'"] },
   },
