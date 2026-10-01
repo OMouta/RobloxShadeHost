@@ -134,6 +134,8 @@ struct PresetFolder
     bool all = false;
     bool game = false;
     bool playing = false;
+    // Outside the presets folder, holding only the active preset.
+    bool other = false;
     std::vector<fs::path> presets;
 };
 
@@ -668,36 +670,136 @@ fs::path CurrentPreset()
     return fs::path(Wide(path)).lexically_normal();
 }
 
-// Whether a preset is in the presets folder or one of its folders.
-bool InPresets(const fs::path& preset, const fs::path& root)
+bool SamePath(const fs::path& a, const fs::path& b)
+{
+    return _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+// The presets folder beside the exe, where Unishade keeps its presets and creates folders, logos and new presets.
+// Spelled the way ReShade spells the paths it loads, which resolves links.
+const fs::path& PresetsRoot()
+{
+    static const fs::path root = [] {
+        const fs::path path = (fs::path(ExeDirectory()) / L"presets").lexically_normal();
+        std::error_code error;
+        fs::path resolved = fs::canonical(path, error);
+        return error ? path : resolved;
+    }();
+    return root;
+}
+
+// Whether a preset is in the presets folder or one of its folders, the ones the Presets tab lists.
+bool InPresets(const fs::path& preset)
 {
     const fs::path folder = preset.parent_path();
-    return _wcsicmp(folder.c_str(), root.c_str()) == 0 || _wcsicmp(folder.parent_path().c_str(), root.c_str()) == 0;
+    return SamePath(folder, PresetsRoot()) || SamePath(folder.parent_path(), PresetsRoot());
 }
 
-// The presets folder beside the exe. A preset elsewhere, picked in ReShade's menu, lists its own folder instead.
-fs::path PresetsRoot(const fs::path& current)
+// The preset's path in the presets folder, such as Roblox\Warm.ini, or empty when it is somewhere else.
+std::wstring LibraryPath(const fs::path& preset)
 {
-    const fs::path root = fs::path(ExeDirectory()) / L"presets";
-    return InPresets(current, root) ? root : current.parent_path();
+    const std::wstring& root = PresetsRoot().native();
+    const std::wstring& path = preset.native();
+    if (path.size() <= root.size() + 1 || _wcsnicmp(path.c_str(), root.c_str(), root.size()) != 0 || path[root.size()] != L'\\')
+        return {};
+    return path.substr(root.size() + 1);
 }
 
-// A game's folder is named after it, without what Windows does not allow in names.
+// Names
+
+// What Windows does not allow in file names.
+bool InvalidInName(wchar_t character)
+{
+    return character < 32 || wcschr(L"\\/:*?\"<>|", character);
+}
+
+// Names Windows keeps for devices, such as CON or COM1, whatever extension follows them.
+bool ReservedName(const std::wstring& name)
+{
+    std::wstring base = name.substr(0, name.find(L'.'));
+    base.erase(base.find_last_not_of(L' ') + 1);
+    for (const wchar_t* reserved : { L"CON", L"PRN", L"AUX", L"NUL", L"CONIN$", L"CONOUT$" })
+        if (_wcsicmp(base.c_str(), reserved) == 0)
+            return true;
+    const bool port = base.size() == 4 && (_wcsnicmp(base.c_str(), L"COM", 3) == 0 || _wcsnicmp(base.c_str(), L"LPT", 3) == 0);
+    return port && ((base[3] >= L'0' && base[3] <= L'9') || base[3] == L'¹' || base[3] == L'²' || base[3] == L'³');
+}
+
+// Why a name typed for a preset or folder cannot be used, or empty when it can. Trims spaces from both ends first.
+std::string NameProblem(std::wstring& name)
+{
+    name.erase(0, name.find_first_not_of(L' '));
+    name.erase(name.find_last_not_of(L' ') + 1);
+    if (name.empty())
+        return "Enter a name.";
+    if (std::any_of(name.begin(), name.end(), InvalidInName))
+        return "A name cannot contain \\ / : * ? \" < > | or control characters.";
+    // Windows drops dots from the end of names, which also rules out . and ..
+    if (name.back() == L'.')
+        return "A name cannot end with a dot.";
+    if (ReservedName(name))
+        return "Windows keeps " + Utf8(name) + " for devices. Pick another name.";
+    return {};
+}
+
+// A game's folder is named after it, without what Windows does not allow in names. The name is also the game's
+// key in [GamePresets], so it leaves out what would break that line too.
 std::wstring FolderName(std::wstring name)
 {
     for (wchar_t& character : name)
-        if (character < 32 || wcschr(L"\\/:*?\"<>|", character))
+        if (InvalidInName(character) || wcschr(L"=;[]", character))
             character = L' ';
     name.erase(0, name.find_first_not_of(L' '));
     // Windows drops dots and spaces from the end of names.
     name.erase(name.find_last_not_of(L". ") + 1);
+    if (ReservedName(name))
+        name += L" game";
     return name;
 }
 
-// Where new and imported presets go: the folder of the game being played, or the presets folder without one.
-fs::path NewPresetFolder(const fs::path& root)
+// Copies UTF-8 text into a fixed buffer, cut between characters when it does not fit.
+template <size_t N>
+void CopyText(char (&buffer)[N], const std::string& text)
 {
-    return m.game.empty() ? root : root / m.game;
+    size_t length = std::min(text.size(), N - 1);
+    while (length > 0 && length < text.size() && (static_cast<unsigned char>(text[length]) & 0xC0) == 0x80)
+        --length;
+    text.copy(buffer, length);
+    buffer[length] = '\0';
+}
+
+// Where new and imported presets go: the folder of the game being played, or the presets folder without one.
+fs::path NewPresetFolder()
+{
+    return m.game.empty() ? PresetsRoot() : PresetsRoot() / m.game;
+}
+
+// The preset a game was last played with. Empty when there is none, or when the setting points outside the presets
+// folder, which only editing the file by hand can do.
+fs::path RememberedPreset(const std::wstring& game)
+{
+    const fs::path relative = fs::path(GamePreset(game)).lexically_normal();
+    if (relative.empty() || relative.has_root_path() || relative.extension() != L".ini" ||
+        std::any_of(relative.begin(), relative.end(), [](const fs::path& part) { return part == L".."; }))
+        return {};
+    return PresetsRoot() / relative;
+}
+
+// Points the games that remember a preset at where it went, or forgets it for them when it is gone.
+void UpdateGamePresets(const fs::path& from, const fs::path& to)
+{
+    const std::wstring moved = LibraryPath(to);
+    std::set<std::wstring> games;
+    for (const AutoGame& game : g.autoGames)
+    {
+        const std::wstring name = FolderName(game.name);
+        if (name.empty() || !games.insert(name).second || !SamePath(RememberedPreset(name), from))
+            continue;
+        if (moved.empty())
+            RemoveGamePreset(name);
+        else
+            SetGamePreset(name, moved);
+    }
 }
 
 void SavePreset()
@@ -707,33 +809,45 @@ void SavePreset()
     m.unsaved = false;
 }
 
+// Switches ReShade to a preset. Returns false when ReShade did not, such as for a file that is not a preset.
+bool SetPreset(const fs::path& preset)
+{
+    m.runtime->set_current_preset_path(Utf8(preset.wstring()).c_str());
+    return SamePath(CurrentPreset(), preset);
+}
+
 // Loads the active preset again as it was last saved. ReShade only saves the preset it leaves when switching to
 // a different one, so switching to the same one discards the changes.
 void DiscardChanges()
 {
-    m.runtime->set_current_preset_path(Utf8(CurrentPreset().wstring()).c_str());
+    SetPreset(CurrentPreset());
     m.presetChanged = false;
     m.unsaved = false;
     m.active.clear();
 }
 
-bool IsPreset(const fs::path& path)
+std::string ReadText(const fs::path& path)
 {
     std::ifstream file(path, std::ios::binary);
-    std::string value;
-    return PresetIni(std::string(std::istreambuf_iterator<char>(file), {})).Get("", "Techniques", value);
+    return std::string(std::istreambuf_iterator<char>(file), {});
 }
 
-bool SamePath(const fs::path& a, const fs::path& b)
+bool IsPreset(const fs::path& path)
 {
-    return _wcsicmp(a.c_str(), b.c_str()) == 0;
+    std::string value;
+    return PresetIni(ReadText(path)).Get("", "Techniques", value);
+}
+
+// ReShade only loads presets whose extension is exactly .ini, so X.INI is left out.
+bool LoadablePreset(const fs::path& path)
+{
+    return path.extension() == L".ini";
 }
 
 void ReadPresetEffects(const fs::path& path)
 {
     m.effectsOf = path;
-    std::ifstream file(path, std::ios::binary);
-    m.presetEffects = PresetEffectFiles(PresetIni(std::string(std::istreambuf_iterator<char>(file), {})));
+    m.presetEffects = PresetEffectFiles(PresetIni(ReadText(path)));
 }
 
 // Effects the active preset uses that did not load, once ReShade has loaded effects.
@@ -748,23 +862,29 @@ std::vector<std::string> MissingEffects(const fs::path& current)
     return missing;
 }
 
-// Switches presets right away, for shortcuts, which cannot ask about unsaved changes. Returns false when there
-// are some.
-bool SwitchNow(const fs::path& target)
+enum class SwitchResult
+{
+    Switched,
+    Unsaved,
+    Failed,
+};
+
+// Switches presets right away, for shortcuts, which cannot ask about unsaved changes.
+SwitchResult SwitchNow(const fs::path& target)
 {
     if (m.unsaved || (m.presetChanged && !m.autoSave))
-        return false;
+        return SwitchResult::Unsaved;
     if (m.presetChanged)
         SavePreset();
     ReadPresetEffects(target);
-    m.runtime->set_current_preset_path(Utf8(target.wstring()).c_str());
+    const bool switched = SetPreset(target);
     m.presetsScanned = 0;
     m.active.clear();
-    return true;
+    return switched ? SwitchResult::Switched : SwitchResult::Failed;
 }
 
 // Switching to a game switches to the preset last used in it, and switching presets while playing a saved game
-// is remembered for it.
+// is remembered for it. Only presets in the presets folder are remembered.
 void FollowGame()
 {
     const fs::path current = CurrentPreset();
@@ -774,7 +894,8 @@ void FollowGame()
         if (!m.game.empty() && !SamePath(current, m.gamePreset))
         {
             m.gamePreset = current;
-            SetGamePreset(m.game, current.lexically_relative(PresetsRoot(current)).wstring());
+            if (const std::wstring relative = LibraryPath(current); !relative.empty())
+                SetGamePreset(m.game, relative);
         }
         return;
     }
@@ -801,8 +922,7 @@ void FollowGame()
         return;
 
     // Games saved by filename, like Roblox, move with every update, so their icon is kept while they run.
-    const fs::path root = PresetsRoot(current);
-    const fs::path logo = root / m.game / L"logo.png";
+    const fs::path logo = PresetsRoot() / m.game / L"logo.png";
     std::error_code error;
     if (!fs::exists(logo, error))
     {
@@ -810,11 +930,13 @@ void FollowGame()
         SaveExecutableIcon(executable, logo);
     }
 
-    const std::wstring remembered = GamePreset(m.game);
-    const fs::path preset = (root / remembered).lexically_normal();
-    if (remembered.empty())
-        SetGamePreset(m.game, current.lexically_relative(root).wstring());
-    else if (!SamePath(preset, current) && fs::exists(preset, error) && !SwitchNow(preset))
+    const fs::path preset = RememberedPreset(m.game);
+    if (preset.empty())
+    {
+        if (const std::wstring relative = LibraryPath(current); !relative.empty())
+            SetGamePreset(m.game, relative);
+    }
+    else if (!SamePath(preset, current) && fs::exists(preset, error) && SwitchNow(preset) == SwitchResult::Unsaved)
         ShowToast("Save or discard the changes to " + Utf8(current.stem().wstring()) + " to switch to " + Utf8(preset.stem().wstring()));
     m.gamePreset = CurrentPreset();
 }
@@ -831,6 +953,7 @@ std::string MovePreset(const fs::path& preset, const fs::path& folder)
         fs::rename(preset, target, error);
     if (error)
         return "Windows could not move " + Utf8(preset.stem().wstring()) + ".";
+    UpdateGamePresets(preset, target);
     m.presetsScanned = 0;
     return {};
 }
@@ -840,8 +963,7 @@ std::string MovePreset(const fs::path& preset, const fs::path& folder)
 void ImportPresets(const std::vector<fs::path>& files)
 {
     const fs::path current = CurrentPreset();
-    const fs::path root = PresetsRoot(current);
-    const fs::path folder = NewPresetFolder(root);
+    const fs::path folder = NewPresetFolder();
     std::error_code error;
     fs::create_directories(folder, error);
     for (const fs::path& file : files)
@@ -853,8 +975,8 @@ void ImportPresets(const std::vector<fs::path>& files)
             continue;
         }
         fs::path target = file;
-        // A preset picked from the presets folder is already there.
-        if (!InPresets(file, root))
+        // A preset picked from the presets folder is already there, unless ReShade cannot load it as it is named.
+        if (!InPresets(file) || !LoadablePreset(file))
         {
             target = folder / (file.stem().wstring() + L".ini");
             for (int copy = 2; fs::exists(target, error); ++copy)
@@ -921,34 +1043,34 @@ std::vector<fs::path> PresetsIn(const fs::path& folder)
 {
     std::vector<fs::path> presets;
     std::error_code error;
-    for (const auto& entry : fs::directory_iterator(folder, error))
-        if (entry.is_regular_file(error) && _wcsicmp(entry.path().extension().c_str(), L".ini") == 0 && IsPreset(entry.path()))
-            presets.push_back(entry.path());
+    for (fs::directory_iterator entry(folder, error), end; !error && entry != end; entry.increment(error))
+        if (entry->is_regular_file(error) && LoadablePreset(entry->path()) && IsPreset(entry->path()))
+            presets.push_back(entry->path());
     std::sort(presets.begin(), presets.end(), [](const fs::path& a, const fs::path& b) { return _wcsicmp(a.stem().c_str(), b.stem().c_str()) < 0; });
     return presets;
 }
 
 void ScanPresets(const fs::path& current)
 {
-    const fs::path root = PresetsRoot(current);
+    const fs::path& root = PresetsRoot();
     // The game being played is listed even before it has presets, since new ones go there.
     PresetFolder playing{ .path = root / m.game, .name = Utf8(m.game), .game = true, .playing = true };
     PresetFolder all{ .path = root, .name = "All games", .all = true, .presets = PresetsIn(root) };
     std::vector<PresetFolder> others;
     std::error_code error;
-    for (const auto& entry : fs::directory_iterator(root, error))
+    for (fs::directory_iterator entry(root, error), end; !error && entry != end; entry.increment(error))
     {
-        if (!entry.is_directory(error))
+        if (!entry->is_directory(error))
             continue;
-        const std::wstring name = entry.path().filename().wstring();
+        const std::wstring name = entry->path().filename().wstring();
         if (!m.game.empty() && _wcsicmp(name.c_str(), m.game.c_str()) == 0)
         {
-            playing.path = entry.path();
+            playing.path = entry->path();
             playing.name = Utf8(name);
-            playing.presets = PresetsIn(entry.path());
+            playing.presets = PresetsIn(entry->path());
             continue;
         }
-        PresetFolder folder{ .path = entry.path(), .name = Utf8(name), .presets = PresetsIn(entry.path()) };
+        PresetFolder folder{ .path = entry->path(), .name = Utf8(name), .presets = PresetsIn(entry->path()) };
         folder.game = std::any_of(g.autoGames.begin(), g.autoGames.end(),
                                   [&](const AutoGame& game) { return _wcsicmp(FolderName(game.name).c_str(), name.c_str()) == 0; });
         if (!folder.presets.empty())
@@ -961,14 +1083,18 @@ void ScanPresets(const fs::path& current)
         m.folders.push_back(std::move(playing));
     m.folders.push_back(std::move(all));
     std::move(others.begin(), others.end(), std::back_inserter(m.folders));
-    // ReShade writes a new preset a moment after switching to it.
     const auto listed = [&](const PresetFolder& folder) {
         return std::any_of(folder.presets.begin(), folder.presets.end(), [&](const fs::path& preset) { return SamePath(preset, current); });
     };
     if (std::none_of(m.folders.begin(), m.folders.end(), listed))
     {
-        const auto folder = std::find_if(m.folders.begin(), m.folders.end(), [&](const PresetFolder& folder) { return SamePath(folder.path, current.parent_path()); });
-        (folder != m.folders.end() ? *folder : m.folders.front()).presets.push_back(current);
+        // ReShade writes a new preset a moment after switching to it.
+        const auto parent = std::find_if(m.folders.begin(), m.folders.end(), [&](const PresetFolder& folder) { return SamePath(folder.path, current.parent_path()); });
+        if (parent != m.folders.end() || InPresets(current))
+            (parent != m.folders.end() ? *parent : m.folders.front()).presets.push_back(current);
+        // A preset picked elsewhere in ReShade's menu is shown, but nothing is created next to it.
+        else
+            m.folders.push_back({ .path = current.parent_path(), .name = "Other location", .other = true, .presets = { current } });
     }
 
     // A logo saved since, such as the icon of a game that just started, shows on the next scan.
@@ -996,35 +1122,25 @@ void OpenNamePopup(NameAction action, const fs::path& target)
                              : action == NameAction::NewFolder ? "New folder"
                              : action == NameAction::Rename    ? stem
                                                                : stem + " copy";
-    strncpy_s(m.name, name.c_str(), _TRUNCATE);
+    CopyText(m.name, name);
     m.openNamePopup = true;
 }
 
 bool ApplyName(const fs::path& current)
 {
     std::wstring name = Wide(m.name);
-    name.erase(0, name.find_first_not_of(L' '));
-    name.erase(name.find_last_not_of(L' ') + 1);
-    if (name.empty())
-    {
-        m.nameError = "Enter a name.";
+    m.nameError = NameProblem(name);
+    if (!m.nameError.empty())
         return false;
-    }
-    if (name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos)
-    {
-        m.nameError = "A name cannot contain \\ / : * ? \" < > |";
-        return false;
-    }
-    const fs::path root = PresetsRoot(current);
     if (m.nameAction == NameAction::NewFolder)
     {
         // A folder that exists already, such as one hidden since its presets moved out, is used as it is.
-        m.nameError = MovePreset(m.nameTarget, root / name);
+        m.nameError = MovePreset(m.nameTarget, PresetsRoot() / name);
         return m.nameError.empty();
     }
 
-    // Other presets stay in the folder of the one they come from.
-    const fs::path folder = m.nameAction == NameAction::New ? NewPresetFolder(root) : m.nameTarget.parent_path();
+    // Other presets stay in the folder of the one they come from, unless that is outside the presets folder.
+    const fs::path folder = m.nameAction == NameAction::New || !InPresets(m.nameTarget) ? NewPresetFolder() : m.nameTarget.parent_path();
     const fs::path path = folder / (name + L".ini");
     std::error_code error;
     if (fs::exists(path, error) && !(m.nameAction == NameAction::Rename && SamePath(path, m.nameTarget)))
@@ -1043,18 +1159,23 @@ bool ApplyName(const fs::path& current)
         break;
     case NameAction::Duplicate:
     case NameAction::SaveAsNew:
+        fs::create_directories(folder, error);
         // The active preset is copied as it is on screen, unsaved changes included.
         if (SamePath(m.nameTarget, current))
         {
             m.runtime->export_current_preset(Utf8(path.wstring()).c_str());
             m.pendingKeepsEdits = true;
         }
-        else
+        else if (!error)
             fs::copy_file(m.nameTarget, path, error);
         m.pendingPreset = path;
         break;
     case NameAction::Rename:
         fs::rename(m.nameTarget, path, error);
+        if (!error)
+            UpdateGamePresets(m.nameTarget, path);
+        break;
+    case NameAction::NewFolder:
         break;
     }
     if (error)
@@ -1154,6 +1275,7 @@ void DeleteDialog()
     {
         if (Recycle(m.deleteTarget.wstring()))
         {
+            UpdateGamePresets(m.deleteTarget, {});
             m.presetsScanned = 0;
             ImGui::CloseCurrentPopup();
         }
@@ -1168,10 +1290,11 @@ void DeleteDialog()
 // The folders a preset can move to: the ones listed, then saved games that have no presets yet.
 void MoveMenu(const fs::path& preset)
 {
-    const fs::path root = PresetsRoot(CurrentPreset());
+    const fs::path& root = PresetsRoot();
     std::vector<std::pair<std::string, fs::path>> targets;
     for (const PresetFolder& folder : m.folders)
-        targets.emplace_back(folder.name, folder.path);
+        if (!folder.other)
+            targets.emplace_back(folder.name, folder.path);
     for (const AutoGame& game : g.autoGames)
     {
         const std::wstring name = FolderName(game.name);
@@ -1272,7 +1395,8 @@ void PresetRow(const fs::path& path, bool active)
 void FolderIcon(ImDrawList* draw, const PresetFolder& folder, ImVec2 min, float size)
 {
     const ImVec2 max = min + ImVec2(size, size);
-    if (const uint64_t logo = FolderLogo(folder.path, static_cast<int>(size)))
+    // A folder outside the presets folder is not searched for a logo.
+    if (const uint64_t logo = folder.other ? 0 : FolderLogo(folder.path, static_cast<int>(size)))
     {
         draw->AddImageRounded(ImTextureRef(logo), min, max, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, S(4));
         return;
@@ -1348,7 +1472,7 @@ void FolderSection(const PresetFolder& folder, const fs::path& current)
     {
         for (const fs::path& preset : folder.presets)
             PresetRow(preset, SamePath(preset, current));
-        if (folder.presets.empty() && SamePath(folder.path, NewPresetFolder(PresetsRoot(current))))
+        if (folder.presets.empty() && SamePath(folder.path, NewPresetFolder()))
             Text("New presets and imports go here.", kDim, 13.5f);
     }
     ImGui::PopID();
@@ -1428,7 +1552,7 @@ void PresetsTab()
          kDim, 13);
     PushSize(13.5f);
     if (Link("Open presets folder"))
-        ShellOpen(PresetsRoot(current).wstring());
+        ShellOpen(PresetsRoot().wstring());
     ImGui::PopFont();
 }
 
@@ -2542,8 +2666,9 @@ void DrawMenuFrame()
             else if (m.unsaved)
                 SavePreset();
             ReadPresetEffects(m.pendingPreset);
-            m.runtime->set_current_preset_path(Utf8(m.pendingPreset.wstring()).c_str());
-            if (m.saveNewPreset)
+            if (!SetPreset(m.pendingPreset))
+                ShowToast("ReShade could not load " + Utf8(m.pendingPreset.stem().wstring()));
+            else if (m.saveNewPreset)
                 m.runtime->save_current_preset();
             m.pendingPreset.clear();
             m.saveNewPreset = false;
@@ -2585,9 +2710,14 @@ void CarryOutRequests()
         const int index = found != presets.end() ? static_cast<int>(found - presets.begin()) : m.presetStep > 0 ? -1 : count;
         const fs::path target = count ? presets[((index + m.presetStep) % count + count) % count] : current;
         m.presetStep = 0;
+        const std::string name = Utf8(target.stem().wstring());
         if (!SamePath(target, current))
-            ShowToast(SwitchNow(target) ? Utf8(target.stem().wstring())
-                                        : "Save or discard the changes to " + Utf8(current.stem().wstring()) + " first");
+            switch (SwitchNow(target))
+            {
+            case SwitchResult::Switched: ShowToast(name); break;
+            case SwitchResult::Unsaved: ShowToast("Save or discard the changes to " + Utf8(current.stem().wstring()) + " first"); break;
+            case SwitchResult::Failed: ShowToast("ReShade could not load " + name); break;
+            }
     }
 }
 
