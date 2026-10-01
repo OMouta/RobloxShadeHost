@@ -36,15 +36,17 @@ extern char** environ;
 
 namespace
 {
+// What the capture queue hands the main thread. A stopped stream's callbacks can still run for a moment, so
+// generation tells them apart: it changes under the lock whenever capture starts or stops, and a callback only hands
+// over a frame or an error while it holds the lock and its generation is the current one.
 struct CaptureState
 {
     std::mutex mutex;
     platform::Frame ready;
-    platform::Frame back;
     uint64_t serial = 0;
     std::string error;
     std::atomic<bool> running = false;
-    std::atomic<uint64_t> generation = 0; // a new capture makes callbacks of the old one stale
+    std::atomic<uint64_t> generation = 0;
     uint32_t configWidth = 0;
     uint32_t configHeight = 0;
     bool reconfiguring = false;
@@ -54,13 +56,13 @@ CaptureState capture;
 
 void FailCapture(uint64_t generation, const std::string& message)
 {
-    if (generation != capture.generation)
-        return;
     {
         std::lock_guard lock(capture.mutex);
+        if (generation != capture.generation)
+            return;
         capture.error = message;
+        capture.running = false;
     }
-    capture.running = false;
     glfwPostEmptyEvent();
 }
 } // namespace
@@ -71,6 +73,11 @@ void FailCapture(uint64_t generation, const std::string& message)
 @end
 
 @implementation UnishadeStreamOutput
+{
+    // The frame being filled. Only this stream's callbacks use it, one at a time on the capture queue.
+    platform::Frame _back;
+}
+
 - (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type
 {
     if (type != SCStreamOutputTypeScreen || self.generation != capture.generation || !CMSampleBufferIsValid(sampleBuffer))
@@ -109,7 +116,7 @@ void FailCapture(uint64_t generation, const std::string& message)
             bool reconfigure = false;
             {
                 std::lock_guard lock(capture.mutex);
-                reconfigure = !capture.reconfiguring && wantedWidth > 0 && wantedHeight > 0 &&
+                reconfigure = self.generation == capture.generation && !capture.reconfiguring && wantedWidth > 0 && wantedHeight > 0 &&
                               (wantedWidth != capture.configWidth || wantedHeight != capture.configHeight);
                 capture.reconfiguring |= reconfigure;
             }
@@ -142,7 +149,7 @@ void FailCapture(uint64_t generation, const std::string& message)
         }
     }
 
-    platform::Frame& back = capture.back;
+    platform::Frame& back = _back;
     back.width = uint32_t(width);
     back.height = uint32_t(height);
     if (capture.onGpu && CVPixelBufferGetIOSurface(image))
@@ -179,14 +186,20 @@ void FailCapture(uint64_t generation, const std::string& message)
         if (back.pixels.empty())
             return;
     }
+    bool current = false;
     {
         std::lock_guard lock(capture.mutex);
-        back.serial = ++capture.serial;
-        std::swap(back, capture.ready);
+        current = self.generation == capture.generation;
+        if (current)
+        {
+            back.serial = ++capture.serial;
+            std::swap(back, capture.ready);
+        }
     }
-    // A frame the main thread skipped goes back to ScreenCaptureKit's pool now.
+    // A frame the main thread skipped goes back to ScreenCaptureKit's pool now, as does one of a stopped capture.
     back.hold.reset();
-    glfwPostEmptyEvent();
+    if (current)
+        glfwPostEmptyEvent();
 }
 
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error
@@ -201,6 +214,21 @@ namespace
 {
 UnishadeStreamOutput* output = nil;
 dispatch_queue_t captureQueue = nullptr;
+
+// Stops a stream without waiting for it. The block keeps the stream and its output alive until it has stopped and
+// the callbacks it queued have run, which find their generation stale and hand nothing over.
+void StopStream(UnishadeStreamOutput* handler)
+{
+    SCStream* stream = handler.stream;
+    handler.stream = nil;
+    [stream stopCaptureWithCompletionHandler:^(NSError* error) {
+      (void)error;
+      dispatch_async(captureQueue, ^{
+        (void)handler;
+        (void)stream;
+      });
+    }];
+}
 
 // IOSurfaces wrapped in Vulkan images. ScreenCaptureKit cycles through a few surfaces, so each is wrapped once.
 struct Imported
@@ -564,16 +592,16 @@ bool StartCapture(const Window& window, std::string& error)
         error = "The window is not visible.";
         return false;
     }
-    const uint64_t generation = ++capture.generation;
     capture.onGpu = gpu.metalObjects;
+    uint64_t generation = 0;
     {
         std::lock_guard lock(capture.mutex);
+        generation = ++capture.generation;
         capture.error.clear();
         capture.ready = {};
-        capture.back = {};
         capture.reconfiguring = false;
+        capture.running = true;
     }
-    capture.running = true;
     const CGWindowID windowId = CGWindowID(window.id);
 
     [SCShareableContent
@@ -632,8 +660,7 @@ bool StartCapture(const Window& window, std::string& error)
                                      // Stopped or replaced before it started.
                                      if (generation != capture.generation)
                                      {
-                                         [handler.stream stopCaptureWithCompletionHandler:nil];
-                                         handler.stream = nil;
+                                         StopStream(handler);
                                          return;
                                      }
                                      output = handler;
@@ -648,17 +675,16 @@ bool StartCapture(const Window& window, std::string& error)
 
 void StopCapture()
 {
-    ++capture.generation;
-    capture.running = false;
-    if (output)
-    {
-        [output.stream stopCaptureWithCompletionHandler:nil];
-        output.stream = nil;
-        output = nil;
-    }
     {
         std::lock_guard lock(capture.mutex);
+        ++capture.generation;
+        capture.running = false;
         capture.ready = {};
+    }
+    if (output)
+    {
+        StopStream(output);
+        output = nil;
     }
     // The host waited for the graphics card before stopping.
     ReleaseImported();
