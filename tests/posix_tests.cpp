@@ -127,6 +127,24 @@ int main()
     ok &= Check(FolderName("Pok\xC3\xA9mon \xE2\x98\x85") == "Pok\xC3\xA9mon \xE2\x98\x85", "keeps UTF-8 letters");
     ok &= Check(FolderName("  Game... ") == "Game" && FolderName("\t?*") == "", "trims the ends Windows drops");
 
+    // Screenshots are named after the window's title, which can hold anything.
+    ok &= Check(SafeFileName("Roblox") == "Roblox", "keeps a plain title");
+    ok &= Check(SafeFileName("../../etc/passwd") == "etc passwd", "a title cannot name another folder");
+    ok &= Check(SafeFileName(std::string("a\0b\nc/d\x7f", 8)) == "a b c d", "replaces control characters and slashes");
+    ok &= Check(SafeFileName(".hidden") == "hidden" && SafeFileName(" . ") == "Unishade" && SafeFileName("") == "Unishade",
+                "no dots in front, and a name when nothing is left");
+    const std::string longTitle = std::string(79, 'a') + "\xC3\xA9" + std::string(20, 'b');
+    ok &= Check(SafeFileName(longTitle) == std::string(79, 'a'), "shortens long titles without cutting a character in half");
+
+    // The pictures folder from user-dirs.dirs.
+    const std::string userDirs = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_PICTURES_DIR=\"$HOME/Bilder\"\n";
+    ok &= Check(UserDirectory(userDirs, "XDG_PICTURES_DIR", "/home/a") == "/home/a/Bilder", "reads a folder in the home folder");
+    ok &= Check(UserDirectory("XDG_PICTURES_DIR=\"/data/My \\\"Pictures\\\"\"\n", "XDG_PICTURES_DIR", "/home/a") == "/data/My \"Pictures\"",
+                "reads an absolute folder with escaped quotes");
+    ok &= Check(UserDirectory("XDG_PICTURES_DIR=\"$HOME/\"\n", "XDG_PICTURES_DIR", "/home/a").empty() &&
+                    UserDirectory(userDirs, "XDG_MUSIC_DIR", "/home/a").empty() && UserDirectory("XDG_PICTURES_DIR=\"Pictures\"", "XDG_PICTURES_DIR", "/home/a").empty(),
+                "no folder when it is turned off, missing or not a path");
+
     // Notices keep the last 40, each message once.
     for (int i = 0; i < 50; ++i)
         Report(LogLevel::Info, "Notice %d", i);

@@ -12,6 +12,7 @@
 #include <ctime>
 #include <iterator>
 #include <strings.h>
+#include <system_error>
 
 App app;
 
@@ -109,6 +110,7 @@ void App::Run()
             runtime.LoadPreset(settings.preset);
             runtime.Reload();
         }
+        TakeScreenshots();
 
         UpdateTarget();
         inFront = active && (platform::ProcessInFront(active->pid) || glfwGetWindowAttrib(overlay.window, GLFW_FOCUSED));
@@ -146,6 +148,9 @@ void App::Run()
 
 void App::Shutdown()
 {
+    for (std::future<std::string>& screenshot : screenshots)
+        screenshot.wait();
+    screenshots.clear();
     StopCapture();
     if (runtime.Dirty() && settings.autoSavePresets)
         runtime.SavePreset();
@@ -769,59 +774,96 @@ void App::SaveScreenshot()
     if (after.empty())
         return;
     const uint32_t width = runtime.Width(), height = runtime.Height();
-    std::vector<uint8_t> image;
-    uint32_t imageWidth = width;
     std::vector<uint8_t> before;
-    if (beforeAfterRequested && frame.width == width && frame.height == height)
-    {
-        if (frame.image)
-            before = runtime.ReadSource(Source());
-        else
-        {
-            before.resize(size_t(width) * height * 4);
-            for (size_t i = 0; i < frame.pixels.size(); ++i)
-            {
-                const uint32_t pixel = frame.pixels[i];
-                before[i * 4] = (pixel >> 16) & 0xFF;
-                before[i * 4 + 1] = (pixel >> 8) & 0xFF;
-                before[i * 4 + 2] = pixel & 0xFF;
-                before[i * 4 + 3] = 255;
-            }
-        }
-    }
-    if (!before.empty())
-    {
-        // The game's own picture on the left, with effects on the right.
-        imageWidth = width * 2;
-        image.resize(size_t(imageWidth) * height * 4);
-        for (uint32_t y = 0; y < height; ++y)
-        {
-            std::memcpy(&image[size_t(y) * imageWidth * 4], &before[size_t(y) * width * 4], size_t(width) * 4);
-            std::memcpy(&image[(size_t(y) * imageWidth + width) * 4], &after[size_t(y) * width * 4], size_t(width) * 4);
-        }
-    }
-    else
-        image = std::move(after);
+    std::vector<uint32_t> beforePixels;
+    const bool beforeAfter = beforeAfterRequested && frame.width == width && frame.height == height;
+    if (beforeAfter && frame.image)
+        before = runtime.ReadSource(Source());
+    else if (beforeAfter)
+        beforePixels = frame.pixels;
 
     char stamp[64];
     const time_t now = time(nullptr);
     tm local{};
     localtime_r(&now, &local);
     strftime(stamp, sizeof(stamp), "%Y-%m-%d %H-%M-%S", &local);
-    const std::string game = active ? active->title : "Unishade";
-    const fs::path path = ScreenshotDirectory() / (game + " " + stamp + (beforeAfterRequested ? " before-after" : "") + ".png");
-    std::error_code error;
-    fs::create_directories(path.parent_path(), error);
-    if (stbi_write_png(path.c_str(), int(imageWidth), int(height), 4, image.data(), int(imageWidth) * 4))
-    {
+    // Window titles can hold anything, slashes included, so the name keeps none of that.
+    std::string name = SafeFileName(active ? active->title : "Unishade") + " " + stamp;
+    // Another screenshot in the same second gets a name of its own, rather than the same file written twice at once.
+    screenshotsInStamp = screenshotStamp == stamp ? screenshotsInStamp + 1 : 1;
+    screenshotStamp = stamp;
+    if (screenshotsInStamp > 1)
+        name += " " + std::to_string(screenshotsInStamp);
+    const fs::path folder = ScreenshotDirectory();
+    const fs::path path = folder / (name + (beforeAfter ? " before-after" : "") + ".png");
+    std::string shown = folder.string();
+    if (const char* home = getenv("HOME"); home && *home && shown.rfind(home, 0) == 0)
+        shown = "~" + shown.substr(strlen(home));
+
+    // Encoding the PNG takes long enough to hold up the game's picture, so it happens on a thread of its own.
+    auto write = [path, shown, width, height, after = std::move(after), before = std::move(before),
+                  beforePixels = std::move(beforePixels)]() mutable -> std::string {
+        if (!beforePixels.empty())
+        {
+            before.resize(size_t(width) * height * 4);
+            for (size_t i = 0; i < beforePixels.size(); ++i)
+            {
+                const uint32_t pixel = beforePixels[i];
+                before[i * 4] = (pixel >> 16) & 0xFF;
+                before[i * 4 + 1] = (pixel >> 8) & 0xFF;
+                before[i * 4 + 2] = pixel & 0xFF;
+                before[i * 4 + 3] = 255;
+            }
+        }
+        std::vector<uint8_t> image;
+        uint32_t imageWidth = width;
+        if (!before.empty())
+        {
+            // The game's own picture on the left, with effects on the right.
+            imageWidth = width * 2;
+            image.resize(size_t(imageWidth) * height * 4);
+            for (uint32_t y = 0; y < height; ++y)
+            {
+                std::memcpy(&image[size_t(y) * imageWidth * 4], &before[size_t(y) * width * 4], size_t(width) * 4);
+                std::memcpy(&image[(size_t(y) * imageWidth + width) * 4], &after[size_t(y) * width * 4], size_t(width) * 4);
+            }
+        }
+        else
+            image = std::move(after);
+        std::error_code error;
+        fs::create_directories(path.parent_path(), error);
+        if (!stbi_write_png(path.c_str(), int(imageWidth), int(height), 4, image.data(), int(imageWidth) * 4))
+        {
+            Report(LogLevel::Warning, "Could not save the screenshot to %s.", path.c_str());
+            return {};
+        }
         Log(LogLevel::Info, "Screenshot saved to %s", path.c_str());
-        std::string folder = ScreenshotDirectory().string();
-        if (const char* home = getenv("HOME"); home && *home && folder.rfind(home, 0) == 0)
-            folder = "~" + folder.substr(strlen(home));
-        ShowToast("Screenshot saved to " + folder);
+        return "Screenshot saved to " + shown;
+    };
+    try
+    {
+        screenshots.push_back(std::async(std::launch::async, std::move(write)));
     }
-    else
+    catch (const std::system_error&)
+    {
         Report(LogLevel::Warning, "Could not save the screenshot to %s.", path.c_str());
+    }
+}
+
+// Shows where each screenshot went once it is written.
+void App::TakeScreenshots()
+{
+    for (auto screenshot = screenshots.begin(); screenshot != screenshots.end();)
+    {
+        if (screenshot->wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            ++screenshot;
+            continue;
+        }
+        if (const std::string message = screenshot->get(); !message.empty())
+            ShowToast(message);
+        screenshot = screenshots.erase(screenshot);
+    }
 }
 
 bool App::EffectsInstalled()

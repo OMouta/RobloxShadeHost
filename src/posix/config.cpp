@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 
 namespace
 {
@@ -104,7 +105,65 @@ fs::path EffectsDirectory()
 
 fs::path ScreenshotDirectory()
 {
-    return Home() / "Pictures" / "Unishade";
+    const fs::path home = Home();
+#ifndef __APPLE__
+    fs::path pictures;
+    const char* config = getenv("XDG_CONFIG_HOME");
+    if (const char* folder = getenv("XDG_PICTURES_DIR"); folder && *folder == '/')
+        pictures = folder;
+    else if ((config && *config == '/') || !home.empty())
+        pictures = UserDirectory(ReadFile((config && *config == '/' ? fs::path(config) : home / ".config") / "user-dirs.dirs"), "XDG_PICTURES_DIR", home);
+    if (!pictures.empty())
+        return pictures / "Unishade";
+#endif
+    return home.empty() ? DataDirectory() / "Screenshots" : home / "Pictures" / "Unishade";
+}
+
+fs::path UserDirectory(const std::string& userDirs, const std::string& name, const fs::path& home)
+{
+    std::istringstream lines(userDirs);
+    fs::path result;
+    // Read like the shell does, so the last line that sets it counts.
+    for (std::string line; std::getline(lines, line);)
+    {
+        const size_t start = line.find_first_not_of(" \t");
+        if (start == std::string::npos || line.compare(start, name.size() + 1, name + "=") != 0)
+            continue;
+        std::string value = line.substr(start + name.size() + 1);
+        value.erase(value.find_last_not_of(" \t\r") + 1);
+        if (value.size() < 2 || value.front() != '"' || value.back() != '"')
+            continue;
+        std::string path;
+        for (size_t i = 1; i + 1 < value.size(); ++i)
+        {
+            if (value[i] == '\\' && i + 2 < value.size())
+                ++i;
+            path += value[i];
+        }
+        if (path == "$HOME" || path.rfind("$HOME/", 0) == 0)
+            result = home / path.substr(std::min<size_t>(6, path.size()));
+        else if (!path.empty() && path[0] == '/')
+            result = path;
+    }
+    return result.is_absolute() && result.lexically_relative(home) != "." ? result : fs::path();
+}
+
+std::string SafeFileName(std::string name)
+{
+    for (char& c : name)
+        if (static_cast<unsigned char>(c) < 32 || c == 127 || strchr("\\/:*?\"<>|", c))
+            c = ' ';
+    // A name starting with a dot would be hidden, and ".." would name the folder above.
+    name.erase(0, name.find_first_not_of(". "));
+    if (name.size() > 80)
+    {
+        size_t end = 80;
+        while (end > 0 && (static_cast<unsigned char>(name[end]) & 0xC0) == 0x80)
+            --end;
+        name.resize(end);
+    }
+    name.erase(name.find_last_not_of(". ") + 1);
+    return name.empty() ? "Unishade" : name;
 }
 
 FileLock::FileLock(const fs::path& path)

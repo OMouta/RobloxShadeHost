@@ -7,6 +7,7 @@
 #include "platform.h"
 #include "setup.h"
 
+#include <future>
 #include <map>
 #include <optional>
 #include <string>
@@ -108,6 +109,7 @@ private:
     void RenderOverlay();
     void RenderLauncher();
     void SaveScreenshot();
+    void TakeScreenshots();
     void StartCapture(const platform::Window& window);
     void StopCapture();
     void FollowGame();
@@ -130,6 +132,9 @@ private:
     bool startHintShown = false;
     bool screenshotRequested = false;
     bool beforeAfterRequested = false;
+    std::vector<std::future<std::string>> screenshots; // being written, each to the message it shows
+    std::string screenshotStamp;                        // the second of the last screenshot
+    int screenshotsInStamp = 0;
     double nextSearch = 0;
     double lastOverlayFrame = 0;
     double lastLauncherFrame = 0;

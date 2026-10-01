@@ -1124,8 +1124,10 @@ void DrawLauncher(App& app)
     ImGui::SameLine();
     if (ImGui::TextLink("Screenshots"))
     {
-        fs::create_directories(ScreenshotDirectory());
-        platform::Open(ScreenshotDirectory().string());
+        const fs::path folder = ScreenshotDirectory();
+        std::error_code error;
+        fs::create_directories(folder, error);
+        platform::Open(folder.string());
     }
     ImGui::SameLine();
     if (ImGui::TextLink("Docs"))
