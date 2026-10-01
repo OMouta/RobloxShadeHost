@@ -346,6 +346,9 @@ void DrawParameter(App& app, fx::Effect& effect, const fx::Uniform& uniform)
     ImGui::PushID(uniform.name.c_str());
     if (!uniform.text.empty())
         Dim(uniform.text.c_str());
+    // One group for the control, radio buttons and color pickers included, so effects can tell which of their
+    // variables is in use or under the cursor.
+    ImGui::BeginGroup();
     ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 2);
     const char* label = uniform.label.c_str();
     const bool bounded = uniform.min > std::numeric_limits<float>::lowest() && uniform.max < std::numeric_limits<float>::max();
@@ -417,6 +420,11 @@ void DrawParameter(App& app, fx::Effect& effect, const fx::Uniform& uniform)
         if (changed)
             app.runtime.SetValue(effect, uniform, value, components);
     }
+    ImGui::EndGroup();
+    if (ImGui::IsItemActive())
+        app.menuActiveUniform = &uniform;
+    if (ImGui::IsItemHovered())
+        app.menuHoveredUniform = &uniform;
     Tooltip(uniform.tooltip);
     ImGui::SameLine();
     if (ImGui::SmallButton("R"))
@@ -626,15 +634,19 @@ ImTextureID FolderLogo(const fs::path& folder, int size)
         gpu.CreateBuffer(upload, rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true))
     {
         std::memcpy(upload.mapped, rgba.data(), rgba.size());
-        VkCommandBuffer commands = gpu.BeginCommands();
-        InitLayout(commands, logo.image);
-        VkBufferImageCopy copy{};
-        copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copy.imageExtent = { uint32_t(size), uint32_t(size), 1 };
-        vkCmdCopyBufferToImage(commands, upload.buffer, logo.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-        FullBarrier(commands);
-        gpu.SubmitAndWait(commands);
-        logo.set = ImGui_ImplVulkan_AddTexture(logo.image.view, VK_IMAGE_LAYOUT_GENERAL);
+        if (VkCommandBuffer commands = gpu.BeginCommands())
+        {
+            InitLayout(commands, logo.image);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.imageExtent = { uint32_t(size), uint32_t(size), 1 };
+            vkCmdCopyBufferToImage(commands, upload.buffer, logo.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+            FullBarrier(commands);
+            if (gpu.SubmitAndWait(commands))
+                logo.set = ImGui_ImplVulkan_AddTexture(logo.image.view, VK_IMAGE_LAYOUT_GENERAL);
+            else
+                vkDeviceWaitIdle(gpu.device); // commands that failed to finish may still use the image and buffer
+        }
     }
     gpu.DestroyBuffer(upload);
     if (!logo.set)
@@ -1186,6 +1198,8 @@ void ResetMenu(App& app)
 
 void DrawOverlay(App& app)
 {
+    app.menuActiveUniform = nullptr;
+    app.menuHoveredUniform = nullptr;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     if (app.menuOpen)
         Menu(app, display, app.overlay.scale);

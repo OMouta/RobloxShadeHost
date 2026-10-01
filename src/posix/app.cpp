@@ -230,7 +230,8 @@ void App::StopCapture()
 
 void App::UpdateTarget()
 {
-    if (!captureEnabled)
+    // Nothing can draw once the graphics card is lost, so there is nothing to capture for.
+    if (!captureEnabled || gpu.lost)
     {
         if (active)
             StopCapture();
@@ -396,6 +397,9 @@ void App::RenderOverlay()
     runtime.SetSize(frame.width, frame.height);
     if (runtime.Width() != frame.width || runtime.Height() != frame.height)
     {
+        // A size still being prepared, or a lost graphics card, says nothing about room for effects.
+        if (runtime.Loading() || gpu.lost)
+            return;
         failedWidth = frame.width;
         failedHeight = frame.height;
         Report(LogLevel::Warning, "The graphics card has no room for effects on a %ux%u picture. The overlay stays hidden until the game's window changes size.",
@@ -420,6 +424,9 @@ void App::RenderOverlay()
     glfwGetWindowSize(overlay.window, &width, &height);
     runtime.mouseX = static_cast<float>(x * frame.width / std::max(width, 1));
     runtime.mouseY = static_cast<float>(y * frame.height / std::max(height, 1));
+    // Effects can leave themselves out of screenshots, so only a frame rendered knowing it is one is saved. A
+    // request made in this frame's menu is taken by the next frame.
+    const bool screenshot = screenshotRequested;
     UpdateInput();
 
     runtime.Render(surface.commands, Source(), effectsEnabled && !comparing && !compareButton);
@@ -440,9 +447,10 @@ void App::RenderOverlay()
     menuWheel = io.MouseWheel;
     menuActive = ImGui::IsAnyItemActive();
     menuHovered = io.WantCaptureMouse;
+    menuTyping = io.WantTextInput;
     EndUi(overlay);
 
-    if (screenshotRequested)
+    if (screenshot)
         SaveScreenshot();
 }
 
@@ -465,9 +473,11 @@ void App::UpdateInput()
     keys[0x06] = buttons[4];
 
     fx::EffectInput& input = runtime.input;
+    // Typing in the menu, such as a search, must not set off technique shortcuts.
+    const bool typing = menuOpen && menuTyping;
     for (size_t i = 0; i < keys.size(); ++i)
     {
-        input.keysPressed[i] = keys[i] && !input.keysDown[i];
+        input.keysPressed[i] = keys[i] && !input.keysDown[i] && !typing;
         input.keysDown[i] = keys[i];
     }
     for (size_t i = 0; i < buttons.size(); ++i)
@@ -484,6 +494,9 @@ void App::UpdateInput()
     input.wheelDelta = menuOpen ? menuWheel : 0;
     input.overlayActive = menuOpen && menuActive;
     input.overlayHovered = menuOpen && menuHovered;
+    input.activeUniform = menuOpen ? menuActiveUniform : nullptr;
+    input.hoveredUniform = menuOpen ? menuHoveredUniform : nullptr;
+    input.screenshot = screenshotRequested;
 }
 
 void App::RenderLauncher()

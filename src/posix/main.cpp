@@ -96,6 +96,11 @@ int Render(const char* input, const char* preset, const char* output, bool gpuSo
             return 1;
         std::memcpy(upload.mapped, pixels.data(), pixels.size() * 4);
         VkCommandBuffer commands = gpu.BeginCommands();
+        if (!commands)
+        {
+            fprintf(stderr, "The graphics card is out of memory.\n");
+            return 1;
+        }
         InitLayout(commands, sourceImage);
         // Something else around the picture, which must not end up in it.
         VkClearColorValue magenta{};
@@ -108,15 +113,28 @@ int Render(const char* input, const char* preset, const char* output, bool gpuSo
         copy.imageOffset = { int32_t(kX), int32_t(kY), 0 };
         copy.imageExtent = { uint32_t(width), uint32_t(height), 1 };
         vkCmdCopyBufferToImage(commands, upload.buffer, sourceImage.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-        gpu.SubmitAndWait(commands);
+        if (!gpu.SubmitAndWait(commands))
+        {
+            fprintf(stderr, "Could not hand %s to the graphics card.\n", input);
+            return 1;
+        }
         source = { nullptr, sourceImage.image, kX, kY, false };
     }
     // A few frames, so effects that build on earlier frames settle.
     for (int frame = 0; frame < 3; ++frame)
     {
         VkCommandBuffer commands = gpu.BeginCommands();
+        if (!commands)
+        {
+            fprintf(stderr, "The graphics card is out of memory.\n");
+            return 1;
+        }
         runtime.Render(commands, source, true);
-        gpu.SubmitAndWait(commands);
+        if (!gpu.SubmitAndWait(commands))
+        {
+            fprintf(stderr, "The graphics card could not apply %s.\n", preset);
+            return 1;
+        }
     }
     if (gpuSource)
     {

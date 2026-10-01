@@ -61,7 +61,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvulkan-dev libx11-dev libxcomposite-dev libxext-dev libxres-dev \
+          sudo apt-get install -y --no-install-recommends libvulkan-dev libx11-dev libxcomposite-dev libxext-dev libxres-dev libxdamage-dev \
             libxcb-dri3-dev libx11-xcb-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev mesa-vulkan-drivers
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON

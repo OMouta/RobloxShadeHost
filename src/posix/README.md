@@ -17,7 +17,9 @@ On Linux, frames are copied when XDamage says the game drew, at most about once 
 
 Under a Wayland desktop only games that run through XWayland have a window Unishade can see. When a saved game runs without one, the launcher says so and how to switch the game to XWayland, such as `SDL_VIDEODRIVER=x11` or turning off Wayland in Wine, Proton or the game's launcher.
 
-Effects compile with ReShade's own compiler (`effect_*.cpp` from ReShade 6.8.0, BSD-3-Clause) to SPIR-V, the same path ReShade takes in Vulkan games. `effects.cpp` runs what it produces: textures, render targets, storage, compute passes, blending, mipmaps and the uniforms ReShade sets itself, such as `timer` and `frametime`. Presets are ReShade's `.ini` files. The launcher and the menu use Dear ImGui with GLFW.
+Effects compile with ReShade's own compiler (`effect_*.cpp` from ReShade 6.8.0, BSD-3-Clause) to SPIR-V, the same path ReShade takes in Vulkan games. `effects.cpp` runs what it produces: textures, render targets, stencil tests, storage, compute passes, blending, mipmaps and the uniforms ReShade sets itself, such as `timer` and `frametime`. Presets are ReShade's `.ini` files. The launcher and the menu use Dear ImGui with GLFW.
+
+Compiled effects are kept in `cache` in the data folder, each effect's SPIR-V in `cache/effects` and Vulkan's pipeline cache in `cache/pipelines.bin`, so effects start faster the next time. Beyond 256 MB the entries used longest ago are dropped.
 
 ## Shortcuts, screenshots and input
 
@@ -26,6 +28,8 @@ Shortcuts are written as on Windows, such as `Ctrl+F9`, including the number pad
 Screenshots go to `Unishade` in the pictures folder: `~/Pictures` on macOS, and on Linux the one `XDG_PICTURES_DIR` names in the environment or in `~/.config/user-dirs.dirs`, which is not always `~/Pictures`. Files are named after the game, with anything that does not belong in a file name left out.
 
 Effects that read the keyboard and mouse, through uniforms such as `key` and `mousebutton`, see Windows virtual-key codes, as on Windows. Unishade reads them for the whole system, so only while the game or the menu is in front. The mouse wheel only reaches effects while the menu is open, and X11 cannot tell the back and forward mouse buttons.
+
+Technique shortcuts work as in ReShade: a preset's `Key` entries, or an effect's `toggle` annotations, turn a technique on or off. Like the keys effects read, they work while the game or the menu is in front, and not while typing in the menu.
 
 ## Building
 

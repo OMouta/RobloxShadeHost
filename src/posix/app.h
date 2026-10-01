@@ -100,6 +100,9 @@ public:
     bool comparing = false;     // effects off while the compare shortcut is held
     bool compareButton = false; // or the menu's compare button
     bool overlayVisible = false;
+    // The effect variables whose controls the menu's last frame used and had under the cursor, for effects.
+    const fx::Uniform* menuActiveUniform = nullptr;
+    const fx::Uniform* menuHoveredUniform = nullptr;
     std::string toast;
     double toastUntil = 0;
     std::string lastCaptureError;
@@ -153,6 +156,7 @@ private:
     float menuWheel = 0;
     bool menuActive = false;
     bool menuHovered = false;
+    bool menuTyping = false; // a text field has the keyboard
     double nextSearch = 0;
     double nextScan = 0;                   // of every process
     platform::WindowId notGame = 0;        // the window in front, when it was not a saved game's

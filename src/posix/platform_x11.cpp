@@ -1533,6 +1533,12 @@ VkImage Import(const std::shared_ptr<void>& held)
     // Takes the image from the X server once to move it into the general layout, keeping its contents, then
     // hands it back. From here on each use takes and returns it in that layout.
     VkCommandBuffer commands = gpu.BeginCommands();
+    if (!commands)
+    {
+        vkDestroyImage(gpu.device, result.image, nullptr);
+        vkFreeMemory(gpu.device, result.memory, nullptr);
+        return VK_NULL_HANDLE;
+    }
     const uint32_t outside = gpu.foreignQueue ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL;
     VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1546,7 +1552,14 @@ VkImage Import(const std::shared_ptr<void>& held)
     barrier.srcQueueFamilyIndex = gpu.queueFamily;
     barrier.dstQueueFamilyIndex = outside;
     vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    gpu.SubmitAndWait(commands);
+    if (!gpu.SubmitAndWait(commands))
+    {
+        // Commands that failed to finish may still use the image.
+        vkDeviceWaitIdle(gpu.device);
+        vkDestroyImage(gpu.device, result.image, nullptr);
+        vkFreeMemory(gpu.device, result.memory, nullptr);
+        return VK_NULL_HANDLE;
+    }
 
     result.buffer = held;
     imported = result;
