@@ -192,6 +192,8 @@ struct Menu
     ImGuiMouseCursor cursor = ImGuiMouseCursor_Arrow;
     Tab tab = Tab::Presets;
     bool debugInfo = false;
+    // Errors caught on the way back to ReShade are logged once.
+    bool errorReported = false;
 
     // A short message at the bottom of the screen, with an optional key before it.
     std::string toastText;
@@ -3282,6 +3284,27 @@ void CarryOutRequests()
     }
 }
 
+// ReShade calls the menu from its own DLL, which nothing may be thrown into. An error is logged once, and the frame
+// goes on without the rest of the menu.
+template <typename F>
+void Guarded(F&& callback) noexcept
+{
+    try
+    {
+        callback();
+    }
+    catch (const std::exception& e)
+    {
+        if (!std::exchange(m.errorReported, true))
+            Log(LogLevel::Error, L"The Unishade menu ran into an error: %hs", e.what());
+    }
+    catch (...)
+    {
+        if (!std::exchange(m.errorReported, true))
+            Log(LogLevel::Error, L"The Unishade menu ran into an unknown error.");
+    }
+}
+
 void OnBeginEffects(effect_runtime* runtime, command_list*, resource_view, resource_view)
 {
     if (runtime == m.runtime && m.beforeAfterRequested && !m.beforeTaken)
@@ -3291,10 +3314,9 @@ void OnBeginEffects(effect_runtime* runtime, command_list*, resource_view, resou
     }
 }
 
-void OnOverlay(effect_runtime* runtime)
+// What happens every frame before anything is drawn.
+void UpdateFrame(bool menu)
 {
-    if (runtime != m.runtime)
-        return;
     // ReShade draws the add-on's window before this runs, from the frame after its menu opens.
     if (m.focusDlss && ReShadeMenuOpen())
     {
@@ -3318,8 +3340,11 @@ void OnOverlay(effect_runtime* runtime)
     FinishDelete();
     FollowGame();
     CarryOutRequests();
-    const bool menu = g.editMode && !ReShadeMenuOpen();
     TakeImports(menu);
+}
+
+void DrawOverlay(bool menu)
+{
     // The start hint, the only toast with a key, has done its job once the menu opens.
     if (menu && !m.toastKey.empty())
         m.toastStart = 0;
@@ -3332,10 +3357,7 @@ void OnOverlay(effect_runtime* runtime)
     m.scale = menu_layout::Scale(display.x, display.y, m.menuScale);
     if (m.scale <= 0)
         return;
-    // The menu's look only applies to its own windows, so ReShade's is restored after.
-    ImGuiStyle& style = ImGui::GetStyle();
-    const ImGuiStyle saved = style;
-    ApplyStyle(style);
+    ApplyStyle(ImGui::GetStyle());
     PushSize(14.5f);
     if (menu)
     {
@@ -3348,6 +3370,20 @@ void OnOverlay(effect_runtime* runtime)
         DrawDebugInfo();
     ImGui::PopFont();
     m.cursor = menu ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
+}
+
+void OnOverlay(effect_runtime* runtime)
+{
+    if (runtime != m.runtime)
+        return;
+    // The menu's look only applies to its own windows, so ReShade's is restored after, also after an error.
+    ImGuiStyle& style = ImGui::GetStyle();
+    const ImGuiStyle saved = style;
+    Guarded([] {
+        const bool menu = g.editMode && !ReShadeMenuOpen();
+        UpdateFrame(menu);
+        DrawOverlay(menu);
+    });
     style = saved;
 }
 
@@ -3426,13 +3462,21 @@ void InitMenu()
     m.autoSave = AutoSavePresets();
     m.debugInfo = DebugInfoEnabled();
     m.menuScale = MenuScale();
-    reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
-    reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
-    reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
-    reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
-    reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(OnSetPresetPath);
+    reshade::register_event<reshade::addon_event::init_effect_runtime>(
+        [](effect_runtime* runtime) { Guarded([runtime] { OnInitRuntime(runtime); }); });
+    reshade::register_event<reshade::addon_event::destroy_effect_runtime>(
+        [](effect_runtime* runtime) { Guarded([runtime] { OnDestroyRuntime(runtime); }); });
+    reshade::register_event<reshade::addon_event::destroy_device>(
+        [](reshade::api::device* destroyed) { Guarded([destroyed] { OnDestroyDevice(destroyed); }); });
+    reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(
+        [](effect_runtime* runtime) { Guarded([runtime] { OnReloadedEffects(runtime); }); });
+    reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(
+        [](effect_runtime* runtime, const char* path) { Guarded([runtime, path] { OnSetPresetPath(runtime, path); }); });
     reshade::register_event<reshade::addon_event::reshade_set_effects_state>(OnSetEffectsState);
-    reshade::register_event<reshade::addon_event::reshade_begin_effects>(OnBeginEffects);
+    reshade::register_event<reshade::addon_event::reshade_begin_effects>(
+        [](effect_runtime* runtime, command_list* commands, resource_view rtv, resource_view rtvSrgb) {
+            Guarded([=] { OnBeginEffects(runtime, commands, rtv, rtvSrgb); });
+        });
     reshade::register_event<reshade::addon_event::reshade_overlay>(OnOverlay);
 }
 
