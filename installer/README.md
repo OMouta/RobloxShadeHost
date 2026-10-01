@@ -21,7 +21,7 @@ An effect package that cannot be downloaded or unpacked is left out, and so is a
 
 The presets component reads `presets/downloads.ini` from the `main` branch, downloads each listed preset, verifies its SHA-256, and checks that every effect the preset references was installed. To add a preset, commit it to `presets/` and add its filename and hash to `presets/downloads.ini`.
 
-The DLSS5 component reads `downloads.ini` from the `dlss5-assets` release, and depth estimation reads the one from the `depth-assets` release. These manifests only say where to download from and whether the add-on is available. The file names and SHA-256 hashes come from `vendor/dlss5/downloads.ini` and `vendor/depth/downloads.ini` and are built into Setup. A downloaded manifest that names other files or other hashes, `enabled=0`, a missing manifest or a failed download skips the add-on, and the finish page says so. Download addresses must be HTTPS URLs without a user name, query or `..` into the GitHub release or the Hugging Face repository the files in `vendor/` use. That only limits where Setup connects; the built-in hashes are what decide whether a file is installed.
+The DLSS5 component reads `downloads.ini` from the `dlss5-assets` release, and depth estimation reads the one from the `depth-assets` release. For each file of the add-on, the manifest gives the address to download it from and its SHA-256, and every file must pass its SHA-256 check. A missing manifest, `enabled=0`, a file without a valid address or SHA-256, or a failed or mismatched download skips the add-on, and the finish page says so. Addresses must point at this repository's releases or anywhere on huggingface.co, as HTTPS URLs on the default port without a user name, password, query, `%` escapes or `.` and `..` segments. Addresses into the releases from before the rename to Unishade lead to the same release under the new name.
 
 DLSS5 and depth estimation do not work together, so the add-ons page allows only one. Once the selected add-on is installed, Setup removes the files of the other one. When the selected add-on is skipped, the add-on that was installed before stays. Picking neither removes both.
 
@@ -61,7 +61,7 @@ With a hash in the file, configuring downloads the installer and fails if it doe
 
 ### Add-ons
 
-The manifest sources and asset release notes are in `vendor/dlss5/` and `vendor/depth/`. The binaries belong in release assets, not Git. The file names and hashes in these manifests are built into Setup, so changing a file needs a new Setup release, and older Setups skip the add-on once the release assets change. Download addresses can change without a new Setup, within the same GitHub release or Hugging Face repository: upload the updated `downloads.ini` to the same release.
+The manifest sources and asset release notes are in `vendor/dlss5/` and `vendor/depth/`. The binaries belong in release assets, not Git. Upload updated `downloads.ini` to the same release when changing download URLs or checksums. Setup reads that release asset, so an application release is not required to update it. The file names are the ones the host loads, so Setup only reads the entries with those names.
 
 To withdraw an add-on, remove its binary assets or upload a manifest with `enabled=0`. Older installers will skip it on their next run. Existing installations are not changed.
 
