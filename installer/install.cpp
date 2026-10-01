@@ -1,13 +1,16 @@
 #include "install.h"
+#include "pinned.h"
 #include "resource.h"
 #include "text.h"
 #include "../src/preset_ini.h"
 
 #include <windows.h>
 #include <bcrypt.h>
+#include <sddl.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <winhttp.h>
 #include <wrl/client.h>
 
 #include <miniz.h>
@@ -47,18 +50,44 @@ constexpr const wchar_t* kLogs[] = { L"Unishade.log", L"Unishade.old.log", L"Rob
 constexpr const wchar_t* kUserFiles[] = { L"ReShade.ini", L"ReShadePreset.ini", L"RobloxShadeHost.ini", L"games.ini", L"games.ini.tmp" };
 constexpr const wchar_t* kUserFolders[] = { L"presets", L"reshade-shaders" };
 
+// Limits for an effect package's zip, checked before anything is extracted. The largest packages on the list hold
+// about 200 files and 45 MB.
+constexpr mz_uint kZipEntries = 20000;
+constexpr uint64_t kZipEntrySize = 128ull << 20;
+constexpr uint64_t kZipTotalSize = 1ull << 30;
+
+// What effect packages may put into reshade-shaders: effect sources, the textures ReShade loads, and plain-text
+// licenses and readmes. Anything else, such as add-ons, DLLs or programs, stays out.
+constexpr const wchar_t* kPackageExtensions[] = { L".fx",  L".fxh", L".png",  L".jpg", L".jpeg", L".bmp",
+                                                  L".tga", L".dds", L".hdr", L".cube", L".txt", L".md" };
+constexpr const wchar_t* kPackageTextNames[] = { L"LICENSE", L"LICENCE", L"COPYING", L"NOTICE", L"README" };
+
+// The add-on files and hashes come from the manifests in vendor/ when Setup is built. A downloaded manifest only says
+// where to get them.
+struct PinnedFile
+{
+    const wchar_t* name;
+    const char* sha256;
+};
 
 struct AddonInfo
 {
     Addon addon;
     const char* name;
     const wchar_t* section;
-    std::vector<const wchar_t*> files;
+    std::vector<PinnedFile> files;
 };
 const AddonInfo kAddons[] = {
-    { Addon::Depth, "Depth estimation", L"depth", { L"onnxruntime.dll", L"DirectML.dll", L"depth-anything-v2-small.onnx" } },
-    { Addon::DLSS5, "DLSS5", L"dlss5", { L"nvngx_dlssnr.dll", L"renodx-dlss.addon64" } },
+    { Addon::Depth, "Depth estimation", L"depth", { DEPTH_FILES } },
+    { Addon::DLSS5, "DLSS5", L"dlss5", { DLSS5_FILES } },
 };
+
+// The GitHub release and Hugging Face repository the manifests in vendor/ download from.
+const struct
+{
+    const wchar_t* host;
+    const wchar_t* path;
+} kAddonSources[] = { ADDON_SOURCES };
 
 const struct
 {
@@ -146,6 +175,12 @@ fs::path SystemFolder()
     return path;
 }
 
+struct HandleCloser
+{
+    void operator()(HANDLE handle) const { CloseHandle(handle); }
+};
+using Handle = std::unique_ptr<void, HandleCloser>;
+
 bool IsInside(const fs::path& path, const fs::path& folder)
 {
     std::wstring child = path.lexically_normal().wstring();
@@ -211,21 +246,34 @@ DownloadProgress ByteProgress(Progress& progress, float begin, float end, const 
     };
 }
 
-DWORD RunHidden(std::wstring command, const fs::path& directory)
+// Runs exe without a window and returns its exit code. exe stays locked by the handle it was verified through until the
+// process has started. Cancelling ends the process.
+DWORD RunHidden(const fs::path& exe, Handle verified, std::wstring command, const fs::path& directory, const std::atomic<bool>& cancel)
 {
     STARTUPINFOW startup{ sizeof(startup) };
     startup.dwFlags = STARTF_USESHOWWINDOW;
     startup.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION process{};
-    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process))
+    if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process))
         throw std::runtime_error("Could not start the ReShade installer: " + SystemError(GetLastError()) + ".");
+    verified.reset();
     CloseHandle(process.hThread);
+    const Handle running(process.hProcess);
+    const ULONGLONG start = GetTickCount64();
+    while (WaitForSingleObject(running.get(), 100) == WAIT_TIMEOUT)
+    {
+        const bool timedOut = GetTickCount64() - start > 5 * 60 * 1000;
+        if (cancel || timedOut)
+        {
+            TerminateProcess(running.get(), 1);
+            WaitForSingleObject(running.get(), 5000);
+            if (cancel)
+                throw Cancelled{};
+            throw std::runtime_error("ReShade's installer did not finish within five minutes.");
+        }
+    }
     DWORD code = 1;
-    if (WaitForSingleObject(process.hProcess, 5 * 60 * 1000) == WAIT_OBJECT_0)
-        GetExitCodeProcess(process.hProcess, &code);
-    else
-        TerminateProcess(process.hProcess, 1);
-    CloseHandle(process.hProcess);
+    GetExitCodeProcess(running.get(), &code);
     return code;
 }
 
@@ -265,6 +313,18 @@ void FixReShadeIni(const fs::path& path, bool addPresetPath)
         WriteFile(path, result);
 }
 
+bool AllowedPackageFile(const fs::path& name)
+{
+    for (const wchar_t* extension : kPackageExtensions)
+        if (_wcsicmp(name.extension().c_str(), extension) == 0)
+            return true;
+    for (const wchar_t* text : kPackageTextNames)
+        if (_wcsicmp(name.c_str(), text) == 0)
+            return true;
+    return false;
+}
+
+// Extracts the files of the types effect packages may install.
 void ExtractZip(const std::string& data, const fs::path& destination, const std::string& name)
 {
     mz_zip_archive zip{};
@@ -276,7 +336,22 @@ void ExtractZip(const std::string& data, const fs::path& destination, const std:
         ~Closer() { mz_zip_reader_end(zip); }
     } closer{ &zip };
 
-    for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index)
+    // The sizes in the zip's directory are what extracting allocates and writes, so they are checked first.
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+    if (count > kZipEntries)
+        throw std::runtime_error(name + " contains more files than an effect package can.");
+    uint64_t total = 0;
+    for (mz_uint index = 0; index < count; ++index)
+    {
+        mz_zip_archive_file_stat stat{};
+        if (!mz_zip_reader_file_stat(&zip, index, &stat))
+            throw std::runtime_error("Could not read " + name + ".");
+        total += stat.m_uncomp_size;
+        if (stat.m_uncomp_size > kZipEntrySize || total > kZipTotalSize)
+            throw std::runtime_error(name + " unpacks to more data than an effect package can.");
+    }
+
+    for (mz_uint index = 0; index < count; ++index)
     {
         mz_zip_archive_file_stat stat{};
         if (!mz_zip_reader_file_stat(&zip, index, &stat) || stat.m_is_directory)
@@ -284,6 +359,8 @@ void ExtractZip(const std::string& data, const fs::path& destination, const std:
         const fs::path target = (destination / Wide(stat.m_filename)).lexically_normal();
         if (!IsInside(target, destination))
             throw std::runtime_error(name + " contains a file outside its own folder.");
+        if (!AllowedPackageFile(target.filename()))
+            continue;
         fs::create_directories(target.parent_path());
         size_t size = 0;
         void* bytes = mz_zip_reader_extract_to_heap(&zip, index, &size, 0);
@@ -340,9 +417,7 @@ void CopyPackageFiles(const fs::path& source, const fs::path& destination, const
             CopyPackageFiles(entry.path(), destination / name, denied);
             continue;
         }
-        bool skip = false;
-        for (const wchar_t* extension : { L".addon", L".addon32", L".addon64", L".dll", L".exe" })
-            skip |= _wcsicmp(name.extension().c_str(), extension) == 0;
+        bool skip = !AllowedPackageFile(name);
         for (size_t start = 0; start <= denied.size() && !skip;)
         {
             size_t end = denied.find(L',', start);
@@ -366,12 +441,43 @@ fs::path PackageDestination(const fs::path& files, const std::wstring& relative,
     return destination;
 }
 
+// "The preset A was not installed." or "The presets A, B and C were not installed.", and what to do about it.
+std::string SkippedNote(const char* one, const char* several, const std::vector<std::string>& names)
+{
+    std::string list;
+    for (size_t index = 0; index < names.size(); ++index)
+        list += (index == 0 ? "" : index + 1 == names.size() ? " and " : ", ") + names[index];
+    return names.size() == 1 ? std::string("The ") + one + " " + list + " was not installed. Run Setup again later to add it."
+                             : std::string("The ") + several + " " + list + " were not installed. Run Setup again later to add them.";
+}
+
+// A download list. Tests may give a local file instead of an address.
+std::string FetchList(const std::wstring& location, const std::atomic<bool>& cancel)
+{
+    if (location.rfind(L"https://", 0) != 0 && fs::path(location).is_absolute())
+        return ReadFile(location);
+    return Fetch(location, cancel, kListLimit);
+}
+
 void InstallReShade(const fs::path& work, const fs::path& files, const ReShadeRelease& release, bool presets, Progress& progress)
 {
+    // The hash comes from vendor/reshade/reshade.ini when Setup is built. CMake does not build Setup without it.
+    const std::string sha256 = RESHADE_SETUP_SHA256;
+    if (!IsSha256(sha256))
+        throw std::runtime_error("This Setup was built without the checksum of ReShade's installer, so it cannot install ReShade.");
     progress.Status("Downloading ReShade " + release.version);
     const fs::path setup = work / L"ReShade-Setup.exe";
-    Download(L"https://reshade.me/downloads/ReShade_Setup_" + Wide(release.version) + L"_Addon.exe", setup, "", kPackageLimit, progress.cancel,
+    Download(L"https://reshade.me/downloads/ReShade_Setup_" + Wide(release.version) + L"_Addon.exe", setup, sha256, kPackageLimit, progress.cancel,
              ByteProgress(progress, 0.0f, 0.05f));
+
+    // Checked again through a handle that keeps anyone from changing, renaming or deleting the file until ReShade's
+    // installer has started from it.
+    const HANDLE opened = CreateFileW(setup.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (opened == INVALID_HANDLE_VALUE)
+        throw std::runtime_error("Could not open the ReShade installer: " + SystemError(GetLastError()) + ".");
+    Handle verified(opened);
+    if (Sha256(verified.get()) != sha256)
+        throw std::runtime_error("The ReShade installer does not match its checksum.");
 
     // ReShade's installer also leaves an empty preset and a log next to the exe, which must not replace
     // the user's files, so it runs in a folder of its own and only its DLL and settings are kept.
@@ -379,7 +485,9 @@ void InstallReShade(const fs::path& work, const fs::path& files, const ReShadeRe
     const fs::path folder = work / L"reshade";
     fs::create_directories(folder);
     fs::copy_file(files / L"Unishade.exe", folder / L"Unishade.exe");
-    const DWORD code = RunHidden(L"\"" + setup.wstring() + L"\" --headless --api dxgi \"" + (folder / L"Unishade.exe").wstring() + L"\"", work);
+    const DWORD code = RunHidden(setup, std::move(verified),
+                                 L"\"" + setup.wstring() + L"\" --headless --api dxgi \"" + (folder / L"Unishade.exe").wstring() + L"\"", work,
+                                 progress.cancel);
     if (code != 0 || !fs::exists(folder / L"dxgi.dll") || !fs::exists(folder / L"ReShade.ini"))
         throw std::runtime_error(Format("ReShade's installer failed (exit code %lu).", code));
     fs::copy_file(folder / L"dxgi.dll", files / L"dxgi.dll");
@@ -389,66 +497,83 @@ void InstallReShade(const fs::path& work, const fs::path& files, const ReShadeRe
     progress.Fraction(0.08f);
 }
 
-void InstallEffects(const fs::path& work, const fs::path& files, Progress& progress)
+void InstallPackage(const fs::path& catalog, const std::wstring& section, const std::string& name, const fs::path& extracted,
+                    const fs::path& files, const std::atomic<bool>& cancel)
+{
+    const std::wstring url = IniString(catalog, section, L"DownloadUrl");
+    if (url.rfind(L"https://", 0) != 0)
+        throw std::runtime_error("The effect package " + name + " has an invalid download address.");
+    const fs::path shaderDestination = PackageDestination(files, IniString(catalog, section, L"InstallPath"), L"Shaders", name);
+
+    fs::remove_all(extracted);
+    ExtractZip(Fetch(url, cancel, kPackageLimit), extracted, name);
+    fs::path shaders, textures, shaderFallback, textureFallback;
+    FindPackageFolders(extracted, shaders, textures, shaderFallback, textureFallback);
+    if (shaders.empty())
+        shaders = shaderFallback;
+    if (textures.empty())
+        textures = textureFallback;
+    if (shaders.empty())
+        throw std::runtime_error("The effect package " + name + " contains no effects.");
+    CopyPackageFiles(shaders, shaderDestination, IniString(catalog, section, L"DenyEffectFiles"));
+    if (!textures.empty())
+        CopyPackageFiles(textures, PackageDestination(files, IniString(catalog, section, L"TextureInstallPath"), L"Textures", name), L"");
+    fs::remove_all(extracted);
+    SetupLog("Effect package installed: " + name);
+}
+
+// Every package on ReShade's list is installed, since presets use effects from packages the list does not select
+// by default. A package that fails is left out with a note, except one the list marks as required: the standard
+// effects with ReShade.fxh, which most other effects include. Returns false when a package was left out.
+bool InstallEffects(const fs::path& work, const fs::path& files, Progress& progress)
 {
     constexpr float kBegin = 0.08f, kEnd = 0.75f;
     progress.Status("Downloading effects");
     const fs::path catalog = files / L"EffectPackages.ini";
-    WriteFile(catalog, Fetch(sources.effects, progress.cancel));
+    WriteFile(catalog, FetchList(sources.effects, progress.cancel));
     const auto sections = IniSections(catalog);
+    std::vector<std::string> skipped;
     for (size_t index = 0; index < sections.size(); ++index)
     {
         const std::wstring& section = sections[index];
         const std::string name = Utf8(IniString(catalog, section, L"PackageName", section.c_str()));
         progress.Detail(Format("%zu of %zu: ", index + 1, sections.size()) + name);
-        const std::wstring url = IniString(catalog, section, L"DownloadUrl");
-        if (url.rfind(L"https://", 0) != 0)
-            throw std::runtime_error("The effect package " + name + " has an invalid download address.");
-        const fs::path shaderDestination = PackageDestination(files, IniString(catalog, section, L"InstallPath"), L"Shaders", name);
-
         const fs::path extracted = work / L"package";
-        fs::remove_all(extracted);
-        ExtractZip(Fetch(url, progress.cancel, kPackageLimit), extracted, name);
-        fs::path shaders, textures, shaderFallback, textureFallback;
-        FindPackageFolders(extracted, shaders, textures, shaderFallback, textureFallback);
-        if (shaders.empty())
-            shaders = shaderFallback;
-        if (textures.empty())
-            textures = textureFallback;
-        if (shaders.empty())
-            throw std::runtime_error("The effect package " + name + " contains no effects.");
-        CopyPackageFiles(shaders, shaderDestination, IniString(catalog, section, L"DenyEffectFiles"));
-        if (!textures.empty())
-            CopyPackageFiles(textures, PackageDestination(files, IniString(catalog, section, L"TextureInstallPath"), L"Textures", name), L"");
-        fs::remove_all(extracted);
-        SetupLog("Effect package installed: " + name);
+        try
+        {
+            InstallPackage(catalog, section, name, extracted, files, progress.cancel);
+        }
+        catch (const std::exception& e)
+        {
+            std::error_code ignored;
+            fs::remove_all(extracted, ignored);
+            if (IniString(catalog, section, L"Required") == L"1")
+                throw;
+            SetupLog("Effect package skipped: " + name + ". " + e.what());
+            skipped.push_back(name);
+        }
         progress.Fraction(kBegin + (kEnd - kBegin) * (index + 1) / sections.size());
     }
+    if (skipped.size() == sections.size())
+        throw std::runtime_error("No effect package could be installed. Check your internet connection and try again.");
+    if (!skipped.empty())
+        progress.Note(SkippedNote("effect package", "effect packages", skipped));
+    return skipped.empty();
 }
 
-void InstallPresets(const fs::path& work, const fs::path& files, Progress& progress)
+void InstallPreset(const fs::path& catalog, const std::wstring& file, const fs::path& folder, const std::set<std::string>& effects,
+                   const std::atomic<bool>& cancel)
 {
-    progress.Status("Downloading presets");
-    const fs::path catalog = work / L"preset-downloads.ini";
-    WriteFile(catalog, Fetch(sources.presets + L"/downloads.ini", progress.cancel));
-
-    std::set<std::string> effects;
-    for (const auto& entry : fs::recursive_directory_iterator(files / L"reshade-shaders" / L"Shaders"))
-        if (entry.is_regular_file())
-            effects.insert(Lowercase(Utf8(entry.path().filename().wstring())));
-
-    fs::create_directories(files / L"presets");
-    for (const std::wstring& file : IniSections(catalog))
+    const std::string name = Utf8(file);
+    if (fs::path(file).filename() != file || file.find(L':') != std::wstring::npos || _wcsicmp(fs::path(file).extension().c_str(), L".ini") != 0)
+        throw std::runtime_error("The preset list contains an invalid filename.");
+    const std::string hash = Lowercase(Utf8(IniString(catalog, file, L"sha256")));
+    if (!IsSha256(hash))
+        throw std::runtime_error("The preset list has an invalid checksum for " + name + ".");
+    const fs::path preset = folder / file;
+    Download(sources.presets + L"/" + file, preset, hash, kListLimit, cancel);
+    try
     {
-        const std::string name = Utf8(file);
-        if (fs::path(file).filename() != file || file.find(L':') != std::wstring::npos || _wcsicmp(fs::path(file).extension().c_str(), L".ini") != 0)
-            throw std::runtime_error("The preset list contains an invalid filename.");
-        const std::string hash = Lowercase(Utf8(IniString(catalog, file, L"sha256")));
-        if (!IsSha256(hash))
-            throw std::runtime_error("The preset list has an invalid checksum for " + name + ".");
-        const fs::path preset = files / L"presets" / file;
-        Download(sources.presets + L"/" + file, preset, hash, kListLimit, progress.cancel);
-
         // ReShade keeps Techniques before the first section, where the INI functions cannot read it.
         std::string techniques;
         PresetIni(ReadFile(preset)).Get("", "Techniques", techniques);
@@ -459,13 +584,97 @@ void InstallPresets(const fs::path& work, const fs::path& files, Progress& progr
             const size_t at = technique.find('@');
             const std::string shader = at == std::string::npos ? "" : technique.substr(at + 1);
             if (shader.empty() || shader.find_first_of("\\/:") != std::string::npos || !effects.count(Lowercase(shader)))
-                throw std::runtime_error(name + " needs " + (shader.empty() ? technique : shader) + ", which no effect package provides.");
+                throw std::runtime_error(name + " needs " + (shader.empty() ? technique : shader) + ", which no installed effect package provides.");
         }
     }
-    progress.Fraction(0.8f);
+    catch (...)
+    {
+        std::error_code ignored;
+        fs::remove(preset, ignored);
+        throw;
+    }
 }
 
-// Returns false and leaves a note when the add-on cannot be downloaded, so the rest still installs.
+// A preset that cannot be downloaded or verified, or needs an effect that was not installed, is left out with a
+// note, and so are all of them when their list cannot be downloaded. Returns false when a preset was left out.
+bool InstallPresets(const fs::path& work, const fs::path& files, Progress& progress)
+{
+    progress.Status("Downloading presets");
+    const fs::path catalog = work / L"preset-downloads.ini";
+    std::vector<std::wstring> presets;
+    try
+    {
+        WriteFile(catalog, Fetch(sources.presets + L"/downloads.ini", progress.cancel));
+        presets = IniSections(catalog);
+    }
+    catch (const std::exception& e)
+    {
+        SetupLog(std::string("Presets skipped: ") + e.what());
+        progress.Note("The presets were not installed because their list could not be downloaded. Run Setup again later to add them.");
+        return false;
+    }
+
+    std::set<std::string> effects;
+    for (const auto& entry : fs::recursive_directory_iterator(files / L"reshade-shaders" / L"Shaders"))
+        if (entry.is_regular_file())
+            effects.insert(Lowercase(Utf8(entry.path().filename().wstring())));
+
+    fs::create_directories(files / L"presets");
+    std::vector<std::string> skipped;
+    for (const std::wstring& file : presets)
+    {
+        try
+        {
+            InstallPreset(catalog, file, files / L"presets", effects, progress.cancel);
+        }
+        catch (const std::exception& e)
+        {
+            SetupLog("Preset skipped: " + Utf8(file) + ". " + e.what());
+            skipped.push_back(Utf8(file));
+        }
+    }
+    if (!skipped.empty())
+        progress.Note(SkippedNote("preset", "presets", skipped));
+    progress.Fraction(0.8f);
+    return skipped.empty();
+}
+
+// The address to download an add-on file from, when the manifest's url points into a GitHub release or Hugging Face
+// repository the manifests in vendor/ use. Addresses from before the repository was renamed move to the new name.
+std::optional<std::wstring> AddonUrl(const std::wstring& url)
+{
+    // A null component with a non-zero length makes WinHttpCrackUrl point into url.
+    URL_COMPONENTS parts{ sizeof(parts) };
+    parts.dwHostNameLength = parts.dwUserNameLength = parts.dwPasswordLength = parts.dwUrlPathLength = parts.dwExtraInfoLength = 1;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts) || parts.nScheme != INTERNET_SCHEME_HTTPS || parts.nPort != INTERNET_DEFAULT_HTTPS_PORT ||
+        parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength)
+        return std::nullopt;
+    const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
+    std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
+    constexpr std::wstring_view legacy = L"/OMouta/RobloxShadeHost/releases/download/";
+    if (_wcsicmp(host.c_str(), L"github.com") == 0 && path.rfind(legacy, 0) == 0)
+        path.replace(0, legacy.size(), L"/OMouta/Unishade/releases/download/");
+
+    // Escapes and dot segments could lead the server somewhere other than the path reads.
+    if (path.find_first_of(L"%\\") != std::wstring::npos)
+        return std::nullopt;
+    for (size_t start = 0; start < path.size();)
+    {
+        const size_t end = std::min(path.find(L'/', start), path.size());
+        const std::wstring_view segment(path.data() + start, end - start);
+        if (segment == L"." || segment == L"..")
+            return std::nullopt;
+        start = end + 1;
+    }
+    for (const auto& source : kAddonSources)
+        if (_wcsicmp(host.c_str(), source.host) == 0 && path.size() > wcslen(source.path) && path.rfind(source.path, 0) == 0)
+            return L"https://" + host + path;
+    return std::nullopt;
+}
+
+// Returns false and leaves a note when the add-on cannot be installed, so the rest still installs: when its manifest
+// cannot be downloaded or turns it off, when the manifest's files or hashes differ from the ones built into Setup,
+// or when a download fails or does not match.
 bool DownloadAddon(const fs::path& work, const fs::path& files, const AddonInfo& addon, Progress& progress)
 {
     constexpr float kBegin = 0.8f, kEnd = 0.95f;
@@ -473,33 +682,38 @@ bool DownloadAddon(const fs::path& work, const fs::path& files, const AddonInfo&
     try
     {
         const fs::path manifest = work / L"addon-downloads.ini";
-        WriteFile(manifest, Fetch(addon.addon == Addon::Depth ? sources.depth : sources.dlss5, progress.cancel));
+        WriteFile(manifest, FetchList(addon.addon == Addon::Depth ? sources.depth : sources.dlss5, progress.cancel));
         if (IniString(manifest, addon.section, L"enabled", L"0") != L"1")
             throw std::runtime_error(std::string(addon.name) + " downloads are turned off for now.");
+        const std::string invalid = std::string("The ") + addon.name + " download list ";
+        for (const std::wstring& section : IniSections(manifest))
+            if (_wcsicmp(section.c_str(), addon.section) != 0 &&
+                std::none_of(addon.files.begin(), addon.files.end(), [&](const PinnedFile& file) { return _wcsicmp(file.name, section.c_str()) == 0; }))
+                throw std::runtime_error(invalid + "names a file this Setup does not know: " + Utf8(section) + ".");
+        std::vector<std::wstring> urls;
+        for (const PinnedFile& file : addon.files)
+        {
+            if (Lowercase(Utf8(IniString(manifest, file.name, L"sha256"))) != file.sha256)
+                throw std::runtime_error(invalid + "has a different checksum for " + Utf8(file.name) + " than this Setup. A newer Setup may be needed.");
+            const auto url = AddonUrl(IniString(manifest, file.name, L"url"));
+            if (!url)
+                throw std::runtime_error(invalid + "points " + Utf8(file.name) + " somewhere Setup does not download add-ons from.");
+            urls.push_back(*url);
+        }
         for (size_t index = 0; index < addon.files.size(); ++index)
         {
-            const wchar_t* file = addon.files[index];
-            std::wstring url = IniString(manifest, file, L"url");
-            // Existing asset releases may still contain manifests published before the rename.
-            constexpr std::wstring_view legacy = L"https://github.com/OMouta/RobloxShadeHost/releases/download/";
-            if (url.rfind(legacy, 0) == 0)
-                url.replace(0, legacy.size(), L"https://github.com/OMouta/Unishade/releases/download/");
-            const std::string hash = Lowercase(Utf8(IniString(manifest, file, L"sha256")));
-            if ((url.rfind(L"https://github.com/OMouta/Unishade/releases/download/", 0) != 0 &&
-                 url.rfind(L"https://huggingface.co/", 0) != 0) ||
-                !IsSha256(hash))
-                throw std::runtime_error(std::string("The ") + addon.name + " download list is invalid.");
+            const PinnedFile& file = addon.files[index];
             const float begin = kBegin + (kEnd - kBegin) * index / addon.files.size();
             const float end = kBegin + (kEnd - kBegin) * (index + 1) / addon.files.size();
-            Download(url, files / file, hash, kAddonLimit, progress.cancel, ByteProgress(progress, begin, end, Utf8(file) + ": "));
+            Download(urls[index], files / file.name, file.sha256, kAddonLimit, progress.cancel, ByteProgress(progress, begin, end, Utf8(file.name) + ": "));
         }
         return true;
     }
     catch (const std::exception& e)
     {
         std::error_code ignored;
-        for (const wchar_t* file : addon.files)
-            fs::remove(files / file, ignored);
+        for (const PinnedFile& file : addon.files)
+            fs::remove(files / file.name, ignored);
         SetupLog(std::string(addon.name) + " skipped: " + e.what());
         progress.Note(std::string(addon.name) + " was not installed because its download failed or could not be verified. Run Setup again "
                                                 "later to add it.");
@@ -591,6 +805,52 @@ bool DeleteInside(const fs::path& root, const fs::path& path, bool folder)
         return false;
     }
     return true;
+}
+
+std::wstring CurrentUserSid()
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        throw std::runtime_error("Could not read the current user's account: " + SystemError(GetLastError()) + ".");
+    const Handle owned(token);
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<BYTE> user(size);
+    wchar_t* text = nullptr;
+    if (!size || !GetTokenInformation(token, TokenUser, user.data(), size, &size) ||
+        !ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid, &text))
+        throw std::runtime_error("Could not read the current user's account: " + SystemError(GetLastError()) + ".");
+    std::wstring sid = text;
+    LocalFree(text);
+    return sid;
+}
+
+// A folder created outside the user's profile inherits its parent's permissions, and on C:\ those let every user of
+// the PC modify the files in it, so another account could replace dxgi.dll or Unishade.exe. The first folder Setup
+// creates there gets permissions of its own instead: full control for this user, SYSTEM and administrators, and
+// read and run for other users. Folders that already exist keep theirs.
+void CreateInstallFolder(const fs::path& directory)
+{
+    std::error_code ignored;
+    fs::path first;
+    for (fs::path folder = directory; folder.has_relative_path() && !fs::exists(folder, ignored); folder = folder.parent_path())
+        first = folder;
+    if (!first.empty() && !IsInside(directory, KnownFolder(FOLDERID_Profile)))
+    {
+        const std::wstring sddl = L"D:P(A;OICI;FA;;;" + CurrentUserSid() + L")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr))
+            throw std::runtime_error("Could not set up the permissions of " + PathText(first) + ": " + SystemError(GetLastError()) + ".");
+        SECURITY_ATTRIBUTES attributes{ sizeof(attributes), descriptor, FALSE };
+        const bool created = CreateDirectoryW(first.c_str(), &attributes) != FALSE;
+        const DWORD error = GetLastError();
+        LocalFree(descriptor);
+        if (!created && error != ERROR_ALREADY_EXISTS)
+            throw std::runtime_error("Could not create " + PathText(first) + ": " + SystemError(error) + ".");
+        if (created)
+            SetupLog("Created " + PathText(first) + ", which only this user and administrators can change.");
+    }
+    fs::create_directories(directory);
 }
 
 void CreateShortcut(const fs::path& link, const fs::path& target)
@@ -700,7 +960,7 @@ void CloseHost(const fs::path& directory)
     });
 }
 
-void Commit(const fs::path& files, const InstallOptions& options, Progress& progress)
+void Commit(const fs::path& files, const InstallOptions& options, bool addonInstalled, Progress& progress)
 {
     const fs::path& directory = options.directory;
     progress.Status("Installing to " + PathText(directory));
@@ -723,14 +983,7 @@ void Commit(const fs::path& files, const InstallOptions& options, Progress& prog
     };
     try
     {
-        fs::create_directories(directory);
-        // An add-on that is not selected is removed, and depth estimation and DLSS5 must not be installed together.
-        if (options.reshade)
-            for (const auto& addon : kAddons)
-                if (addon.addon != options.addon)
-                    for (const wchar_t* file : addon.files)
-                        RemoveFile(directory / file);
-
+        CreateInstallFolder(directory);
         const bool hadReShadeIni = fs::exists(directory / L"ReShade.ini");
         installed = ReadManifest(directory);
         listRead = true;
@@ -749,6 +1002,13 @@ void Commit(const fs::path& files, const InstallOptions& options, Progress& prog
                 installed.insert(relative.wstring());
             fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing);
         }
+        // An add-on that is not selected is removed, since depth estimation and DLSS5 must not be installed together.
+        // When the selected one could not be downloaded, the installed one stays.
+        if (options.reshade && (options.addon == Addon::None || addonInstalled))
+            for (const auto& addon : kAddons)
+                if (addon.addon != options.addon)
+                    for (const PinnedFile& file : addon.files)
+                        RemoveFile(directory / file.name);
         // Repairs the search paths in a ReShade.ini written by an earlier version of Setup.
         if (options.reshade && hadReShadeIni)
             FixReShadeIni(directory / L"ReShade.ini", false);
@@ -862,26 +1122,27 @@ std::string_view Resource(int id)
 
 ReShadeRelease FetchReShadeRelease(const std::atomic<bool>& cancel)
 {
-    const std::string page = Fetch(L"https://reshade.me/", cancel);
-    const size_t end = page.find("_Addon.exe");
-    const size_t start = end == std::string::npos ? end : page.rfind('_', end - 1);
-    if (start == std::string::npos)
-        throw std::runtime_error("Could not find ReShade's download on reshade.me.");
     ReShadeRelease release;
-    release.version = page.substr(start + 1, end - start - 1);
-    if (release.version.size() < 5 || release.version.size() > 30 || release.version.find_first_not_of("0123456789.") != std::string::npos)
-        throw std::runtime_error("reshade.me lists an unexpected ReShade version.");
+    release.version = RESHADE_VERSION;
     release.license = Fetch(L"https://raw.githubusercontent.com/crosire/reshade/v" + Wide(release.version) + L"/LICENSE.md", cancel);
     if (release.license.find("Redistribution and use") == std::string::npos)
         throw std::runtime_error("Could not load the ReShade license.");
-    SetupLog("Newest ReShade: " + release.version);
+    SetupLog("Loaded the license of ReShade " + release.version);
     return release;
 }
 
-void Install(const InstallOptions& options, const ReShadeRelease& release, Progress& progress)
+bool Install(const InstallOptions& options, const ReShadeRelease& release, Progress& progress)
 {
     SetupLog("Installing Unishade " UNISHADE_VERSION " to " + PathText(options.directory));
-    const fs::path work = fs::temp_directory_path() / (L"Unishade-Setup-" + std::to_wstring(GetCurrentProcessId()));
+    // A new folder with a random name, so no other program can have prepared its contents.
+    std::error_code error;
+    const fs::path temp = fs::temp_directory_path(error);
+    const fs::path work = temp / RandomName(L"Unishade-Setup-");
+    if (error || !CreateDirectoryW(work.c_str(), nullptr))
+    {
+        const DWORD reason = error ? static_cast<DWORD>(error.value()) : GetLastError();
+        throw std::runtime_error("Could not create a temporary folder in " + PathText(temp) + ": " + SystemError(reason) + ".");
+    }
     struct Cleanup
     {
         fs::path path;
@@ -892,31 +1153,32 @@ void Install(const InstallOptions& options, const ReShadeRelease& release, Progr
         }
     } cleanup{ work };
     const fs::path files = work / L"files";
-    try
-    {
-        fs::remove_all(work);
-        fs::create_directories(files);
-    }
-    catch (const fs::filesystem_error& e)
-    {
-        throw std::runtime_error("Could not prepare " + PathText(work) + ": " + SystemError(e.code().value()) + ".");
-    }
+    fs::create_directories(files, error);
+    if (error)
+        throw std::runtime_error("Could not prepare " + PathText(work) + ": " + SystemError(error.value()) + ".");
 
     WriteFile(files / L"Unishade.exe", Resource(IDR_HOST));
     WriteFile(files / L"LICENSE", Resource(IDR_LICENSE));
     WriteFile(files / L"CREDITS.txt", Resource(IDR_CREDITS));
+    bool complete = true;
+    bool addonInstalled = false;
     if (options.reshade)
     {
         InstallReShade(work, files, release, options.presets, progress);
-        InstallEffects(work, files, progress);
-        if (options.presets)
-            InstallPresets(work, files, progress);
+        if (!InstallEffects(work, files, progress))
+            complete = false;
+        if (options.presets && !InstallPresets(work, files, progress))
+            complete = false;
         for (const auto& addon : kAddons)
             if (addon.addon == options.addon)
-                DownloadAddon(work, files, addon, progress);
+            {
+                addonInstalled = DownloadAddon(work, files, addon, progress);
+                complete = complete && addonInstalled;
+            }
     }
-    Commit(files, options, progress);
-    SetupLog("Installation finished.");
+    Commit(files, options, addonInstalled, progress);
+    SetupLog(complete ? "Installation finished." : "Installation finished without the parts listed above.");
+    return complete;
 }
 
 void Uninstall(const fs::path& directory, bool deleteUserFiles)
@@ -1046,8 +1308,8 @@ Addon InstalledAddon(const fs::path& directory)
 {
     std::error_code ignored;
     for (const auto& addon : kAddons)
-        for (const wchar_t* file : addon.files)
-            if (fs::exists(directory / file, ignored))
+        for (const PinnedFile& file : addon.files)
+            if (fs::exists(directory / file.name, ignored))
                 return addon.addon;
     return Addon::None;
 }
