@@ -1,5 +1,6 @@
 #include "gpu.h"
 #include "log.h"
+#include "platform.h"
 
 #include <GLFW/glfw3.h>
 
@@ -35,6 +36,29 @@ int DeviceRank(VkPhysicalDeviceType type)
     default:
         return 3;
     }
+}
+
+// Whether the device is the DRM device with the given primary or render node.
+bool IsDrmDevice(VkPhysicalDevice device, int64_t major, int64_t minor)
+{
+#ifdef VK_EXT_physical_device_drm
+    uint32_t count = 0;
+    if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
+        return false;
+    std::vector<VkExtensionProperties> extensions(count);
+    if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, extensions.data()) != VK_SUCCESS ||
+        !HasExtension(extensions, VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME))
+        return false;
+    VkPhysicalDeviceDrmPropertiesEXT drm{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT };
+    VkPhysicalDeviceProperties2 properties{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+    properties.pNext = &drm;
+    vkGetPhysicalDeviceProperties2(device, &properties);
+    return (drm.hasPrimary && drm.primaryMajor == major && drm.primaryMinor == minor) ||
+           (drm.hasRender && drm.renderMajor == major && drm.renderMinor == minor);
+#else
+    (void)device, (void)major, (void)minor;
+    return false;
+#endif
 }
 } // namespace
 
@@ -96,11 +120,18 @@ bool Gpu::Init(bool headless, std::string& error)
     vkEnumeratePhysicalDevices(instance, &count, nullptr);
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance, &count, devices.data());
+    // Frames from the display server can only be imported on the graphics card it draws with, which matters on
+    // laptops with two. That card comes first when the system says which it is, otherwise the fastest kind.
+    int64_t displayMajor = 0, displayMinor = 0;
+    const bool displayKnown = !headless && devices.size() > 1 && platform::DisplayDrmDevice(displayMajor, displayMinor);
     int bestRank = 99;
     for (VkPhysicalDevice device : devices)
     {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(device, &props);
+        if (props.apiVersion < VK_API_VERSION_1_1)
+            continue;
+        const int rank = displayKnown && IsDrmDevice(device, displayMajor, displayMinor) ? -1 : DeviceRank(props.deviceType);
         uint32_t familyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
         std::vector<VkQueueFamilyProperties> families(familyCount);
@@ -111,8 +142,7 @@ bool Gpu::Init(bool headless, std::string& error)
             if ((families[family].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT) ||
                 (!headless && !glfwGetPhysicalDevicePresentationSupport(instance, device, family)))
                 continue;
-            const int rank = DeviceRank(props.deviceType);
-            if (rank < bestRank && props.apiVersion >= VK_API_VERSION_1_1)
+            if (rank < bestRank)
             {
                 bestRank = rank;
                 physicalDevice = device;
@@ -127,6 +157,8 @@ bool Gpu::Init(bool headless, std::string& error)
         error = "No graphics card with Vulkan 1.1 can draw to windows here.";
         return false;
     }
+    if (bestRank < 0)
+        Log(LogLevel::Info, "The display is drawn by %s, so effects run there too.", properties.deviceName);
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
 
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, nullptr);
