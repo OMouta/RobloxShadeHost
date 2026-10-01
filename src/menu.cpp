@@ -2622,20 +2622,16 @@ void StopCapture()
 
 void ApplyHotkeys(const InputHotkeys& hotkeys)
 {
-    for (size_t i = 1; i < std::size(kShortcuts); ++i)
-        for (size_t j = 0; j < i; ++j)
-        {
-            const Hotkey& a = hotkeys.*kShortcuts[i].member;
-            const Hotkey& b = hotkeys.*kShortcuts[j].member;
-            if (a.key && a.key == b.key && a.modifiers == b.modifiers)
-            {
-                // Names the shortcut that already had these keys, not the one just changed.
-                const Hotkey& before = g.hotkeys.*kShortcuts[i].member;
-                const bool changed = a.key != before.key || a.modifiers != before.modifiers;
-                m.shortcutError = FormatHotkey(a) + L" is already used by \"" + Wide(kShortcutText[changed ? j : i].title) + L"\".";
-                return;
-            }
-        }
+    if (const auto clash = FindShortcutClash(hotkeys))
+    {
+        // Names the shortcut that already had these keys, not the one just changed.
+        const Hotkey& hotkey = hotkeys.*kShortcuts[clash->later].member;
+        const Hotkey& before = g.hotkeys.*kShortcuts[clash->later].member;
+        const bool changed = hotkey.key != before.key || hotkey.modifiers != before.modifiers;
+        const char* holder = kShortcutText[changed ? clash->earlier : clash->later].title;
+        m.shortcutError = FormatHotkey(hotkey) + L" is already used by \"" + Wide(holder) + L"\".";
+        return;
+    }
     m.shortcutError = ChangeHotkeys(hotkeys);
 }
 

@@ -2,6 +2,8 @@
 
 #include "hotkey.h"
 
+#include <cstddef>
+#include <optional>
 #include <string>
 
 struct InputHotkeys
@@ -48,6 +50,17 @@ inline constexpr Shortcut kShortcuts[] = {
     { &InputHotkeys::nextPreset, kNextPresetHotkey, L"NextPresetKey", L"Ctrl+PageDown", false },
     { &InputHotkeys::previousPreset, kPreviousPresetHotkey, L"PreviousPresetKey", L"Ctrl+PageUp", false },
 };
+
+// Two shortcuts on the same keys, by their index in kShortcuts.
+struct ShortcutClash
+{
+    size_t earlier;
+    size_t later;
+};
+
+// The first two shortcuts on the same keys, in kShortcuts' order, or nothing when each has keys of its own.
+// Shortcuts without a key never clash.
+std::optional<ShortcutClash> FindShortcutClash(const InputHotkeys& hotkeys);
 
 // Reads shortcuts from RobloxShadeHost.ini beside the exe into g.hotkeys, creating the file on first run.
 // Invalid values are reported and replaced by the defaults.
