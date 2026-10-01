@@ -22,13 +22,21 @@ $folder = Join-Path $out 'Unishade'
 $log = Join-Path $out 'setup.log'
 if (Test-Path $folder) { Remove-Item $folder -Recurse -Force }
 New-Item -ItemType Directory -Path $out -Force | Out-Null
-# Presets come from main on the GitHub repository origin points at, which may still have its old name.
-$repository = [regex]::Match((git -C $repo remote get-url origin), 'github\.com[:/](.+?)(\.git)?$').Groups[1].Value
 $arguments = @('--silent', '--portable', '--components', 'reshade,presets', '--accept-reshade-license',
-    '--presets-url', "https://raw.githubusercontent.com/$repository/main/presets",
     '--dir', "`"$folder`"", '--log', "`"$log`"")
+# Presets come from main on the GitHub repository origin points at, which may still have its old name. Without a
+# GitHub origin, Setup uses its own presets address.
+$origin = [string](git -C $repo config --get remote.origin.url)
+$github = [regex]::Match($origin, 'github\.com[:/]([^/]+/[^/]+?)(\.git)?/?$')
+if ($github.Success) {
+    $arguments += @('--presets-url', "https://raw.githubusercontent.com/$($github.Groups[1].Value)/main/presets")
+} else {
+    Write-Warning "origin is not a GitHub repository, so Setup downloads the presets from its default address."
+}
 $setup = Join-Path $build "installer/Unishade-Setup-$version.exe"
 $exitCode = (Start-Process $setup -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru).ExitCode
+# 2 means Setup left out an effect package or a preset, which a beta should not ship without.
+if ($exitCode -eq 2) { throw "Setup left out an effect package or a preset. See $log" }
 if ($exitCode -ne 0) { throw "Setup failed with exit code $exitCode. See $log" }
 
 # Setup's uninstall list means nothing outside an installation.

@@ -3,6 +3,7 @@
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "install.h"
+#include "pinned.h"
 #include "resource.h"
 #include "text.h"
 #include "../src/hotkey.h"
@@ -59,6 +60,11 @@ constexpr ImU32 kRainbow[] = {
     IM_COL32(255, 72, 96, 255),  IM_COL32(255, 158, 54, 255), IM_COL32(248, 228, 76, 255), IM_COL32(84, 222, 122, 255),
     IM_COL32(62, 198, 255, 255), IM_COL32(84, 110, 255, 255), IM_COL32(186, 92, 255, 255),
 };
+
+// Exit codes of a silent run. 1 is also used when the command line is invalid.
+constexpr int kExitFailed = 1;
+// Installed, but an effect package, a preset or the requested add-on was left out. The setup log says which.
+constexpr int kExitIncomplete = 2;
 
 constexpr wchar_t kDefaultToggleKey[] = L"Home";
 constexpr wchar_t kDefaultOverlayToggleKey[] = L"Ctrl+F8";
@@ -174,6 +180,7 @@ struct App
 
     Task uninstallTask;
     bool deleteUserFiles = false;
+    bool folderLeft = false;
 };
 App app;
 
@@ -232,6 +239,14 @@ void StartReleaseFetch()
 {
     app.releaseError.clear();
     app.releaseTask.Start([] { app.fetchedRelease = FetchReShadeRelease(app.releaseCancel); });
+}
+
+// Setup started on the uninstall page has not loaded the license yet.
+void ShowLicensePage()
+{
+    if (!app.release && !app.releaseTask.Running())
+        StartReleaseFetch();
+    app.page = Page::License;
 }
 
 void StartInstall()
@@ -645,7 +660,8 @@ void ManagePage()
         Text("This setup installs version " UNISHADE_VERSION ".", kDim, 15);
     Spacing(14);
     if (Card("update", "Update or change add-ons", nullptr, 0,
-             "Get the newest ReShade and effects, or add or remove depth estimation and DLSS5. Your settings and presets stay.", CardKind::Action))
+             "Get ReShade " RESHADE_VERSION " and the newest effects, or add or remove depth estimation and DLSS5. Your settings and presets stay.",
+             CardKind::Action))
     {
         app.addon = InstalledAddon(Directory());
         app.page = Page::Addons;
@@ -658,7 +674,8 @@ void AddonsPage()
 {
     Title("Choose what to install");
     Spacing(6);
-    Card("reshade", "ReShade and effects", "Included", kDim, "ReShade from reshade.me and every effect package on ReShade's official list.", CardKind::Static);
+    Card("reshade", "ReShade and effects", "Included", kDim, "ReShade " RESHADE_VERSION " from reshade.me and every effect package on ReShade's official list.",
+         CardKind::Static);
     if (Card("presets", "Presets", nullptr, 0, "Ready-made looks to start from. Pick one in the Unishade menu.", CardKind::Toggle, app.presets))
         app.presets = !app.presets;
     Spacing(8);
@@ -698,7 +715,7 @@ void LicensePage()
         Spinner(S(14));
         ImGui::SameLine(0, S(12));
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(4));
-        Text("Finding the newest ReShade...", kDim, 15);
+        Text("Loading the ReShade license...", kDim, 15);
     }
     else
     {
@@ -733,7 +750,7 @@ void FailedPage()
     if (!cancelled)
         Text(app.installTask.error, kError, 15);
     Spacing(6);
-    Text("Go back to try again, or leave out the part that failed.", kDim, 15);
+    Text("Go back to try again.", kDim, 15);
     Spacing(6);
     if (Link("Open the setup log", kAccentHover, 15))
         OpenFile(SetupLogPath());
@@ -765,7 +782,10 @@ void UninstallPage()
     Title("Uninstall Unishade");
     Text("Removes Unishade, ReShade and the effects from " + std::string(app.directory) + ", and its Start menu shortcuts.", kDim, 15);
     Spacing(10);
-    CheckLine("Also delete my presets, ReShade settings and shortcuts", app.deleteUserFiles);
+    CheckLine("Also delete my presets, settings and game list", app.deleteUserFiles);
+    Text("That deletes ReShade.ini, ReShadePreset.ini, RobloxShadeHost.ini and games.ini, and the presets and reshade-shaders folders with "
+         "everything in them. Other files in the folder, such as screenshots, stay.",
+         kDim, 14);
     if (app.uninstallTask.Running())
     {
         Spacing(10);
@@ -779,7 +799,9 @@ void UninstalledPage()
     {
         Title("Unishade was uninstalled");
         if (!app.deleteUserFiles)
-            Text("Your presets, ReShade settings and shortcuts are still in " + std::string(app.directory) + ".", kDim, 15);
+            Text("Your presets and settings are still in " + std::string(app.directory) + ".", kDim, 15);
+        else if (app.folderLeft)
+            Text("Files Setup did not create, such as screenshots, are still in " + std::string(app.directory) + ".", kDim, 15);
     }
     else
     {
@@ -816,7 +838,11 @@ void CollectTasks()
             DestroyWindow(ui.window);
     }
     if (app.uninstallTask.Collect())
+    {
+        std::error_code ignored;
+        app.folderLeft = fs::exists(Directory(), ignored);
         app.page = Page::Uninstalled;
+    }
 }
 
 void DrawUi()
@@ -888,7 +914,7 @@ void DrawUi()
         break;
     case Page::Addons:
         if (FooterButton(0, "Next", true))
-            app.page = Page::License;
+            ShowLicensePage();
         if (FooterButton(1, "Back", false))
             app.page = app.installation ? Page::Manage : Page::Welcome;
         break;
@@ -1126,6 +1152,15 @@ void AddFonts()
 
 int RunWindow(const Arguments& arguments)
 {
+    // However the window ends, the license download stops first, so no hidden Setup keeps running.
+    struct StopReleaseFetch
+    {
+        ~StopReleaseFetch()
+        {
+            app.releaseCancel = true;
+            app.releaseTask.Wait();
+        }
+    } stopReleaseFetch;
     app.installation = FindInstallation();
     const fs::path directory = !arguments.directory.empty() ? fs::absolute(arguments.directory)
                                : app.installation        ? app.installation->directory
@@ -1152,7 +1187,7 @@ int RunWindow(const Arguments& arguments)
     ui.window = CreateWindowExW(0, windowClass.lpszClassName, L"Unishade Setup", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr,
                                 nullptr, windowClass.hInstance, nullptr);
     if (!ui.window)
-        return 1;
+        return kExitFailed;
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(ui.window, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     const COLORREF caption = RGB(12, 13, 17);
@@ -1172,7 +1207,7 @@ int RunWindow(const Arguments& arguments)
     if (!CreateDeviceAndSwapchain())
     {
         MessageBoxW(ui.window, L"Setup could not start its window because DirectX 11 is unavailable.", L"Unishade Setup", MB_ICONERROR);
-        return 1;
+        return kExitFailed;
     }
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
@@ -1228,8 +1263,6 @@ int RunWindow(const Arguments& arguments)
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 500, QS_ALLINPUT);
     }
 
-    app.releaseCancel = true;
-    app.releaseTask.Wait();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -1280,12 +1313,11 @@ int RunSilent(const Arguments& arguments)
             throw std::runtime_error("Presets and add-ons need ReShade. Add reshade to --components.");
         if (options.reshade && !arguments.acceptLicense)
             throw std::runtime_error("Installing ReShade needs --accept-reshade-license. Read the license first: "
-                                     "https://github.com/crosire/reshade/blob/main/LICENSE.md");
+                                     "https://github.com/crosire/reshade/blob/v" RESHADE_VERSION "/LICENSE.md");
 
         Progress progress;
         const ReShadeRelease release = options.reshade ? FetchReShadeRelease(progress.cancel) : ReShadeRelease{};
-        Install(options, release, progress);
-        return 0;
+        return Install(options, release, progress) ? 0 : kExitIncomplete;
     }
     catch (const Cancelled&)
     {
@@ -1295,7 +1327,7 @@ int RunSilent(const Arguments& arguments)
     {
         SetupLog(std::string("Error: ") + e.what());
     }
-    return 1;
+    return kExitFailed;
 }
 
 Arguments ParseArguments()
@@ -1347,8 +1379,9 @@ Arguments ParseArguments()
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     // Setup's copy lives next to ReShade, which installs itself as dxgi.dll or d3d11.dll, and Windows looks
-    // in the exe's folder first. d3d11.dll is delay-loaded, so loading both from System32 before anything
-    // else keeps ReShade out of Setup; later loads by name get these copies.
+    // in the exe's folder first. From here on, DLLs loaded by name, including the delay-loaded imports, come
+    // from System32 only. dxgi.dll and d3d11.dll are loaded right away, so later loads by name get these copies.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1361,7 +1394,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         SetupLog(arguments.error);
         if (!arguments.silent)
             MessageBoxW(nullptr, Wide(arguments.error).c_str(), L"Unishade Setup", MB_ICONERROR);
-        return 1;
+        return kExitFailed;
     }
     const int result = arguments.silent ? RunSilent(arguments) : RunWindow(arguments);
     DeleteMovedSetup();
