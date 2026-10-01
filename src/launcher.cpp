@@ -48,6 +48,15 @@ constexpr float kMinHeight = 540;
 constexpr float kPickerWidth = 480;
 constexpr float kPickerMaxHeight = 520;
 constexpr wchar_t kPickerClass[] = L"UnishadePicker";
+// How long a removed game can be put back.
+constexpr UINT kUndoMilliseconds = 8000;
+
+// The launcher window's timers.
+enum Timer : UINT_PTR
+{
+    kUndoTimer = 1,
+    kTipTimer,
+};
 
 enum class Action
 {
@@ -60,6 +69,7 @@ enum class Action
     DetectAutomatically,
     ToggleGame,
     RemoveGame,
+    UndoRemove,
     DismissNotices,
     OpenUrl,
 };
@@ -82,6 +92,7 @@ struct Target
     size_t index = 0;
     std::wstring label;
     bool on = false;
+    const wchar_t* tip = nullptr; // for buttons that are only an icon
 };
 
 // Which control a target is. The targets are made again with every layout, so they are told apart by this.
@@ -101,6 +112,8 @@ struct Entry
     fs::path icon; // the executable, or empty to show the name's first letter
     bool enabled = true;
     bool running = false;
+    size_t game = 0;      // its index in g.autoGames
+    bool removed = false; // until it can no longer be put back
     RECT rect{};
     RECT iconRect{};
     RECT nameRect{};
@@ -137,6 +150,13 @@ struct Shown
     UINT overlayModifiers = 0;
 
     bool operator==(const Shown&) const = default;
+};
+
+// A removed game, which can be put back for a few seconds.
+struct Removed
+{
+    AutoGame game;
+    size_t index = 0; // where it was in the list
 };
 
 // Picking a window either saves its game or uses the window until Detect automatically.
@@ -204,6 +224,9 @@ struct Launcher
     bool tracking = false;
     // A click only acts when it is let go over the control it was pressed on.
     std::optional<Control> pressed;
+    // Whose tip shows, after the mouse rests on it.
+    std::optional<Control> tip;
+    std::optional<Removed> removed;
 
     // The picker, a dialog over the launcher listing the open windows.
     HWND pickerWindow = nullptr;
@@ -345,6 +368,19 @@ fs::path Executable(DWORD processId)
     }
 }
 
+// The name of a game's presets folder and of its entry in [GamePresets], like in the menu: its name without what
+// Windows does not allow in names.
+std::wstring FolderName(std::wstring name)
+{
+    for (wchar_t& character : name)
+        if (character < 32 || wcschr(L"\\/:*?\"<>|", character))
+            character = L' ';
+    name.erase(0, name.find_first_not_of(L' '));
+    // Windows drops dots and spaces from the end of names.
+    name.erase(name.find_last_not_of(L". ") + 1);
+    return name;
+}
+
 // Games saved by filename, like Roblox, move with every update, so their icon comes from a running copy.
 void LocateGames()
 {
@@ -404,8 +440,15 @@ void Describe()
 
     l.entries.clear();
     LocateGames();
-    for (const AutoGame& saved : g.autoGames)
+    // A removed game keeps its row while it can be put back, so a second click does not land on the next game.
+    const auto removed = [](size_t index) {
+        if (l.removed && l.removed->index == index)
+            l.entries.push_back({ .name = l.removed->game.name, .removed = true });
+    };
+    for (size_t i = 0; i < g.autoGames.size(); ++i)
     {
+        removed(i);
+        const AutoGame& saved = g.autoGames[i];
         const auto located = l.located.find(saved.executable.wstring());
         l.entries.push_back({ .name = saved.name,
                               .detail = saved.executable.wstring(),
@@ -413,8 +456,11 @@ void Describe()
                                     : located != l.located.end()        ? located->second
                                                                         : fs::path{},
                               .enabled = saved.enabled,
-                              .running = g.target && MatchesExecutable(saved, l.activeExecutable) });
+                              .running = g.target && MatchesExecutable(saved, l.activeExecutable),
+                              .game = i });
     }
+    if (l.removed && l.removed->index >= g.autoGames.size())
+        removed(l.removed->index);
 
     l.update = AvailableUpdate();
     const std::wstring setup = ExeDirectory() + L"Unishade-Setup.exe";
@@ -557,9 +603,22 @@ void Layout(HDC dc)
         const int top = y + static_cast<int>(i) * rowHeight;
         middle = top + rowHeight / 2;
         const RECT remove{ right - P(12) - P(28), middle - P(14), right - P(12), middle + P(14) };
+        if (entry.removed)
+        {
+            // Undo follows the text, away from where the remove button was.
+            const int left = pad + P(14);
+            const int undoWidth = TextWidth(dc, ui->body, L"Undo");
+            const int textWidth = TextWidth(dc, ui->body, L"Removed " + entry.name + L".");
+            const int textEnd = left + std::min<int>(textWidth, remove.left - P(24) - undoWidth - P(10) - left);
+            entry.rect = { pad, top, right, top + rowHeight };
+            entry.nameRect = { left, top, textEnd, top + rowHeight };
+            l.targets.push_back({ { textEnd + P(10), middle - P(10), textEnd + P(10) + undoWidth, middle + P(10) }, Action::UndoRemove,
+                                  Look::Link, 0, L"Undo" });
+            continue;
+        }
         const RECT toggle{ remove.left - P(10) - P(36), middle - P(10), remove.left - P(10), middle + P(10) };
-        l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, i });
-        l.targets.push_back({ toggle, Action::ToggleGame, Look::Switch, i, L"", entry.enabled });
+        l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, entry.game, L"", false, L"Remove from list" });
+        l.targets.push_back({ toggle, Action::ToggleGame, Look::Switch, entry.game, L"", entry.enabled });
         int nameRight = toggle.left - P(14);
         entry.badge = {};
         if (entry.running)
@@ -660,18 +719,34 @@ int TargetAt(POINT point)
     return -1;
 }
 
+int FindTarget(const std::optional<Control>& control)
+{
+    for (size_t i = 0; control && i < l.targets.size(); ++i)
+        if (ControlOf(l.targets[i]) == *control)
+            return static_cast<int>(i);
+    return -1;
+}
+
+// A button that is only an icon shows its tip once the mouse rests on it, like a tooltip.
+void SetHovered(int hovered)
+{
+    if (hovered == l.hovered)
+        return;
+    l.hovered = hovered;
+    l.tip.reset();
+    KillTimer(g.launcher, kTipTimer);
+    if (hovered >= 0 && l.targets[hovered].tip)
+        SetTimer(g.launcher, kTipTimer, GetDoubleClickTime(), nullptr);
+    InvalidateRect(g.launcher, nullptr, FALSE);
+}
+
 void UpdateHover()
 {
     POINT point{};
     GetCursorPos(&point);
     const bool inside = WindowFromPoint(point) == g.launcher;
     ScreenToClient(g.launcher, &point);
-    const int hovered = inside ? TargetAt(point) : -1;
-    if (hovered != l.hovered)
-    {
-        l.hovered = hovered;
-        InvalidateRect(g.launcher, nullptr, FALSE);
-    }
+    SetHovered(inside ? TargetAt(point) : -1);
 }
 
 Shown CurrentShown()
@@ -948,6 +1023,8 @@ void Paint(HDC output)
 
         for (const Entry& entry : l.entries)
         {
+            if (entry.removed)
+                continue;
             EntryIcon(graphics, entry);
             if (entry.running)
                 FillRounded(graphics, entry.badge, F(entry.badge.bottom - entry.badge.top) / 2, Plus(theme::kSuccess, 0x26),
@@ -977,6 +1054,11 @@ void Paint(HDC output)
     PaintText(dc, ui->semibold, theme::kText, L"Games", l.gamesTitle, DT_SINGLELINE | DT_VCENTER);
     for (const Entry& entry : l.entries)
     {
+        if (entry.removed)
+        {
+            PaintText(dc, ui->body, theme::kDim, L"Removed " + entry.name + L".", entry.nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            continue;
+        }
         EntryText(dc, entry);
         if (entry.running)
             PaintText(dc, ui->note, theme::kSuccess, L"Running", entry.badge, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
@@ -1013,6 +1095,23 @@ void Paint(HDC output)
         default:
             break;
         }
+    }
+
+    // Over everything else, below the button or above it at the bottom of the window.
+    if (const int tip = FindTarget(l.tip); tip >= 0 && l.targets[tip].tip)
+    {
+        const Target& target = l.targets[tip];
+        const int tipWidth = TextWidth(dc, ui->note, target.tip) + P(16);
+        const int tipHeight = P(24);
+        const int top = target.rect.bottom + P(6) + tipHeight <= height ? target.rect.bottom + P(6) : target.rect.top - P(6) - tipHeight;
+        const RECT rect{ target.rect.right - tipWidth, top, target.rect.right, top + tipHeight };
+        {
+            Gdiplus::Graphics graphics(dc);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+            FillRounded(graphics, rect, F(6.0f), Plus(theme::kCardHover), Plus(theme::kBorderStrong));
+        }
+        PaintText(dc, ui->note, theme::kText, target.tip, rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     }
 
     Strip(dc, width);
@@ -1184,8 +1283,8 @@ void ClosePicker()
 }
 
 // Saves a changed game list. A game that was turned off or removed stops being used, unless its window was
-// picked for this session.
-void SaveGames(std::vector<AutoGame> games)
+// picked for this session. Returns false when it could not be saved.
+bool SaveGames(std::vector<AutoGame> games)
 {
     try
     {
@@ -1194,13 +1293,61 @@ void SaveGames(std::vector<AutoGame> games)
     catch (const std::exception& e)
     {
         Log(LogLevel::Error, L"Could not save the game list: %hs", e.what());
-        return;
+        return false;
     }
     g.autoGames = std::move(games);
     if (g.target && !g.selectedGame &&
         std::none_of(g.autoGames.begin(), g.autoGames.end(),
                      [](const AutoGame& game) { return game.enabled && MatchesExecutable(game, l.activeExecutable); }))
         StopCapture();
+    return true;
+}
+
+// Once a removed game can no longer be put back, its preset is forgotten, unless a game with the same name was
+// added since.
+void ForgetRemoved()
+{
+    if (!l.removed)
+        return;
+    if (g.launcher)
+        KillTimer(g.launcher, kUndoTimer);
+    const std::wstring key = FolderName(l.removed->game.name);
+    if (!key.empty() && std::none_of(g.autoGames.begin(), g.autoGames.end(),
+                                     [&](const AutoGame& game) { return _wcsicmp(FolderName(game.name).c_str(), key.c_str()) == 0; }))
+        RemoveGamePreset(key);
+    l.removed.reset();
+}
+
+void RemoveGame(size_t index)
+{
+    if (index >= g.autoGames.size())
+        return;
+    ForgetRemoved();
+    auto games = g.autoGames;
+    Removed removed{ games[index], index };
+    games.erase(games.begin() + static_cast<std::ptrdiff_t>(index));
+    if (!SaveGames(std::move(games)))
+        return;
+    l.removed = std::move(removed);
+    SetTimer(g.launcher, kUndoTimer, kUndoMilliseconds, nullptr);
+}
+
+void UndoRemove()
+{
+    if (!l.removed)
+        return;
+    auto games = g.autoGames;
+    // Unless it was added again meanwhile.
+    if (std::none_of(games.begin(), games.end(), [](const AutoGame& game) {
+            return _wcsicmp(game.executable.c_str(), l.removed->game.executable.c_str()) == 0;
+        }))
+    {
+        games.insert(games.begin() + static_cast<std::ptrdiff_t>(std::min(l.removed->index, games.size())), l.removed->game);
+        if (!SaveGames(std::move(games)))
+            return;
+    }
+    KillTimer(g.launcher, kUndoTimer);
+    l.removed.reset();
 }
 
 void UseWindow(Picker picker, const GameWindow& window)
@@ -1260,12 +1407,10 @@ void Run(const Target& target)
         }
         break;
     case Action::RemoveGame:
-        if (target.index < g.autoGames.size())
-        {
-            auto games = g.autoGames;
-            games.erase(games.begin() + static_cast<std::ptrdiff_t>(target.index));
-            SaveGames(std::move(games));
-        }
+        RemoveGame(target.index);
+        break;
+    case Action::UndoRemove:
+        UndoRemove();
         break;
     case Action::DismissNotices:
         ClearNotices();
@@ -1427,21 +1572,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, hwnd, 0 };
             l.tracking = TrackMouseEvent(&track);
         }
-        const int hovered = TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) });
-        if (hovered != l.hovered)
-        {
-            l.hovered = hovered;
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
+        SetHovered(TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }));
         return 0;
     }
     case WM_MOUSELEAVE:
         l.tracking = false;
-        if (l.hovered >= 0)
-        {
-            l.hovered = -1;
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
+        SetHovered(-1);
         return 0;
     case WM_MOUSEWHEEL:
     {
@@ -1466,6 +1602,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         break;
     case WM_LBUTTONDOWN:
+        KillTimer(hwnd, kTipTimer);
+        if (l.tip)
+        {
+            l.tip.reset();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         if (const int index = TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }); index >= 0)
         {
             l.pressed = ControlOf(l.targets[index]);
@@ -1489,6 +1631,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_CAPTURECHANGED:
         l.pressed.reset();
+        return 0;
+    case WM_TIMER:
+        if (wParam == kUndoTimer)
+        {
+            ForgetRemoved();
+            Refresh();
+        }
+        else if (wParam == kTipTimer)
+        {
+            KillTimer(hwnd, kTipTimer);
+            if (l.hovered >= 0 && l.targets[l.hovered].tip)
+            {
+                l.tip = ControlOf(l.targets[l.hovered]);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
         return 0;
     case WM_SHOWWINDOW:
         if (wParam && !IsIconic(hwnd))
@@ -1581,6 +1739,7 @@ void UpdateLauncher()
 
 void DestroyLauncher()
 {
+    ForgetRemoved();
     if (g.launcher)
         DestroyWindow(g.launcher);
     g.launcher = nullptr;
