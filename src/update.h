@@ -13,3 +13,6 @@ void CheckForUpdate();
 
 // The newer release, once found. Empty version while checking, when up to date, or when the check failed.
 Update AvailableUpdate();
+
+// Changes whenever AvailableUpdate does, so it can be compared every loop without copying the update.
+unsigned AvailableUpdateVersion();

@@ -103,6 +103,23 @@ struct Row
     std::wstring text;
 };
 
+// What the launcher shows depends on, compared every loop to know when to describe it again. Cheap to read.
+struct Shown
+{
+    bool captureEnabled = false;
+    HWND target = nullptr;
+    HWND selected = nullptr;
+    bool selectedOpen = false;
+    unsigned notices = 0;
+    unsigned update = 0;
+    UINT inputKey = 0;
+    UINT inputModifiers = 0;
+    UINT overlayKey = 0;
+    UINT overlayModifiers = 0;
+
+    bool operator==(const Shown&) const = default;
+};
+
 // Picking a window either saves its game or uses the window until Detect automatically.
 enum class Picker
 {
@@ -135,8 +152,8 @@ struct Launcher
     // Where games saved by filename were found running.
     std::map<std::wstring, fs::path> located;
 
-    // What is shown, compared every loop to know when to redraw.
-    std::wstring shown;
+    Shown shown;
+    bool minimized = false;
     std::wstring statusTitle;
     std::wstring statusDetail;
     std::wstring statusName;
@@ -512,6 +529,9 @@ void Relayout()
 void Resize()
 {
     Relayout();
+    // A minimized window is sized when it is restored.
+    if (IsIconic(g.launcher))
+        return;
     const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(g.launcher, GWL_STYLE));
     const UINT dpi = GetDpiForWindow(g.launcher);
     RECT frame{ 0, 0, P(kWidth), l.height };
@@ -545,22 +565,26 @@ void UpdateHover()
     }
 }
 
-std::wstring Shown()
+Shown CurrentShown()
 {
-    const auto game = [](const std::optional<GameWindow>& window) -> std::wstring {
-        if (!window)
-            return L"-";
-        return std::to_wstring(reinterpret_cast<uintptr_t>(window->window)) + L":" + window->name + L":" +
-               std::to_wstring(GameWindowExists(*window));
-    };
-    return std::to_wstring(g.captureEnabled) + L"|" + std::to_wstring(g.target != nullptr) + L"|" + game(g.activeGame) + L"|" +
-           game(g.selectedGame) + L"|" + std::to_wstring(NoticeVersion()) + L"|" + AvailableUpdate().version + L"|" + g.inputHotkey +
-           L"|" + g.overlayHotkey;
+    Shown shown{ .captureEnabled = g.captureEnabled,
+                 .target = g.target,
+                 .selected = g.selectedGame ? g.selectedGame->window : nullptr,
+                 .notices = NoticeVersion(),
+                 .update = AvailableUpdateVersion(),
+                 .inputKey = g.hotkeys.input.key,
+                 .inputModifiers = g.hotkeys.input.modifiers,
+                 .overlayKey = g.hotkeys.overlay.key,
+                 .overlayModifiers = g.hotkeys.overlay.modifiers };
+    // Only shown while waiting for the picked window. The main loop notices the game's window closing.
+    if (g.captureEnabled && !g.target && g.selectedGame)
+        shown.selectedOpen = GameWindowExists(*g.selectedGame);
+    return shown;
 }
 
 void Refresh()
 {
-    l.shown = Shown();
+    l.shown = CurrentShown();
     Describe();
     Resize();
     UpdateHover();
@@ -1317,6 +1341,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             Run(target);
         }
         return 0;
+    case WM_SHOWWINDOW:
+        if (wParam && !IsIconic(hwnd))
+            Refresh();
+        break;
+    case WM_SIZE:
+    {
+        const bool restored = l.minimized && wParam != SIZE_MINIMIZED;
+        l.minimized = wParam == SIZE_MINIMIZED;
+        if (restored)
+            Refresh();
+        return 0;
+    }
     case WM_DPICHANGED:
     {
         Scale(l.launcherScaling, HIWORD(wParam));
@@ -1389,7 +1425,8 @@ void CreateLauncher()
 
 void UpdateLauncher()
 {
-    if (g.launcher && Shown() != l.shown)
+    // Nothing is drawn while the launcher is hidden or minimized. Showing it describes it again.
+    if (g.launcher && IsWindowVisible(g.launcher) && !IsIconic(g.launcher) && CurrentShown() != l.shown)
         Refresh();
 }
 

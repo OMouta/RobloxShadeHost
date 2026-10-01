@@ -20,6 +20,7 @@ struct Shared
 {
     std::mutex mutex;
     Update available;
+    std::atomic<unsigned> version = 0;
 };
 Shared& shared = *new Shared;
 
@@ -138,6 +139,7 @@ void Check()
     Log(LogLevel::Info, L"Unishade %ls is available.", version.c_str());
     std::lock_guard lock(shared.mutex);
     shared.available = { version, Wide(url) };
+    ++shared.version;
 }
 } // namespace
 
@@ -164,4 +166,9 @@ Update AvailableUpdate()
 {
     std::lock_guard lock(shared.mutex);
     return shared.available;
+}
+
+unsigned AvailableUpdateVersion()
+{
+    return shared.version;
 }
