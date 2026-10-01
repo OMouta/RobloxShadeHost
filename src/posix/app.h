@@ -29,6 +29,10 @@ struct PresetFolder
     std::vector<fs::path> presets;
 };
 
+// Why a preset or folder name can't be used, or empty when it can. Presets move between Windows, macOS and Linux, so
+// names follow Windows' rules too, and a leading dot would hide the file.
+std::string PresetNameProblem(const std::string& name);
+
 // A window with its own swapchain and Dear ImGui context: the launcher, or the overlay over the game.
 struct UiWindow
 {

@@ -722,8 +722,8 @@ void MoveMenu(App& app, const fs::path& preset)
     {
         const std::string name = menu.folderName;
         menu.presetError.clear();
-        if (name.find_first_of("/\\:") != std::string::npos || name[0] == '.')
-            menu.presetError = "Folder names cannot contain slashes or start with a dot.";
+        if (std::string problem = PresetNameProblem(name); !problem.empty())
+            menu.presetError = std::move(problem);
         else if (app.MovePreset(preset, PresetsDirectory() / name, menu.presetError))
             menu.folderName[0] = 0;
         menu.presetsListed = -10;

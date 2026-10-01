@@ -826,11 +826,32 @@ bool App::SwitchPreset(const fs::path& path, bool save, bool discard)
     return true;
 }
 
+std::string PresetNameProblem(const std::string& name)
+{
+    if (!name.empty() && name[0] == '.')
+        return "Names cannot start with a dot.";
+    switch (CheckName(name, false))
+    {
+    case NameIssue::None:
+        return {};
+    case NameIssue::Empty:
+        return "Type a name.";
+    case NameIssue::Control:
+    case NameIssue::Character:
+        return "Names cannot contain \\ / : * ? \" < > | or control characters.";
+    case NameIssue::End:
+        return "Names cannot end in a dot or a space.";
+    case NameIssue::Device:
+        return "Windows keeps that name for a device. Pick another one.";
+    }
+    return {};
+}
+
 bool App::NewPreset(const std::string& name, bool copyCurrent, std::string& error)
 {
-    if (name.empty() || name.find_first_of("/\\:") != std::string::npos || name[0] == '.')
+    if (std::string problem = PresetNameProblem(name); !problem.empty())
     {
-        error = "Preset names cannot contain slashes or start with a dot.";
+        error = std::move(problem);
         return false;
     }
     const fs::path path = NewPresetFolder() / (name + ".ini");
