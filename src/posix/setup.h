@@ -54,5 +54,8 @@ struct SetupSources
 {
     std::string effects = "https://raw.githubusercontent.com/crosire/reshade-shaders/list/EffectPackages.ini";
     std::string presets = "https://raw.githubusercontent.com/OMouta/Unishade/main/presets";
+    // Set by --effects-url and --presets-url, whose file:// URLs are allowed. Everything else, the packages the list
+    // names included, downloads over https only.
+    bool fromCommandLine = false;
 };
 inline SetupSources setupSources;

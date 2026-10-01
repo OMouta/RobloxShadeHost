@@ -10,10 +10,6 @@
 #include <stb_image.h>
 #include <stb_image_write.h>
 
-#include <sys/file.h>
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -21,6 +17,22 @@
 
 namespace
 {
+// Settings, effects and the log need a home folder.
+bool HaveDataDirectory()
+{
+    if (!DataDirectory().empty())
+        return true;
+    fprintf(stderr, "Unishade cannot find your home folder. Set HOME and try again.\n");
+    return false;
+}
+
+// Rotating the log while another Unishade writes to it would split that one's log, so only the first one does.
+void InitLogUnlessRunning(const FileLock& instance)
+{
+    if (!instance.Busy())
+        InitLog();
+}
+
 void Usage()
 {
     printf("Unishade %s\n\n"
@@ -156,12 +168,22 @@ int main(int argc, char** argv)
         }
         // Tests replace the download locations, as with Setup on Windows.
         if (!strcmp(argv[i], "--effects-url") && i + 1 < argc)
+        {
             setupSources.effects = argv[++i];
+            setupSources.fromCommandLine = true;
+        }
         else if (!strcmp(argv[i], "--presets-url") && i + 1 < argc)
+        {
             setupSources.presets = argv[++i];
+            setupSources.fromCommandLine = true;
+        }
         else if (!strcmp(argv[i], "--install-effects"))
         {
-            InitLog();
+            if (!HaveDataDirectory())
+                return 1;
+            // Setup takes a lock of its own, so this cannot mix with an install the launcher runs.
+            const FileLock instance(DataDirectory() / "unishade.lock");
+            InitLogUnlessRunning(instance);
             return EffectSetup::RunInTerminal();
         }
         else if (!strcmp(argv[i], "--render"))
@@ -171,21 +193,29 @@ int main(int argc, char** argv)
                 Usage();
                 return 2;
             }
-            InitLog();
+            if (!HaveDataDirectory())
+                return 1;
+            const FileLock instance(DataDirectory() / "unishade.lock");
+            InitLogUnlessRunning(instance);
             const bool gpuSource = i + 4 < argc && !strcmp(argv[i + 4], "--gpu-source");
             return Render(argv[i + 1], argv[i + 2], argv[i + 3], gpuSource);
         }
     }
+    if (!HaveDataDirectory())
+        return 1;
 
     // One host at a time, like the mutex on Windows.
-    const int lock = open((DataDirectory() / "unishade.lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) != 0)
+    const FileLock instance(DataDirectory() / "unishade.lock");
+    if (instance.Busy())
     {
         fprintf(stderr, "Unishade is already running.\n");
         return 0;
     }
 
     InitLog();
+    // Where locks do not work, such as on some network file systems, a second Unishade cannot be told apart.
+    if (!instance.Locked())
+        Log(LogLevel::Warning, "Could not lock %s: %s.", (DataDirectory() / "unishade.lock").c_str(), instance.Error().c_str());
     glfwSetErrorCallback([](int code, const char* description) { Log(LogLevel::Warning, "GLFW error %d: %s", code, description); });
 #ifndef __APPLE__
     // Only X11 lets the overlay sit over another program's window.
@@ -211,6 +241,5 @@ int main(int argc, char** argv)
     }
     app.Shutdown();
     glfwTerminate();
-    close(lock);
     return result;
 }

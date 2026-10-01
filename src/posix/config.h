@@ -10,12 +10,35 @@
 namespace fs = std::filesystem;
 
 // Where settings, presets, effects and the log live: ~/Library/Application Support/Unishade on macOS,
-// $XDG_DATA_HOME/unishade (~/.local/share/unishade) on Linux. Created on first use.
+// $XDG_DATA_HOME/unishade (~/.local/share/unishade) on Linux. Created on first use. Empty when there is no home
+// folder to put it in, which the host refuses to start without.
 const fs::path& DataDirectory();
 fs::path PresetsDirectory();
 fs::path EffectsDirectory(); // reshade-shaders, laid out like ReShade's: Shaders and Textures
 // ~/Pictures/Unishade.
 fs::path ScreenshotDirectory();
+
+// An exclusive lock on a file, such as the one that keeps a second Unishade from starting. Held until the object
+// goes away or the process ends.
+class FileLock
+{
+public:
+    explicit FileLock(const fs::path& path);
+    ~FileLock();
+    FileLock(const FileLock&) = delete;
+    FileLock& operator=(const FileLock&) = delete;
+
+    bool Locked() const { return fd >= 0; }
+    // Another process holds it.
+    bool Busy() const { return busy; }
+    // Why the lock could not be taken, when it is not busy.
+    const std::string& Error() const { return error; }
+
+private:
+    int fd = -1;
+    bool busy = false;
+    std::string error;
+};
 
 struct Settings
 {

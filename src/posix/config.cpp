@@ -2,16 +2,32 @@
 #include "ini_text.h"
 #include "log.h"
 
+#include <fcntl.h>
+#include <pwd.h>
+#include <sys/file.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 
 namespace
 {
+// Empty when there is none, rather than a folder everyone can write to.
 fs::path Home()
 {
-    const char* home = getenv("HOME");
-    return home && *home ? fs::path(home) : fs::temp_directory_path();
+    if (const char* home = getenv("HOME"); home && *home == '/')
+        return home;
+    // Programs started without HOME, such as by some service managers, still have one in the user database.
+    const long size = sysconf(_SC_GETPW_R_SIZE_MAX);
+    std::vector<char> buffer(size > 0 ? size_t(size) : 16384);
+    passwd entry{};
+    passwd* found = nullptr;
+    if (getpwuid_r(getuid(), &entry, buffer.data(), buffer.size(), &found) == 0 && found && found->pw_dir && found->pw_dir[0] == '/')
+        return found->pw_dir;
+    return {};
 }
 
 // Relative paths in Unishade.ini are relative to the data folder, so the folder can move.
@@ -60,9 +76,13 @@ const fs::path& DataDirectory()
 {
     static const fs::path directory = [] {
 #ifdef __APPLE__
+        if (Home().empty())
+            return fs::path();
         fs::path path = Home() / "Library" / "Application Support" / "Unishade";
 #else
         const char* xdg = getenv("XDG_DATA_HOME");
+        if ((!xdg || *xdg != '/') && Home().empty())
+            return fs::path();
         fs::path path = (xdg && *xdg == '/' ? fs::path(xdg) : Home() / ".local" / "share") / "unishade";
 #endif
         std::error_code ignored;
@@ -85,6 +105,25 @@ fs::path EffectsDirectory()
 fs::path ScreenshotDirectory()
 {
     return Home() / "Pictures" / "Unishade";
+}
+
+FileLock::FileLock(const fs::path& path)
+{
+    fd = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0)
+        return;
+    const int code = errno;
+    busy = fd >= 0 && code == EWOULDBLOCK;
+    error = strerror(code);
+    if (fd >= 0)
+        close(fd);
+    fd = -1;
+}
+
+FileLock::~FileLock()
+{
+    if (fd >= 0)
+        close(fd);
 }
 
 std::string ReadFile(const fs::path& path)
