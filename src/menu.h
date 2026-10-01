@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <string>
+
 // Draws the host's menu over the game through ReShade's ImGui, after the effects, so they do not apply to it.
 // Does nothing without the add-on.
 void InitMenu();
@@ -24,3 +26,16 @@ void ResetMenu();
 
 // The cursor the menu wants, such as a hand over a button.
 LPCWSTR MenuCursor();
+
+// Whether the active preset has changes that are not saved, which happens with auto-save off. They are lost when the
+// host exits, so it asks about them first.
+bool MenuHasUnsavedChanges();
+
+// The name of the active preset, for asking about its unsaved changes. Empty while ReShade runs no effects.
+std::wstring ActivePresetName();
+
+// Writes preset changes to disk now. ReShade writes them from its present a second after they happen, so they are
+// lost when the host exits or stops showing frames before that. saveUnsaved saves changes that are not saved yet
+// first; without it they stay unsaved. Call it from the host's thread outside ReShade's present: every loop while
+// the overlay is hidden, and before the host exits. Does nothing when nothing is waiting.
+void FlushPresets(bool saveUnsaved = false);

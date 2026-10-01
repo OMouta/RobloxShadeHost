@@ -75,7 +75,7 @@ int main()
         stats.RecordPresent(second, second);
         stats.Update(start + seconds(second), static_cast<uint64_t>(second));
     }
-    ok &= Check(stats.HistorySize() == 60, "graph history has a fixed memory bound");
+    ok &= Check(stats.HistorySize() == FrameStatistics::kHistory, "graph history has a fixed memory bound");
     ok &= Check(stats.HistoryAt(0).at == start + seconds(6) && stats.HistoryAt(59).at == start + seconds(65),
                 "graph history stays in chronological order after wrapping");
     ok &= Check(Near(stats.peakProcessingMs, 65), "old processing peaks do not leak into later samples");
