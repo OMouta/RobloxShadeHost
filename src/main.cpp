@@ -403,6 +403,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         Log(LogLevel::Error, L"Unishade stopped: %hs", e.what());
         ShowError(L"Unishade stopped because of an error.");
     }
+    // Removes the tray icon after an error. After a normal exit the launcher is already gone.
+    DestroyLauncher();
     CloseHandle(instance);
     FlushLog();
     // Releasing the swapchain makes ReShade wait for the effects it is still compiling, which can take minutes
