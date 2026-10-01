@@ -171,6 +171,20 @@ a:hover {
   background: var(--night-raised);
 }
 
+.prose pre {
+  max-width: 68ch;
+  margin: 0 0 16px;
+  padding: 14px 18px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: var(--night-raised);
+}
+
+.prose pre code {
+  padding: 0;
+  background: none;
+}
+
 .prose table {
   width: 100%;
   border-collapse: collapse;

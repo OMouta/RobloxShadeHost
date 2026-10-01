@@ -45,6 +45,11 @@ export default defineConfig({
     '/dlss5': '/docs/add-ons/#dlss5',
   },
   trailingSlash: 'always',
+  // A Content-Security-Policy <meta> on every page, with hashes of the scripts and styles Astro inlines. GitHub Pages
+  // can't send headers, so frame-ancestors and reporting aren't possible.
+  security: {
+    csp: { directives: ["default-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'"] },
+  },
   // The sitemap leaves out the redirects and the 404 page.
   integrations: [checkLinks, sitemap()],
   // Archivo from @fontsource-variable/archivo, its Latin letters only. <Font preload /> in Base.astro preloads it, and the
@@ -69,6 +74,10 @@ export default defineConfig({
   ],
   // Images get a srcset of sizes up to the original's.
   image: { layout: 'constrained' },
-  markdown: { processor: satteri({ mdastPlugins: [siteLinks], hastPlugins: [imageSizes] }) },
+  markdown: {
+    processor: satteri({ mdastPlugins: [siteLinks], hastPlugins: [imageSizes] }),
+    // Shiki colours code with style attributes, which the CSP blocks. The docs show code without colours.
+    syntaxHighlight: false,
+  },
   vite: { server: { fs: { allow: ['..'] } } },
 });
