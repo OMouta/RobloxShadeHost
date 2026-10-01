@@ -1888,6 +1888,49 @@ void MoveMenu(const fs::path& preset)
         OpenNamePopup(NameAction::NewFolder, preset);
 }
 
+// The preset's menu, opened from the three dots on its row.
+void PresetActions(const fs::path& path, bool active)
+{
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(6), S(6)));
+    if (ImGui::BeginPopup("actions"))
+    {
+        // The active preset is duplicated from what is on screen. Others wait until ReShade has written them.
+        const bool writing = !active && WritePending(path);
+        if (ImGui::MenuItem("Duplicate", nullptr, false, !writing))
+            OpenNamePopup(NameAction::Duplicate, path);
+        if (ImGui::MenuItem("Rename", nullptr, false, !active && !writing))
+            OpenNamePopup(NameAction::Rename, path);
+        if (ImGui::BeginMenu("Move to", !active && !writing))
+        {
+            MoveMenu(path);
+            ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem("Delete", nullptr, false, !active && !writing && !m.deleting))
+        {
+            m.deleteTarget = path;
+            m.deleteError.clear();
+            m.deleteDone = false;
+            m.openDeletePopup = true;
+        }
+        if (active)
+        {
+            ImGui::Separator();
+            PushSize(12.5f);
+            ImGui::TextDisabled("Switch to another preset to\nrename, move or delete this one.");
+            ImGui::PopFont();
+        }
+        else if (writing)
+        {
+            ImGui::Separator();
+            PushSize(12.5f);
+            ImGui::TextDisabled("ReShade is still saving this preset.");
+            ImGui::PopFont();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+}
+
 void PresetRow(const fs::path& path, bool active)
 {
     const std::string name = Utf8(path.stem().wstring());
@@ -1934,45 +1977,7 @@ void PresetRow(const fs::path& path, bool active)
         ImGui::PopFont();
     }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(6), S(6)));
-    if (ImGui::BeginPopup("actions"))
-    {
-        // The active preset is duplicated from what is on screen. Others wait until ReShade has written them.
-        const bool writing = !active && WritePending(path);
-        if (ImGui::MenuItem("Duplicate", nullptr, false, !writing))
-            OpenNamePopup(NameAction::Duplicate, path);
-        if (ImGui::MenuItem("Rename", nullptr, false, !active && !writing))
-            OpenNamePopup(NameAction::Rename, path);
-        if (ImGui::BeginMenu("Move to", !active && !writing))
-        {
-            MoveMenu(path);
-            ImGui::EndMenu();
-        }
-        if (ImGui::MenuItem("Delete", nullptr, false, !active && !writing && !m.deleting))
-        {
-            m.deleteTarget = path;
-            m.deleteError.clear();
-            m.deleteDone = false;
-            m.openDeletePopup = true;
-        }
-        if (active)
-        {
-            ImGui::Separator();
-            PushSize(12.5f);
-            ImGui::TextDisabled("Switch to another preset to\nrename, move or delete this one.");
-            ImGui::PopFont();
-        }
-        else if (writing)
-        {
-            ImGui::Separator();
-            PushSize(12.5f);
-            ImGui::TextDisabled("ReShade is still saving this preset.");
-            ImGui::PopFont();
-        }
-        ImGui::EndPopup();
-    }
-    ImGui::PopStyleVar();
-
+    PresetActions(path, active);
     ImGui::SetCursorScreenPos(start);
     ImGui::Dummy(size);
     ImGui::PopID();
@@ -1983,7 +1988,6 @@ void PresetRow(const fs::path& path, bool active)
 void FolderIcon(ImDrawList* draw, const PresetFolder& folder, ImVec2 min, float size)
 {
     const ImVec2 max = min + ImVec2(size, size);
-    // A folder outside the presets folder is not searched for a logo.
     if (const uint64_t logo = FolderLogo(folder))
     {
         draw->AddImageRounded(ImTextureRef(logo), min, max, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, S(4));
@@ -2800,7 +2804,7 @@ void MenuSizeRow()
     ImGui::Dummy(ImVec2(0, 0));
 }
 
-void SettingsTab()
+void ShortcutSettings()
 {
     Heading("SHORTCUTS");
     Text("Click a shortcut, then press the keys you want. They work right away.", kDim, 13);
@@ -2829,6 +2833,11 @@ void SettingsTab()
         m.confirm = Confirmation::ResetShortcuts;
         m.openConfirmPopup = true;
     }
+}
+
+void SettingsTab()
+{
+    ShortcutSettings();
 
     ImGui::Dummy(ImVec2(0, S(14)));
     Heading("PRESETS");
@@ -3421,6 +3430,50 @@ void DrawDebugInfo()
     ImGui::PopStyleVar();
 }
 
+// Saving writes the whole preset, so it waits until a slider is let go. With auto-save off, changes only mark the
+// preset as unsaved.
+void SaveChanges()
+{
+    if (!m.presetChanged || (ImGui::IsAnyItemActive() && m.pendingPreset.empty()))
+        return;
+    if (m.autoSave)
+        SavePreset();
+    else
+        m.unsaved = true;
+    m.presetChanged = false;
+}
+
+// Switches to the preset picked this frame, once it is clear what happens to unsaved changes.
+void SwitchToPending()
+{
+    if (m.pendingPreset.empty())
+        return;
+    if (m.unsaved && !m.pendingKeepsEdits && m.unsavedChoice == UnsavedChoice::Ask)
+    {
+        if (!m.askingUnsaved)
+        {
+            m.askingUnsaved = true;
+            m.openUnsavedPopup = true;
+        }
+        return;
+    }
+    // Changes that went into the new preset, or were discarded, must not be saved into this one.
+    if (m.unsaved && (m.pendingKeepsEdits || m.unsavedChoice == UnsavedChoice::Discard))
+        DiscardChanges();
+    else if (m.unsaved)
+        SavePreset();
+    ReadPresetEffects(m.pendingPreset);
+    if (!SetPreset(m.pendingPreset))
+        ShowToast("ReShade could not load " + Utf8(m.pendingPreset.stem().wstring()));
+    else if (m.saveNewPreset)
+        SaveToCache();
+    m.pendingPreset.clear();
+    m.saveNewPreset = false;
+    m.pendingKeepsEdits = false;
+    m.unsavedChoice = UnsavedChoice::Ask;
+    m.active.clear();
+}
+
 void DrawMenuFrame()
 {
     // Escape leaves the menu, unless it closes a popup, ends typing or cancels waiting for a shortcut.
@@ -3433,45 +3486,8 @@ void DrawMenuFrame()
 
     if (m.capturing >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered())
         StopCapture();
-    // Saving writes the whole preset, so it waits until a slider is let go. With auto-save off, changes only mark
-    // the preset as unsaved.
-    if (m.presetChanged && (!ImGui::IsAnyItemActive() || !m.pendingPreset.empty()))
-    {
-        if (m.autoSave)
-            SavePreset();
-        else
-            m.unsaved = true;
-        m.presetChanged = false;
-    }
-    if (!m.pendingPreset.empty())
-    {
-        if (m.unsaved && !m.pendingKeepsEdits && m.unsavedChoice == UnsavedChoice::Ask)
-        {
-            if (!m.askingUnsaved)
-            {
-                m.askingUnsaved = true;
-                m.openUnsavedPopup = true;
-            }
-        }
-        else
-        {
-            // Changes that went into the new preset, or were discarded, must not be saved into this one.
-            if (m.unsaved && (m.pendingKeepsEdits || m.unsavedChoice == UnsavedChoice::Discard))
-                DiscardChanges();
-            else if (m.unsaved)
-                SavePreset();
-            ReadPresetEffects(m.pendingPreset);
-            if (!SetPreset(m.pendingPreset))
-                ShowToast("ReShade could not load " + Utf8(m.pendingPreset.stem().wstring()));
-            else if (m.saveNewPreset)
-                SaveToCache();
-            m.pendingPreset.clear();
-            m.saveNewPreset = false;
-            m.pendingKeepsEdits = false;
-            m.unsavedChoice = UnsavedChoice::Ask;
-            m.active.clear();
-        }
-    }
+    SaveChanges();
+    SwitchToPending();
     if (m.openReShade || m.openDlss)
     {
         m.focusDlss = m.openDlss;
