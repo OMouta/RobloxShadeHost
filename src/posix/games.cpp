@@ -55,7 +55,8 @@ std::string FolderName(std::string name)
 
 std::vector<AutoGame> LoadAutoGames(const std::filesystem::path& path)
 {
-    if (!std::filesystem::exists(path))
+    std::error_code error;
+    if (!std::filesystem::exists(path, error))
         return DefaultAutoGames();
     std::vector<AutoGame> games;
     for (GameListEntry& entry : ParseGameList(ReadFile(path)))

@@ -246,7 +246,8 @@ std::string FormatDefinitions(const std::vector<std::pair<std::string, std::stri
 Settings LoadSettings()
 {
     const fs::path path = DataDirectory() / "Unishade.ini";
-    const bool existed = fs::exists(path);
+    std::error_code error;
+    const bool existed = fs::exists(path, error);
     IniText ini(ReadFile(path));
     Settings settings;
     std::string value;
@@ -275,7 +276,7 @@ Settings LoadSettings()
 
     if (!ini.Get("GENERAL", "PresetPath", value) || value.empty())
     {
-        value = fs::exists(PresetsDirectory() / "GenericPreset1.ini") ? "presets/GenericPreset1.ini" : "presets/ReShadePreset.ini";
+        value = fs::exists(PresetsDirectory() / "GenericPreset1.ini", error) ? "presets/GenericPreset1.ini" : "presets/ReShadePreset.ini";
         ini.Set("GENERAL", "PresetPath", value);
     }
     settings.preset = Resolve(value);

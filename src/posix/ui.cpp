@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <utility>
 
 namespace
 {
@@ -548,7 +549,11 @@ void EffectsTab(App& app)
 }
 
 // Folder logos in the overlay's Dear ImGui context, made at the size they are drawn, by folder. A folder without
-// one keeps an empty entry until the presets are listed again.
+// one keeps an empty entry until the presets are listed again. Each takes a set from Dear ImGui's descriptor pool,
+// which also holds its fonts, so there are at most kMaxLogos.
+constexpr size_t kMaxLogos = 192;
+constexpr uint32_t kDescriptorPoolSize = kMaxLogos + 64;
+
 struct Logo
 {
     GpuImage image;
@@ -607,6 +612,9 @@ ImTextureID FolderLogo(const fs::path& folder, int size)
         vkDeviceWaitIdle(gpu.device);
     DestroyLogo(logo);
     logo.size = size;
+    if (std::count_if(logos.byFolder.begin(), logos.byFolder.end(), [](const auto& entry) { return entry.second.set != VK_NULL_HANDLE; }) >=
+        std::ptrdiff_t(kMaxLogos))
+        return ImTextureID_Invalid;
     int width = 0, height = 0, channels = 0;
     stbi_uc* pixels = stbi_load((folder / "logo.png").c_str(), &width, &height, &channels, 4);
     if (!pixels)
@@ -745,8 +753,24 @@ void PresetsTab(App& app)
     {
         menu.folders = app.PresetFolders();
         menu.presetsListed = glfwGetTime();
-        // A logo saved since, such as the icon of a game that just started, shows now.
-        std::erase_if(logos.byFolder, [](const auto& entry) { return !entry.second.set; });
+        // A logo saved since, such as the icon of a game that just started, shows now, and folders that are gone
+        // give theirs back.
+        const auto listed = [](const std::string& path) {
+            return std::any_of(menu.folders.begin(), menu.folders.end(), [&](const PresetFolder& folder) { return folder.path.string() == path; });
+        };
+        bool waited = false;
+        for (auto entry = logos.byFolder.begin(); entry != logos.byFolder.end();)
+        {
+            if (entry->second.set && listed(entry->first))
+            {
+                ++entry;
+                continue;
+            }
+            if (entry->second.set && !std::exchange(waited, true))
+                vkDeviceWaitIdle(gpu.device);
+            DestroyLogo(entry->second);
+            entry = logos.byFolder.erase(entry);
+        }
     }
     ImGui::BeginChild("presets", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 4));
     const ImGuiID unsavedPopup = ImGui::GetID("Unsaved changes");
@@ -988,6 +1012,19 @@ void Toast(App& app, ImVec2 display, float scale)
     ImGui::TextUnformatted(app.toast.c_str());
     ImGui::End();
 }
+
+// The interface's scale for the window's monitor. On X11 it is the same on every monitor.
+float WindowScale([[maybe_unused]] GLFWwindow* window)
+{
+#ifdef __APPLE__
+    // macOS reports the Retina factor as the content scale, which Dear ImGui applies through the framebuffer scale.
+    return 1.0f;
+#else
+    float scaleX = 1, scaleY = 1;
+    glfwGetWindowContentScale(window, &scaleX, &scaleY);
+    return std::max(1.0f, scaleX);
+#endif
+}
 } // namespace
 
 bool InitUi(UiWindow& ui, std::string& error)
@@ -998,15 +1035,13 @@ bool InitUi(UiWindow& ui, std::string& error)
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
 
-    float scaleX = 1, scaleY = 1;
-    glfwGetWindowContentScale(ui.window, &scaleX, &scaleY);
-#ifdef __APPLE__
-    // macOS reports the Retina factor here, which Dear ImGui applies through the framebuffer scale instead.
-    ui.scale = 1.0f;
-#else
-    ui.scale = std::max(1.0f, scaleX);
-#endif
+    ui.scale = WindowScale(ui.window);
     ApplyStyle(ImGui::GetStyle(), ui.scale);
+    // A monitor with another scale, or a new scale in the system's settings. BeginUi applies it.
+    glfwSetWindowUserPointer(ui.window, &ui);
+    glfwSetWindowContentScaleCallback(ui.window, [](GLFWwindow* window, float, float) {
+        static_cast<UiWindow*>(glfwGetWindowUserPointer(window))->rescale = true;
+    });
 
     const std::string font = platform::UiFont();
     if (font.empty() || !io.Fonts->AddFontFromFileTTF(font.c_str()))
@@ -1024,7 +1059,7 @@ bool InitUi(UiWindow& ui, std::string& error)
     info.Device = gpu.device;
     info.QueueFamily = gpu.queueFamily;
     info.Queue = gpu.queue;
-    info.DescriptorPoolSize = 64;
+    info.DescriptorPoolSize = kDescriptorPoolSize;
     info.MinImageCount = ui.surface.minImageCount;
     info.ImageCount = std::max(ui.surface.imageCount, ui.surface.minImageCount);
     info.PipelineInfoMain.RenderPass = ui.surface.renderPass;
@@ -1058,6 +1093,13 @@ void ShutdownUi(UiWindow& ui)
 void BeginUi(UiWindow& ui)
 {
     ImGui::SetCurrentContext(ui.context);
+    if (std::exchange(ui.rescale, false) && WindowScale(ui.window) != ui.scale)
+    {
+        // Dear ImGui draws its fonts at whatever size the style asks for, so the style is all that is made again.
+        ui.scale = WindowScale(ui.window);
+        ImGui::GetStyle() = ImGuiStyle();
+        ApplyStyle(ImGui::GetStyle(), ui.scale);
+    }
     if (ui.surface.recreated)
     {
         ImGui_ImplVulkan_SetMinImageCount(ui.surface.minImageCount);

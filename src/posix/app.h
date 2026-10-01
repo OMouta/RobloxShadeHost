@@ -36,6 +36,7 @@ struct UiWindow
     Surface surface;
     ImGuiContext* context = nullptr;
     float scale = 1.0f;
+    bool rescale = false; // the window's content scale changed
 };
 
 // The host: the launcher outside the game, and the overlay that redraws the game with effects and shows the
@@ -141,6 +142,9 @@ private:
     std::vector<std::future<std::string>> screenshots; // being written, each to the message it shows
     std::string screenshotStamp;                        // the second of the last screenshot
     int screenshotsInStamp = 0;
+    // A picture size the effects could not make room for. The overlay stays hidden until the size changes.
+    uint32_t failedWidth = 0;
+    uint32_t failedHeight = 0;
     double nextSearch = 0;
     double nextScan = 0;                   // of every process
     platform::WindowId notGame = 0;        // the window in front, when it was not a saved game's

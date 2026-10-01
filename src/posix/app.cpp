@@ -194,6 +194,7 @@ void App::StartCapture(const platform::Window& window)
     activeExecutable = platform::ProcessExecutable(window.pid);
     activeCommand = platform::ProcessCommand(window.pid);
     frame = {};
+    failedWidth = failedHeight = 0;
     lastCaptureError.clear();
     Log(LogLevel::Info, "Capturing %s", window.title.c_str());
     FollowGame();
@@ -363,7 +364,8 @@ const std::vector<platform::Window>& App::Windows()
 void App::UpdateOverlay()
 {
     platform::Rect bounds;
-    const bool visible = captureEnabled && active && HasFrame() && (menuOpen || inFront) && platform::WindowBounds(active->id, bounds);
+    const bool sized = frame.width != failedWidth || frame.height != failedHeight;
+    const bool visible = captureEnabled && active && HasFrame() && sized && (menuOpen || inFront) && platform::WindowBounds(active->id, bounds);
     platform::SetCaptureIdle(!visible);
     if (!visible)
     {
@@ -387,13 +389,28 @@ void App::UpdateOverlay()
 
 void App::RenderOverlay()
 {
+    // Effects work at the size of the game's picture. Where the graphics card cannot make room for that, the overlay
+    // hides rather than cover the game with nothing.
+    runtime.SetSize(frame.width, frame.height);
+    if (runtime.Width() != frame.width || runtime.Height() != frame.height)
+    {
+        failedWidth = frame.width;
+        failedHeight = frame.height;
+        Report(LogLevel::Warning, "The graphics card has no room for effects on a %ux%u picture. The overlay stays hidden until the game's window changes size.",
+               frame.width, frame.height);
+        if (menuOpen)
+            CloseMenu();
+        UpdateOverlay();
+        return;
+    }
+    failedWidth = failedHeight = 0;
+
     Surface& surface = overlay.surface;
     if (!surface.BeginFrame())
         return;
     // The previous frame's commands are done, so its buffer can go back to the platform.
     inFlight = frame.hold;
     lastOverlayFrame = Now();
-    runtime.SetSize(frame.width, frame.height);
     runtime.menuOpen = menuOpen;
     double x = 0, y = 0;
     int width = 1, height = 1;
@@ -402,25 +419,16 @@ void App::RenderOverlay()
     runtime.mouseX = static_cast<float>(x * frame.width / std::max(width, 1));
     runtime.mouseY = static_cast<float>(y * frame.height / std::max(height, 1));
 
-    if (runtime.Width() == frame.width && runtime.Height() == frame.height)
-    {
-        runtime.Render(surface.commands, Source(), effectsEnabled && !comparing && !compareButton);
-        FullBarrier(surface.commands);
-        const GpuImage& output = runtime.Output();
-        VkImageBlit blit{};
-        blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        blit.srcOffsets[1] = { int(output.width), int(output.height), 1 };
-        blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        blit.dstOffsets[1] = { int(surface.extent.width), int(surface.extent.height), 1 };
-        vkCmdBlitImage(surface.commands, output.image, VK_IMAGE_LAYOUT_GENERAL, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                       VK_FILTER_LINEAR);
-    }
-    else
-    {
-        const VkClearColorValue black{};
-        const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        vkCmdClearColorImage(surface.commands, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
-    }
+    runtime.Render(surface.commands, Source(), effectsEnabled && !comparing && !compareButton);
+    FullBarrier(surface.commands);
+    const GpuImage& output = runtime.Output();
+    VkImageBlit blit{};
+    blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    blit.srcOffsets[1] = { int(output.width), int(output.height), 1 };
+    blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    blit.dstOffsets[1] = { int(surface.extent.width), int(surface.extent.height), 1 };
+    vkCmdBlitImage(surface.commands, output.image, VK_IMAGE_LAYOUT_GENERAL, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                   VK_FILTER_LINEAR);
 
     BeginUi(overlay);
     DrawOverlay(*this);
@@ -765,7 +773,8 @@ bool App::NewPreset(const std::string& name, bool copyCurrent, std::string& erro
         return false;
     }
     const fs::path path = NewPresetFolder() / (name + ".ini");
-    if (fs::exists(path))
+    std::error_code missing;
+    if (fs::exists(path, missing))
     {
         error = "A preset with that name already exists.";
         return false;

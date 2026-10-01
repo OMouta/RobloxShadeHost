@@ -1182,6 +1182,16 @@ void SetupOverlayWindow(GLFWwindow* window)
     const ::Window x = glfwGetX11Window(window);
     const Atom states[] = { GetAtom(d, "_NET_WM_STATE_SKIP_TASKBAR"), GetAtom(d, "_NET_WM_STATE_SKIP_PAGER") };
     XChangeProperty(d, x, GetAtom(d, "_NET_WM_STATE"), XA_ATOM, 32, PropModeAppend, reinterpret_cast<const unsigned char*>(states), 2);
+    // A utility window, in place of GLFW's normal one: it can still take focus for the menu and stay above the game,
+    // while GNOME and KDE leave such windows out of the animations they play when a window opens or closes, which
+    // would fade the overlay in and out over the game. Docks would suit too, but GNOME puts them below full-screen
+    // windows.
+    const Atom utility = GetAtom(d, "_NET_WM_WINDOW_TYPE_UTILITY");
+    XChangeProperty(d, x, GetAtom(d, "_NET_WM_WINDOW_TYPE"), XA_ATOM, 32, PropModeReplace, reinterpret_cast<const unsigned char*>(&utility), 1);
+    // GNOME draws no shadow around a window whose frame extents say it draws its own. picom users can leave the
+    // overlay out of shadows and fading by its class, unishade-overlay.
+    const long extents[4] = {};
+    XChangeProperty(d, x, GetAtom(d, "_GTK_FRAME_EXTENTS"), XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char*>(extents), 4);
     XClassHint hint{ const_cast<char*>("unishade-overlay"), const_cast<char*>("Unishade") };
     XSetClassHint(d, x, &hint);
     XFlush(d);
