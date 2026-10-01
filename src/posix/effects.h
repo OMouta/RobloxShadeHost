@@ -138,6 +138,11 @@ std::string TechniqueKey(const Technique& technique, const Effect& effect);
 // effect's together in the order the file declares them, as in ReShade.
 void OrderTechniques(std::vector<Technique>& techniques, const std::vector<Effect>& effects, const std::vector<std::string>& sorting);
 
+// Where a uniform's value i is in the effect's uniform data, in ReShade's layout: every array element and every
+// matrix row starts on 16 bytes.
+size_t ComponentOffset(const Uniform& uniform, size_t i);
+size_t ComponentCount(const Uniform& uniform);
+
 // Compiling, which needs no graphics card.
 struct CompileOptions
 {

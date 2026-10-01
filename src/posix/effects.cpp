@@ -886,26 +886,6 @@ std::string FormatKey(const std::array<unsigned, 4>& key)
     return std::to_string(key[0]) + "," + std::to_string(key[1]) + "," + std::to_string(key[2]) + "," + std::to_string(key[3]);
 }
 
-// Reads the values of a uniform in ReShade's layout: every array element and every matrix row starts on
-// 16 bytes.
-size_t ComponentOffset(const Uniform& uniform, size_t i)
-{
-    const reshadefx::type& type = uniform.type;
-    if (type.is_matrix())
-    {
-        const size_t element = i / type.components(), rest = i % type.components();
-        return uniform.offset + (element * type.rows * 4 + (rest / type.cols) * 4 + rest % type.cols) * 4;
-    }
-    if (type.is_array())
-        return uniform.offset + ((i / type.rows) * 4 + i % type.rows) * 4;
-    return uniform.offset + i * 4;
-}
-
-size_t ComponentCount(const Uniform& uniform)
-{
-    return uniform.type.components() * (uniform.type.is_array() ? uniform.type.array_length : 1u);
-}
-
 std::string FormatFloat(float value)
 {
     return std::to_string(value);
@@ -963,6 +943,24 @@ void OrderTechniques(std::vector<Technique>& techniques, const std::vector<Effec
     for (size_t i : sorted)
         result.push_back(std::move(techniques[i]));
     techniques = std::move(result);
+}
+
+size_t ComponentOffset(const Uniform& uniform, size_t i)
+{
+    const reshadefx::type& type = uniform.type;
+    if (type.is_matrix())
+    {
+        const size_t element = i / type.components(), rest = i % type.components();
+        return uniform.offset + (element * type.rows * 4 + (rest / type.cols) * 4 + rest % type.cols) * 4;
+    }
+    if (type.is_array())
+        return uniform.offset + ((i / type.rows) * 4 + i % type.rows) * 4;
+    return uniform.offset + i * 4;
+}
+
+size_t ComponentCount(const Uniform& uniform)
+{
+    return uniform.type.components() * (uniform.type.is_array() ? uniform.type.array_length : 1u);
 }
 
 Definitions EffectMacros(const Definitions& definitions, const CompileOptions& options)
