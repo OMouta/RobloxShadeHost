@@ -244,7 +244,14 @@ void PresentLatestFrame()
         DXGI_SWAP_CHAIN_DESC1 desc{};
         g.swapchain->GetDesc1(&desc);
         if (desc.Width != size.Width || desc.Height != size.Height)
+        {
+            // ResizeBuffers fails with DXGI_ERROR_INVALID_CALL while anything still references the
+            // swap chain's buffers; the tonemap RTV cache (TonemapToBackBuffer) does exactly that.
+            g.tonemapTargetBuffers[0] = g.tonemapTargetBuffers[1] = nullptr;
+            g.tonemapTargetViews[0] = nullptr;
+            g.tonemapTargetViews[1] = nullptr;
             winrt::check_hresult(g.swapchain->ResizeBuffers(0, size.Width, size.Height, DXGI_FORMAT_UNKNOWN, 0));
+        }
     }
 
     winrt::com_ptr<ID3D11Texture2D> backBuffer;
