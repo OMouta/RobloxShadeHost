@@ -2171,16 +2171,87 @@ void LoadParameters(const std::string& effect)
     });
 }
 
+// The base types that have a control. ReShade keeps min16 types at 32 bits for add-ons, so they share one.
+bool HasControl(format base)
+{
+    switch (base)
+    {
+    case format::r32_typeless:
+    case format::r32_float:
+    case format::r16_float:
+    case format::r32_sint:
+    case format::r16_sint:
+    case format::r32_uint:
+    case format::r16_uint:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool FloatControl(const Parameter& p, const std::string& units, bool list)
+{
+    const int count = static_cast<int>(p.rows);
+    float values[4]{};
+    m.runtime->get_uniform_value_float(p.handle, values, count);
+    const std::string format = "%.3f" + units;
+    const bool range = p.min < p.max;
+    bool changed = false;
+    if (p.type == "color" && count == 3)
+        changed = ImGui::ColorEdit3("##value", values);
+    else if (p.type == "color" && count == 4)
+        changed = ImGui::ColorEdit4("##value", values, ImGuiColorEditFlags_AlphaBar);
+    else if (list && count == 1)
+    {
+        int index = static_cast<int>(values[0]);
+        changed = ImGui::Combo("##value", &index, p.items.c_str());
+        values[0] = static_cast<float>(index);
+    }
+    else if (p.type == "input")
+        changed = ImGui::InputScalarN("##value", ImGuiDataType_Float, values, count, nullptr, nullptr, format.c_str());
+    else if (range && p.type != "drag")
+        changed = ImGui::SliderScalarN("##value", ImGuiDataType_Float, values, count, &p.min, &p.max, format.c_str());
+    else
+    {
+        const float speed = p.step > 0 ? p.step : range ? (p.max - p.min) / 300 : 0.01f;
+        changed = ImGui::DragScalarN("##value", ImGuiDataType_Float, values, count, speed, range ? &p.min : nullptr, range ? &p.max : nullptr,
+                                     format.c_str());
+    }
+    if (changed)
+        m.runtime->set_uniform_value_float(p.handle, values, count);
+    return changed;
+}
+
+// For signed and unsigned values, with min and max already in their type.
+template <typename T>
+bool IntegerControl(const Parameter& p, ImGuiDataType type, T* values, T min, T max, const std::string& format, bool list)
+{
+    const int count = static_cast<int>(p.rows);
+    if (list && count == 1)
+    {
+        int index = static_cast<int>(values[0]);
+        const bool changed = ImGui::Combo("##value", &index, p.items.c_str());
+        values[0] = static_cast<T>(index);
+        return changed;
+    }
+    const bool range = min < max;
+    if (p.type == "input")
+        return ImGui::InputScalarN("##value", type, values, count, nullptr, nullptr, format.c_str());
+    if (range && p.type != "drag")
+        return ImGui::SliderScalarN("##value", type, values, count, &min, &max, format.c_str());
+    return ImGui::DragScalarN("##value", type, values, count, std::max(p.step, 1.0f), range ? &min : nullptr, range ? &max : nullptr, format.c_str());
+}
+
 // Draws the control for one variable of an effect. Returns true when its value changed.
 bool DrawParameter(const Parameter& p)
 {
     const bool list = p.type == "combo" || p.type == "list" || p.type == "radio";
-    const bool supported = p.arrayLength == 0 && p.columns <= 1 && p.rows >= 1 && p.rows <= 4 && !(list && p.items.empty());
+    const bool supported = HasControl(p.base) && p.arrayLength == 0 && p.columns <= 1 && p.rows >= 1 && p.rows <= 4 && !(list && p.items.empty());
     if (p.spacing > 0)
         ImGui::Dummy(ImVec2(0, ImGui::GetTextLineHeight() * p.spacing));
     if (!p.text.empty())
         Text(p.text, kDim, 13.5f);
-    // Arrays and matrices are left to ReShade's menu, like variables that only carry text.
+    // Arrays, matrices and other types are left to ReShade's menu, like variables that only carry text.
     if (!supported)
         return false;
 
@@ -2203,7 +2274,6 @@ bool DrawParameter(const Parameter& p)
     std::string units = p.units;
     for (size_t at = units.find('%'); at != std::string::npos; at = units.find('%', at + 2))
         units.insert(at, 1, '%');
-    const bool range = p.min < p.max;
     const int count = static_cast<int>(p.rows);
     bool changed = false;
     switch (p.base)
@@ -2220,64 +2290,33 @@ bool DrawParameter(const Parameter& p)
         break;
     }
     case format::r32_float:
+    case format::r16_float:
+        changed = FloatControl(p, units, list);
+        break;
+    case format::r32_sint:
+    case format::r16_sint:
     {
-        float values[4]{};
-        m.runtime->get_uniform_value_float(p.handle, values, count);
-        const std::string format = "%.3f" + units;
-        if (p.type == "color" && count == 3)
-            changed = ImGui::ColorEdit3("##value", values);
-        else if (p.type == "color" && count == 4)
-            changed = ImGui::ColorEdit4("##value", values, ImGuiColorEditFlags_AlphaBar);
-        else if (list && count == 1)
-        {
-            int index = static_cast<int>(values[0]);
-            changed = ImGui::Combo("##value", &index, p.items.c_str());
-            values[0] = static_cast<float>(index);
-        }
-        else if (p.type == "input")
-            changed = ImGui::InputScalarN("##value", ImGuiDataType_Float, values, count, nullptr, nullptr, format.c_str());
-        else if (range && p.type != "drag")
-            changed = ImGui::SliderScalarN("##value", ImGuiDataType_Float, values, count, &p.min, &p.max, format.c_str());
-        else
-        {
-            const float speed = p.step > 0 ? p.step : range ? (p.max - p.min) / 300 : 0.01f;
-            changed = ImGui::DragScalarN("##value", ImGuiDataType_Float, values, count, speed, range ? &p.min : nullptr,
-                                         range ? &p.max : nullptr, format.c_str());
-        }
+        int32_t values[4]{};
+        m.runtime->get_uniform_value_int(p.handle, values, count);
+        changed = IntegerControl(p, ImGuiDataType_S32, values, static_cast<int32_t>(p.min), static_cast<int32_t>(p.max), "%d" + units, list);
         if (changed)
-            m.runtime->set_uniform_value_float(p.handle, values, count);
+            m.runtime->set_uniform_value_int(p.handle, values, count);
         break;
     }
-    case format::r32_sint:
     case format::r32_uint:
+    case format::r16_uint:
     {
-        const bool isSigned = p.base == format::r32_sint;
-        int32_t values[4]{};
-        if (isSigned)
-            m.runtime->get_uniform_value_int(p.handle, values, count);
-        else
-            m.runtime->get_uniform_value_uint(p.handle, reinterpret_cast<uint32_t*>(values), count);
-        const ImGuiDataType type = isSigned ? ImGuiDataType_S32 : ImGuiDataType_U32;
-        const std::string format = (isSigned ? "%d" : "%u") + units;
-        const int32_t min = static_cast<int32_t>(p.min);
-        const int32_t max = static_cast<int32_t>(p.max);
-        if (list && count == 1)
-            changed = ImGui::Combo("##value", values, p.items.c_str());
-        else if (p.type == "input")
-            changed = ImGui::InputScalarN("##value", type, values, count, nullptr, nullptr, format.c_str());
-        else if (range && p.type != "drag")
-            changed = ImGui::SliderScalarN("##value", type, values, count, &min, &max, format.c_str());
-        else
-            changed = ImGui::DragScalarN("##value", type, values, count, std::max(p.step, 1.0f), range ? &min : nullptr,
-                                         range ? &max : nullptr, format.c_str());
-        if (changed && isSigned)
-            m.runtime->set_uniform_value_int(p.handle, values, count);
-        else if (changed)
-            m.runtime->set_uniform_value_uint(p.handle, reinterpret_cast<uint32_t*>(values), count);
+        uint32_t values[4]{};
+        m.runtime->get_uniform_value_uint(p.handle, values, count);
+        // A negative ui_min would wrap around to the largest value.
+        const uint32_t min = static_cast<uint32_t>(std::max(p.min, 0.0f));
+        const uint32_t max = static_cast<uint32_t>(std::max(p.max, 0.0f));
+        changed = IntegerControl(p, ImGuiDataType_U32, values, min, max, "%u" + units, list);
+        if (changed)
+            m.runtime->set_uniform_value_uint(p.handle, values, count);
         break;
     }
     default:
-        ImGui::Dummy(ImVec2(0, ImGui::GetFrameHeight()));
         break;
     }
     if (!p.noReset && ImGui::BeginPopupContextItem("reset"))
