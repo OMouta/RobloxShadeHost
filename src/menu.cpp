@@ -1313,6 +1313,9 @@ SwitchResult SwitchNow(const fs::path& target)
 {
     if (m.unsaved || (m.presetChanged && !m.autoSave))
         return SwitchResult::Unsaved;
+    // ReShade would take a preset deleted since the last scan for a new one.
+    if (std::error_code error; !fs::exists(target, error))
+        return SwitchResult::Failed;
     if (m.presetChanged)
         SavePreset();
     ReadPresetEffects(target);
@@ -3448,6 +3451,17 @@ void SwitchToPending()
 {
     if (m.pendingPreset.empty())
         return;
+    // ReShade would take a preset deleted or moved since the last scan for a new one, and write it back.
+    if (std::error_code error; !m.askingUnsaved && !m.saveNewPreset && !fs::exists(m.pendingPreset, error))
+    {
+        ShowToast(Utf8(m.pendingPreset.stem().wstring()) + " is no longer there");
+        ForgetPreset(m.pendingPreset);
+        RequestScan();
+        m.pendingPreset.clear();
+        m.pendingKeepsEdits = false;
+        m.unsavedChoice = UnsavedChoice::Ask;
+        return;
+    }
     if (m.unsaved && !m.pendingKeepsEdits && m.unsavedChoice == UnsavedChoice::Ask)
     {
         if (!m.askingUnsaved)
