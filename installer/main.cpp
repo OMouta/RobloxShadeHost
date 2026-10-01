@@ -174,6 +174,7 @@ struct App
 
     Task uninstallTask;
     bool deleteUserFiles = false;
+    bool folderLeft = false;
 };
 App app;
 
@@ -765,7 +766,10 @@ void UninstallPage()
     Title("Uninstall Unishade");
     Text("Removes Unishade, ReShade and the effects from " + std::string(app.directory) + ", and its Start menu shortcuts.", kDim, 15);
     Spacing(10);
-    CheckLine("Also delete my presets, ReShade settings and shortcuts", app.deleteUserFiles);
+    CheckLine("Also delete my presets, settings and game list", app.deleteUserFiles);
+    Text("That deletes ReShade.ini, ReShadePreset.ini, RobloxShadeHost.ini and games.ini, and the presets and reshade-shaders folders with "
+         "everything in them. Other files in the folder, such as screenshots, stay.",
+         kDim, 14);
     if (app.uninstallTask.Running())
     {
         Spacing(10);
@@ -779,7 +783,9 @@ void UninstalledPage()
     {
         Title("Unishade was uninstalled");
         if (!app.deleteUserFiles)
-            Text("Your presets, ReShade settings and shortcuts are still in " + std::string(app.directory) + ".", kDim, 15);
+            Text("Your presets and settings are still in " + std::string(app.directory) + ".", kDim, 15);
+        else if (app.folderLeft)
+            Text("Files Setup did not create, such as screenshots, are still in " + std::string(app.directory) + ".", kDim, 15);
     }
     else
     {
@@ -816,7 +822,11 @@ void CollectTasks()
             DestroyWindow(ui.window);
     }
     if (app.uninstallTask.Collect())
+    {
+        std::error_code ignored;
+        app.folderLeft = fs::exists(Directory(), ignored);
         app.page = Page::Uninstalled;
+    }
 }
 
 void DrawUi()

@@ -4,6 +4,7 @@
 #include "../src/preset_ini.h"
 
 #include <windows.h>
+#include <bcrypt.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -28,9 +29,24 @@ namespace
 constexpr wchar_t kUninstallKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{77125AF5-DF0A-485A-A633-E64FBD50E90C}_is1";
 // Windows' graphics settings, one value per exe named after its path, holding "Name=Value;" pairs.
 constexpr wchar_t kGpuPreferencesKey[] = L"Software\\Microsoft\\DirectX\\UserGpuPreferences";
+// The launcher's "Start with Windows" entry, and where Windows keeps whether the user turned it off.
+constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kStartupApprovedKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 // Lists the files Setup installed, relative to the installation folder, for uninstalling.
 constexpr wchar_t kManifest[] = L"RobloxShadeHost-Setup.files";
 constexpr wchar_t kSetupExe[] = L"Unishade-Setup.exe";
+
+// Logs the host and ReShade write next to Unishade.exe, deleted on every uninstall. ReShade numbers its log when
+// another copy has it open.
+constexpr const wchar_t* kLogs[] = { L"Unishade.log", L"Unishade.old.log", L"RobloxShadeHost.log", L"RobloxShadeHost.old.log",
+                                     L"ReShade.log",  L"ReShade.log1",     L"ReShade.log2",        L"ReShade.log3",
+                                     L"ReShade.log4", L"ReShade.log5",     L"ReShade.log6",        L"ReShade.log7",
+                                     L"ReShade.log8", L"ReShade.log9",     L"ReShade.log10" };
+// The user's settings, saved games and presets, deleted only when the user asks. The folders go with everything in
+// them, including effects the user added to reshade-shaders.
+constexpr const wchar_t* kUserFiles[] = { L"ReShade.ini", L"ReShadePreset.ini", L"RobloxShadeHost.ini", L"games.ini", L"games.ini.tmp" };
+constexpr const wchar_t* kUserFolders[] = { L"presets", L"reshade-shaders" };
+
 
 struct AddonInfo
 {
@@ -114,6 +130,22 @@ fs::path ModulePath()
     return path;
 }
 
+fs::path KnownFolder(REFKNOWNFOLDERID id)
+{
+    PWSTR path = nullptr;
+    SHGetKnownFolderPath(id, 0, nullptr, &path);
+    fs::path folder = path ? path : L"";
+    CoTaskMemFree(path);
+    return folder;
+}
+
+fs::path SystemFolder()
+{
+    wchar_t path[MAX_PATH]{};
+    GetSystemDirectoryW(path, MAX_PATH);
+    return path;
+}
+
 bool IsInside(const fs::path& path, const fs::path& folder)
 {
     std::wstring child = path.lexically_normal().wstring();
@@ -122,6 +154,21 @@ bool IsInside(const fs::path& path, const fs::path& folder)
         parent.pop_back();
     return child.size() >= parent.size() && _wcsnicmp(child.c_str(), parent.c_str(), parent.size()) == 0 &&
            (child.size() == parent.size() || child[parent.size()] == L'\\');
+}
+
+// A name nobody can guess and create first.
+std::wstring RandomName(const wchar_t* prefix)
+{
+    unsigned char bytes[16]{};
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG)))
+        throw std::runtime_error("Windows could not generate a random name.");
+    std::wstring name = prefix;
+    for (unsigned char byte : bytes)
+    {
+        name += L"0123456789abcdef"[byte >> 4];
+        name += L"0123456789abcdef"[byte & 15];
+    }
+    return name;
 }
 
 bool IsSha256(const std::string& text)
@@ -323,7 +370,7 @@ void InstallReShade(const fs::path& work, const fs::path& files, const ReShadeRe
 {
     progress.Status("Downloading ReShade " + release.version);
     const fs::path setup = work / L"ReShade-Setup.exe";
-    Download(L"https://reshade.me/downloads/ReShade_Setup_" + Wide(release.version) + L"_Addon.exe", setup, "", progress.cancel,
+    Download(L"https://reshade.me/downloads/ReShade_Setup_" + Wide(release.version) + L"_Addon.exe", setup, "", kPackageLimit, progress.cancel,
              ByteProgress(progress, 0.0f, 0.05f));
 
     // ReShade's installer also leaves an empty preset and a log next to the exe, which must not replace
@@ -361,7 +408,7 @@ void InstallEffects(const fs::path& work, const fs::path& files, Progress& progr
 
         const fs::path extracted = work / L"package";
         fs::remove_all(extracted);
-        ExtractZip(Fetch(url, progress.cancel), extracted, name);
+        ExtractZip(Fetch(url, progress.cancel, kPackageLimit), extracted, name);
         fs::path shaders, textures, shaderFallback, textureFallback;
         FindPackageFolders(extracted, shaders, textures, shaderFallback, textureFallback);
         if (shaders.empty())
@@ -400,7 +447,7 @@ void InstallPresets(const fs::path& work, const fs::path& files, Progress& progr
         if (!IsSha256(hash))
             throw std::runtime_error("The preset list has an invalid checksum for " + name + ".");
         const fs::path preset = files / L"presets" / file;
-        Download(sources.presets + L"/" + file, preset, hash, progress.cancel);
+        Download(sources.presets + L"/" + file, preset, hash, kListLimit, progress.cancel);
 
         // ReShade keeps Techniques before the first section, where the INI functions cannot read it.
         std::string techniques;
@@ -444,7 +491,7 @@ bool DownloadAddon(const fs::path& work, const fs::path& files, const AddonInfo&
                 throw std::runtime_error(std::string("The ") + addon.name + " download list is invalid.");
             const float begin = kBegin + (kEnd - kBegin) * index / addon.files.size();
             const float end = kBegin + (kEnd - kBegin) * (index + 1) / addon.files.size();
-            Download(url, files / file, hash, progress.cancel, ByteProgress(progress, begin, end, Utf8(file) + ": "));
+            Download(url, files / file, hash, kAddonLimit, progress.cancel, ByteProgress(progress, begin, end, Utf8(file) + ": "));
         }
         return true;
     }
@@ -460,6 +507,22 @@ bool DownloadAddon(const fs::path& work, const fs::path& files, const AddonInfo&
     }
 }
 
+// A file list entry must name something inside the folder: relative, without a drive, root, ':' or "..".
+bool ValidEntry(const fs::path& directory, const std::wstring& entry)
+{
+    if (entry.empty() || entry.find(L':') != std::wstring::npos)
+        return false;
+    const fs::path path(entry);
+    if (path.has_root_path())
+        return false;
+    for (const fs::path& part : path)
+        if (part == L"..")
+            return false;
+    const fs::path target = (directory / path).lexically_normal();
+    return IsInside(target, directory) && !IsInside(directory, target);
+}
+
+// Entries that point elsewhere, whether written by a damaged Setup or by someone else, are dropped and logged.
 std::set<std::wstring> ReadManifest(const fs::path& directory)
 {
     std::set<std::wstring> files;
@@ -467,8 +530,12 @@ std::set<std::wstring> ReadManifest(const fs::path& directory)
     for (std::string line; std::getline(file, line);)
     {
         line.erase(line.find_last_not_of("\r") + 1);
-        if (!line.empty())
+        if (line.empty())
+            continue;
+        if (ValidEntry(directory, Wide(line)))
             files.insert(Wide(line));
+        else
+            SetupLog("Ignored an entry of " + Utf8(kManifest) + " that is outside the installation folder: " + line);
     }
     return files;
 }
@@ -478,18 +545,52 @@ void WriteManifest(const fs::path& directory, const std::set<std::wstring>& file
     std::string text;
     std::error_code ignored;
     for (const auto& file : files)
-        if (fs::exists(directory / file, ignored))
+        if (!ValidEntry(directory, file))
+            SetupLog("Left an entry outside the installation folder out of " + Utf8(kManifest) + ": " + Utf8(file));
+        else if (fs::exists(directory / file, ignored))
             text += Utf8(file) + "\r\n";
     WriteFile(directory / kManifest, text);
 }
 
-fs::path StartMenuFolder()
+// A folder Setup installed to: the host, under its current or earlier name, with Setup's file list.
+bool IsInstallation(const fs::path& directory)
 {
-    PWSTR path = nullptr;
-    SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &path);
-    fs::path folder = path ? path : L"";
-    CoTaskMemFree(path);
-    return folder;
+    std::error_code ignored;
+    return fs::is_regular_file(directory / kManifest, ignored) &&
+           (fs::is_regular_file(directory / L"Unishade.exe", ignored) || fs::is_regular_file(directory / L"RobloxShadeHost.exe", ignored));
+}
+
+// Removes a file that Setup replaces or no longer installs.
+void RemoveFile(const fs::path& path)
+{
+    std::error_code error;
+    fs::remove(path, error);
+    if (error)
+        throw std::runtime_error("Could not delete " + PathText(path) + ": " + SystemError(error.value()) + ".");
+}
+
+// Deletes a file, or a folder with everything in it, in the installation folder. Returns false and logs why when
+// it cannot, including when a link or junction on the way leads outside the folder.
+bool DeleteInside(const fs::path& root, const fs::path& path, bool folder)
+{
+    std::error_code error;
+    const fs::path parent = fs::weakly_canonical(path.parent_path(), error);
+    if (error || !IsInside(parent, root))
+    {
+        SetupLog("Did not delete " + PathText(path) + " because it is not inside the installation folder.");
+        return false;
+    }
+    // Neither removal follows links or junctions; they are deleted themselves.
+    if (folder)
+        fs::remove_all(path, error);
+    else
+        fs::remove(path, error);
+    if (error)
+    {
+        SetupLog("Could not delete " + PathText(path) + ": " + SystemError(error.value()));
+        return false;
+    }
+    return true;
 }
 
 void CreateShortcut(const fs::path& link, const fs::path& target)
@@ -548,6 +649,25 @@ fs::path RegisteredDirectory()
     return directory.has_filename() ? directory : directory.parent_path();
 }
 
+// Takes Unishade out of the apps Windows starts at sign-in, unless that entry starts another copy.
+void RemoveFromStartup(const fs::path& directory)
+{
+    std::vector<wchar_t> command(32768);
+    DWORD size = static_cast<DWORD>(command.size() * sizeof(wchar_t));
+    if (RegGetValueW(HKEY_CURRENT_USER, kRunKey, L"Unishade", RRF_RT_REG_SZ, nullptr, command.data(), &size) != ERROR_SUCCESS || !command[0])
+        return;
+    int count = 0;
+    LPWSTR* arguments = CommandLineToArgvW(command.data(), &count);
+    const fs::path exe = arguments && count > 0 ? fs::path(arguments[0]) : fs::path();
+    LocalFree(arguments);
+    const fs::path host = directory / L"Unishade.exe";
+    if (exe.empty() || !IsInside(exe, host) || !IsInside(host, exe))
+        return;
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, L"Unishade");
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, kStartupApprovedKey, L"Unishade");
+    SetupLog("Removed Unishade from the apps Windows starts at sign-in.");
+}
+
 // Calls back for each running host started from the folder.
 template <typename Callback>
 void ForEachHost(const fs::path& directory, Callback callback)
@@ -586,6 +706,21 @@ void Commit(const fs::path& files, const InstallOptions& options, Progress& prog
     progress.Status("Installing to " + PathText(directory));
     progress.Detail("");
     CloseHost(directory);
+    std::set<std::wstring> installed;
+    bool listRead = false;
+    // When a step fails, what was copied so far stays in the file list, so uninstalling still removes it.
+    const auto keepList = [&] {
+        if (!listRead)
+            return;
+        try
+        {
+            WriteManifest(directory, installed);
+        }
+        catch (const std::exception& e)
+        {
+            SetupLog(e.what());
+        }
+    };
     try
     {
         fs::create_directories(directory);
@@ -594,10 +729,11 @@ void Commit(const fs::path& files, const InstallOptions& options, Progress& prog
             for (const auto& addon : kAddons)
                 if (addon.addon != options.addon)
                     for (const wchar_t* file : addon.files)
-                        fs::remove(directory / file);
+                        RemoveFile(directory / file);
 
         const bool hadReShadeIni = fs::exists(directory / L"ReShade.ini");
-        std::set<std::wstring> installed = ReadManifest(directory);
+        installed = ReadManifest(directory);
+        listRead = true;
         for (const auto& entry : fs::recursive_directory_iterator(files))
         {
             if (!entry.is_regular_file())
@@ -609,44 +745,52 @@ void Commit(const fs::path& files, const InstallOptions& options, Progress& prog
             if (userFile && fs::exists(target))
                 continue;
             fs::create_directories(target.parent_path());
-            fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing);
             if (!userFile)
                 installed.insert(relative.wstring());
+            fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing);
         }
         // Repairs the search paths in a ReShade.ini written by an earlier version of Setup.
         if (options.reshade && hadReShadeIni)
             FixReShadeIni(directory / L"ReShade.ini", false);
 
         // Inno Setup's uninstaller from earlier versions of Setup.
-        fs::remove(directory / L"unins000.exe");
-        fs::remove(directory / L"unins000.dat");
+        RemoveFile(directory / L"unins000.exe");
+        RemoveFile(directory / L"unins000.dat");
 
         // Replace the old binaries in place; settings and the manifest keep their original names.
         for (const wchar_t* legacy : { L"RobloxShadeHost.exe", L"RobloxShadeHost-Setup.exe" })
         {
-            fs::remove(directory / legacy);
+            RemoveFile(directory / legacy);
             installed.erase(legacy);
         }
 
         if (!options.portable)
         {
             const fs::path copy = directory / kSetupExe;
+            installed.insert(kSetupExe);
             std::error_code different;
             if (!fs::equivalent(ModulePath(), copy, different))
                 fs::copy_file(ModulePath(), copy, fs::copy_options::overwrite_existing);
-            installed.insert(kSetupExe);
-            const fs::path startMenu = StartMenuFolder();
+            const fs::path startMenu = KnownFolder(FOLDERID_Programs);
             for (const auto& shortcut : kShortcuts)
                 CreateShortcut(startMenu / shortcut.link, directory / shortcut.target);
-            fs::remove(startMenu / L"RobloxShadeHost.lnk");
-            fs::remove(startMenu / L"RobloxShadeHost Setup.lnk");
+            RemoveFile(startMenu / L"RobloxShadeHost.lnk");
+            RemoveFile(startMenu / L"RobloxShadeHost Setup.lnk");
             Register(directory, installed);
         }
         WriteManifest(directory, installed);
     }
     catch (const fs::filesystem_error& e)
     {
-        throw std::runtime_error("Could not write " + PathText(e.path1()) + ": " + SystemError(e.code().value()) + ".");
+        keepList();
+        // A copy's error names the source first; the destination is the one that could not be written.
+        const fs::path& path = e.path2().empty() ? e.path1() : e.path2();
+        throw std::runtime_error("Could not write " + PathText(path) + ": " + SystemError(e.code().value()) + ".");
+    }
+    catch (...)
+    {
+        keepList();
+        throw;
     }
     progress.Fraction(1.0f);
 }
@@ -778,15 +922,22 @@ void Install(const InstallOptions& options, const ReShadeRelease& release, Progr
 void Uninstall(const fs::path& directory, bool deleteUserFiles)
 {
     SetupLog("Uninstalling from " + PathText(directory));
+    // Only a folder Setup installed to, and only what Setup, the host and ReShade put there, is deleted.
+    if (!IsInstallation(directory))
+        throw std::runtime_error(PathText(directory) + " is not a Unishade installation, so Setup did not delete anything in it.");
+    std::error_code error;
+    const fs::path root = fs::weakly_canonical(directory, error);
+    if (error)
+        throw std::runtime_error("Could not read " + PathText(directory) + ": " + SystemError(error.value()) + ".");
     CloseHost(directory);
 
     // A running exe cannot be deleted, but it can be moved on the same drive.
     const fs::path self = ModulePath();
     if (IsInside(self, directory))
     {
-        const std::wstring name = L"Unishade-Setup-" + std::to_wstring(GetCurrentProcessId()) + L".exe";
+        const std::wstring name = RandomName(L"Unishade-Setup-") + L".exe";
         for (const fs::path& target : { fs::temp_directory_path() / name, directory.parent_path() / name })
-            if (MoveFileExW(self.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING))
+            if (MoveFileExW(self.c_str(), target.c_str(), 0))
             {
                 movedSetup = target;
                 break;
@@ -798,7 +949,7 @@ void Uninstall(const fs::path& directory, bool deleteUserFiles)
     const fs::path registered = RegisteredDirectory();
     if (!registered.empty() && IsInside(registered, directory) && IsInside(directory, registered))
     {
-        const fs::path startMenu = StartMenuFolder();
+        const fs::path startMenu = KnownFolder(FOLDERID_Programs);
         for (const auto& shortcut : kShortcuts)
             fs::remove(startMenu / shortcut.link, ignored);
         fs::remove(startMenu / L"RobloxShadeHost.lnk", ignored);
@@ -807,38 +958,55 @@ void Uninstall(const fs::path& directory, bool deleteUserFiles)
     }
     // Windows keeps graphics settings for exes that no longer exist.
     RegDeleteKeyValueW(HKEY_CURRENT_USER, kGpuPreferencesKey, (directory / L"Unishade.exe").c_str());
+    RemoveFromStartup(directory);
 
-    if (deleteUserFiles)
-    {
-        std::error_code error;
-        fs::remove_all(directory, error);
-        if (error)
-            throw std::runtime_error("Could not delete " + PathText(directory) + ": " + SystemError(error.value()) + ".");
-        SetupLog("Uninstalled.");
-        return;
-    }
-
+    // Files nobody listed here, such as screenshots, stay.
+    std::set<std::wstring> remaining;
     for (const auto& file : ReadManifest(directory))
     {
-        std::error_code error;
-        fs::remove(directory / file, error);
-        if (error)
-            SetupLog("Could not delete " + Utf8(file) + ": " + SystemError(error.value()));
+        const fs::path path = directory / file;
+        // Setup's own exe stays when it could not be moved out of the way.
+        const bool runningSetup = movedSetup.empty() && IsInside(path, self) && IsInside(self, path);
+        if (!DeleteInside(root, path, false) && !runningSetup)
+            remaining.insert(file);
     }
-    for (const wchar_t* file : { kManifest, L"Unishade.log", L"Unishade.old.log", L"RobloxShadeHost.log", L"RobloxShadeHost.old.log" })
-        fs::remove(directory / file, ignored);
+    bool failed = !remaining.empty();
+    for (const wchar_t* log : kLogs)
+        if (!DeleteInside(root, directory / log, false))
+            failed = true;
+    if (deleteUserFiles)
+    {
+        for (const wchar_t* file : kUserFiles)
+            if (!DeleteInside(root, directory / file, false))
+                failed = true;
+        for (const wchar_t* folder : kUserFolders)
+            if (!DeleteInside(root, directory / folder, true))
+                failed = true;
+    }
+    // The list keeps what could not be deleted, so uninstalling again can finish the job.
+    if (remaining.empty())
+    {
+        if (!DeleteInside(root, directory / kManifest, false))
+            failed = true;
+    }
+    else
+        WriteManifest(directory, remaining);
 
-    // Deepest folders first, so parents are empty by the time they are tried. Folders with user files stay.
+    // Deepest folders first, so parents are empty by the time they are tried. Folders with other files stay, and
+    // links and junctions are left alone.
     std::vector<fs::path> folders;
-    std::error_code error;
     for (auto entry = fs::recursive_directory_iterator(directory, error); !error && entry != fs::recursive_directory_iterator();
          entry.increment(error))
-        if (entry->is_directory())
+        if (entry->symlink_status(ignored).type() == fs::file_type::directory)
             folders.push_back(entry->path());
     std::sort(folders.begin(), folders.end(), [](const fs::path& a, const fs::path& b) { return a.native().size() > b.native().size(); });
-    folders.push_back(directory);
+    if (fs::symlink_status(directory, ignored).type() == fs::file_type::directory)
+        folders.push_back(directory);
     for (const auto& folder : folders)
         fs::remove(folder, ignored);
+    if (failed)
+        throw std::runtime_error("Some files in " + PathText(directory) + " could not be deleted. The setup log lists them. Close the programs "
+                                 "that use them, then delete them yourself.");
     SetupLog("Uninstalled.");
 }
 
@@ -846,11 +1014,16 @@ void DeleteMovedSetup()
 {
     if (movedSetup.empty())
         return;
-    // Gives Setup two seconds to exit before deleting it.
-    std::wstring command = L"cmd.exe /c ping -n 3 127.0.0.1 >nul & del /f /q \"" + movedSetup.wstring() + L"\"";
+    // Gives Setup two seconds to exit, then deletes it. The paths reach cmd.exe through the environment, which it
+    // expands once, and stand in quotes, so neither % signs nor other characters in them mean anything to it.
+    const fs::path system = SystemFolder();
+    const fs::path cmd = system / L"cmd.exe";
+    SetEnvironmentVariableW(L"UNISHADE_PING", (system / L"PING.EXE").c_str());
+    SetEnvironmentVariableW(L"UNISHADE_SETUP_COPY", movedSetup.c_str());
+    std::wstring command = L"\"" + cmd.wstring() + L"\" /d /v:off /s /c \"\"%UNISHADE_PING%\" -n 3 127.0.0.1 >nul & del /f /q \"%UNISHADE_SETUP_COPY%\"\"";
     STARTUPINFOW startup{ sizeof(startup) };
     PROCESS_INFORMATION process{};
-    if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
+    if (CreateProcessW(cmd.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, system.c_str(), &startup, &process))
     {
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
