@@ -304,6 +304,9 @@ struct ImportDialog
     std::mutex mutex;
     std::vector<fs::path> files;
     std::atomic<bool> open = false;
+    // The game the presets are for, and when the dialog closed.
+    DWORD process = 0;
+    ULONGLONG closedAt = 0;
 };
 ImportDialog& importDialog = *new ImportDialog;
 
@@ -327,6 +330,8 @@ PresetScanner& scanner = *new PresetScanner;
 
 // Folders are read again this often while the Presets tab shows them.
 constexpr ULONGLONG kScanInterval = 2000;
+// How long picked presets wait for the menu to open again after the import dialog.
+constexpr ULONGLONG kImportWait = 3000;
 
 // Settings lists the shortcuts in the order of kShortcuts.
 constexpr struct
@@ -1339,11 +1344,15 @@ std::vector<fs::path> PickPresets()
     return files;
 }
 
-// The dialog takes focus from the menu, which closes it, so the menu opens again when the dialog closes.
+// The dialog takes focus from the menu, which closes it, so the menu opens again when presets were picked.
 void OpenImportDialog()
 {
     if (importDialog.open.exchange(true))
         return;
+    {
+        std::lock_guard lock(importDialog.mutex);
+        importDialog.process = m.gameProcess;
+    }
     std::thread([] {
         // The main thread's apartment is multithreaded, and the shell's dialogs need a single-threaded one.
         const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -1353,10 +1362,37 @@ void OpenImportDialog()
         {
             std::lock_guard lock(importDialog.mutex);
             importDialog.files.insert(importDialog.files.end(), files.begin(), files.end());
+            importDialog.closedAt = GetTickCount64();
         }
         importDialog.open = false;
-        PostMessageW(g.overlay, kOpenMenuMessage, 0, 0);
+        if (!files.empty())
+            PostMessageW(g.overlay, kOpenMenuMessage, 0, 0);
     }).detach();
+}
+
+// Imports picked presets once the menu is open again. They are dropped when the game they were picked for is gone,
+// or when the menu could not open for them, so they never end up in another game's folder later.
+void TakeImports(bool menu)
+{
+    std::vector<fs::path> files;
+    bool sameGame = false;
+    {
+        std::lock_guard lock(importDialog.mutex);
+        if (importDialog.files.empty())
+            return;
+        sameGame = importDialog.process == m.gameProcess;
+        if (sameGame && !menu && GetTickCount64() - importDialog.closedAt < kImportWait)
+            return;
+        files.swap(importDialog.files);
+    }
+    if (sameGame && menu)
+        ImportPresets(files);
+    else
+    {
+        const char* reason = sameGame ? "the menu could not open" : "the game changed";
+        Log(LogLevel::Info, L"Did not import %zu presets, since %hs.", files.size(), reason);
+        ShowToast(std::string("The presets were not imported, since ") + reason);
+    }
 }
 
 // Lists the latest scan the way the Presets tab shows it.
@@ -3018,13 +3054,6 @@ void DrawMenuFrame()
             m.unsaved = true;
         m.presetChanged = false;
     }
-    std::vector<fs::path> imported;
-    {
-        std::lock_guard lock(importDialog.mutex);
-        imported.swap(importDialog.files);
-    }
-    if (!imported.empty())
-        ImportPresets(imported);
     if (!m.pendingPreset.empty())
     {
         if (m.unsaved && !m.pendingKeepsEdits && m.unsavedChoice == UnsavedChoice::Ask)
@@ -3140,6 +3169,7 @@ void OnOverlay(effect_runtime* runtime)
     FollowGame();
     CarryOutRequests();
     const bool menu = g.editMode && !ReShadeMenuOpen();
+    TakeImports(menu);
     // The start hint, the only toast with a key, has done its job once the menu opens.
     if (menu && !m.toastKey.empty())
         m.toastStart = 0;
