@@ -16,9 +16,11 @@ interface Props {
   description: string;
   // The home page lays its navigation over the picture.
   overlay?: boolean;
+  // Keeps the page out of search results, like the 404 page, which GitHub Pages shows at any address.
+  noindex?: boolean;
 }
 
-const { title, description, overlay = false } = Astro.props;
+const { title, description, overlay = false, noindex = false } = Astro.props;
 const canonical = new URL(Astro.url.pathname, Astro.site);
 ---
 
@@ -29,12 +31,12 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
-    <link rel="canonical" href={canonical} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
     <meta name="theme-color" content="#0f1024" />
     <link rel="icon" href={icon} />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
-    <meta property="og:url" content={canonical} />
+    {!noindex && <meta property="og:url" content={canonical} />}
     <meta property="og:image" content={new URL(banner.src, Astro.site)} />
     <meta name="twitter:card" content="summary_large_image" />
   </head>
