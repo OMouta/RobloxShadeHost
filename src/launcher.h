@@ -6,9 +6,10 @@
 // this process.
 void CreateLauncher();
 
-// Redraws the launcher when what it shows has changed. Called every loop.
+// Redraws the launcher when what it shows has changed, unless it is hidden or minimized. Called every loop.
 void UpdateLauncher();
 
+// Also removes the notification area icon. Does nothing more when called again.
 void DestroyLauncher();
 
 // A second copy of the host finds the running one's launcher by this class and brings it to the front.

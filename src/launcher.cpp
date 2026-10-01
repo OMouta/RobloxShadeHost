@@ -29,6 +29,7 @@ using std::min;
 
 #include <cmath>
 #include <cstdint>
+#include <cwchar>
 #include <cwctype>
 #include <iterator>
 #include <map>
@@ -63,10 +64,11 @@ enum Timer : UINT_PTR
 
 // Sent to the launcher by its notification area icon.
 constexpr UINT kTrayMessage = WM_APP + 16;
+constexpr UINT kTrayIcon = 1;
 // Posted by the rename box when it is done, so it is not destroyed while it handles a message. lParam is the box.
 constexpr UINT kRenameMessage = WM_APP + 17;
 // Longer names would not fit in the list.
-constexpr int kMaxNameLength = 100;
+constexpr WPARAM kMaxNameLength = 100;
 
 enum RenameEnd : WPARAM
 {
@@ -74,7 +76,6 @@ enum RenameEnd : WPARAM
     kLeaveName,  // leaving the box, which drops a name that is not allowed
     kCancelName, // Escape
 };
-constexpr UINT kTrayIcon = 1;
 
 enum TrayCommand : UINT
 {
@@ -758,7 +759,7 @@ void Layout(HDC dc)
             nameRight = entry.badge.left - P(12);
         }
         PlaceEntry(entry, { pad, top, right, top + rowHeight }, P(32), nameRight);
-        if (entry.renaming)
+        if (entry.renaming && l.edit)
         {
             // The box covers the name, and the edit control sits in it, moved only when its place changes.
             l.editBox = { entry.nameRect.left - P(6), middle - P(23), entry.nameRect.right, middle + P(1) };
@@ -1655,8 +1656,8 @@ std::wstring RenameGame(const fs::path& executable, const std::wstring& name)
     const bool sameKey = _wcsicmp(key.c_str(), name.c_str()) == 0;
     const fs::path root = fs::path(ExeDirectory()) / L"presets";
     std::error_code error;
-    const bool move = !sameKey && !key.empty() && fs::is_directory(root / key, error) && !fs::exists(root / name, error);
-    if (move)
+    const bool moveFolder = !sameKey && !key.empty() && fs::is_directory(root / key, error) && !fs::exists(root / name, error);
+    if (moveFolder)
     {
         fs::rename(root / key, root / name, error);
         if (error)
@@ -1669,14 +1670,14 @@ std::wstring RenameGame(const fs::path& executable, const std::wstring& name)
     games[index].name = name;
     if (!SaveGames(std::move(games)))
     {
-        if (move)
+        if (moveFolder)
             fs::rename(root / name, root / key, error);
         return L"Could not save the game list.";
     }
     if (std::wstring preset = sameKey ? L"" : GamePreset(key); !preset.empty())
     {
         // A preset in the game's folder moved with it.
-        if (move && preset.size() > key.size() && _wcsnicmp(preset.c_str(), key.c_str(), key.size()) == 0 &&
+        if (moveFolder && preset.size() > key.size() && _wcsnicmp(preset.c_str(), key.c_str(), key.size()) == 0 &&
             (preset[key.size()] == L'\\' || preset[key.size()] == L'/'))
             preset = name + preset.substr(key.size());
         SetGamePreset(name, preset);
@@ -2453,4 +2454,5 @@ void DestroyLauncher()
     l.logoStream = nullptr;
     if (l.gdiplus)
         Gdiplus::GdiplusShutdown(l.gdiplus);
+    l.gdiplus = 0;
 }
