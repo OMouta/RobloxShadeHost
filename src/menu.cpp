@@ -3664,7 +3664,13 @@ void OnInitRuntime(effect_runtime* runtime)
 {
     m.runtime = runtime;
     m.device = runtime->get_device();
+    // A new runtime loads its effects from the start.
     m.techniquesDirty = true;
+    m.techniquesTried = 0;
+    m.compiledAt = 0;
+    m.effectsEmpty = false;
+    m.effectFiles.reset();
+    m.effectCheckRequested = false;
     m.current = CurrentPreset();
     m.foldersDirty = true;
     ReadPresetEffects(m.current);
@@ -3679,6 +3685,11 @@ void OnDestroyRuntime(effect_runtime* runtime)
     if (runtime != m.runtime)
         return;
     DestroyTextures();
+    // Effects load again from the preset, without the changes that were not saved.
+    if (m.unsaved || (m.presetChanged && !m.autoSave))
+        ShowToast("ReShade loaded the effects again, so the unsaved changes to " + Utf8(m.current.stem().wstring()) + " are gone");
+    m.unsaved = false;
+    m.presetChanged = false;
     m.device = nullptr;
     m.runtime = nullptr;
     m.comparing = false;
@@ -3701,6 +3712,10 @@ void OnDestroyDevice(reshade::api::device* destroyed)
 // Runs when ReShade starts loading effects again, and when it has created them all.
 void OnReloadedEffects(effect_runtime*)
 {
+    // The handles are no longer valid, and an empty list tells when ReShade finished compiling.
+    m.techniques.clear();
+    m.effects.clear();
+    m.byName.clear();
     m.techniquesDirty = true;
     m.techniquesTried = 0;
     m.compiledAt = 0;
