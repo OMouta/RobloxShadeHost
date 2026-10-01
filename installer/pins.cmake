@@ -2,6 +2,8 @@
 # the name and SHA-256 of every add-on file. A download list or release asset changed later cannot change what Setup
 # runs or installs. Writes installer-generated/pinned.h, which Setup includes.
 
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/vendor/reshade/reshade.ini"
+    "${CMAKE_SOURCE_DIR}/vendor/depth/downloads.ini" "${CMAKE_SOURCE_DIR}/vendor/dlss5/downloads.ini")
 file(STRINGS "${CMAKE_SOURCE_DIR}/vendor/reshade/reshade.ini" RESHADE_VERSION REGEX "^version=")
 file(STRINGS "${CMAKE_SOURCE_DIR}/vendor/reshade/reshade.ini" RESHADE_SETUP_SHA256 REGEX "^sha256=")
 string(REGEX REPLACE "^version=" "" RESHADE_VERSION "${RESHADE_VERSION}")
@@ -34,6 +36,14 @@ else()
     if(NOT EXISTS "${RESHADE_SETUP_FILE}")
         file(DOWNLOAD "${RESHADE_SETUP_URL}" "${RESHADE_SETUP_FILE}.part" STATUS status)
         list(GET status 0 code)
+        # An error page sent with a success status is not a program.
+        if(code EQUAL 0)
+            file(READ "${RESHADE_SETUP_FILE}.part" magic LIMIT 2 HEX)
+            if(NOT magic STREQUAL "4d5a")
+                set(code 1)
+                set(status "1;reshade.me did not send a program")
+            endif()
+        endif()
         if(code EQUAL 0)
             file(RENAME "${RESHADE_SETUP_FILE}.part" "${RESHADE_SETUP_FILE}")
         else()
