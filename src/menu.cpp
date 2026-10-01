@@ -2674,10 +2674,14 @@ void CaptureShortcut()
         return;
     }
     hotkey.key = key;
+    // Any key a shortcut can be written with works, so the list of keys comes from there too.
     if (FormatHotkey(hotkey).empty())
     {
-        m.shortcutError = L"That key cannot be used. Use a letter, number, F key other than F12, Home, End, Insert, Delete, Page Up, "
-                          L"Page Down, Pause or Scroll Lock, with or without Ctrl, Alt, Shift or Win.";
+        std::wstring keys;
+        for (const NamedKey& named : kNamedKeys)
+            keys += (keys.empty() ? L"" : L", ") + std::wstring(named.name);
+        m.shortcutError = L"That key cannot be used. Use a letter, a number, an F key other than F12 or one of these: " + keys +
+                          L". Ctrl, Alt, Shift and Win can go with any of them.";
         return;
     }
     InputHotkeys hotkeys = g.hotkeys;
@@ -2812,7 +2816,8 @@ void SettingsTab()
         if (!hotkey.key || (hotkey.modifiers & (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN)))
             continue;
         const std::string key = Utf8(FormatHotkey(hotkey));
-        const bool typing = hotkey.key == VK_SPACE || hotkey.key == VK_TAB || (hotkey.key >= '0' && hotkey.key <= 'Z');
+        const bool typing = hotkey.key == VK_SPACE || hotkey.key == VK_TAB || (hotkey.key >= '0' && hotkey.key <= 'Z') ||
+                            (hotkey.key >= VK_NUMPAD0 && hotkey.key <= VK_DIVIDE);
         if (shortcut.always)
             Text("Other programs will not receive " + key + " while Unishade runs.", kWarning, 13.5f);
         else if (typing)
