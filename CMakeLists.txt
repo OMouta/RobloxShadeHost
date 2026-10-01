@@ -120,6 +120,8 @@ add_library(setup_libraries STATIC EXCLUDE_FROM_ALL
     "${MINIZ_DIR}/miniz.c")
 target_include_directories(setup_libraries PUBLIC "${IMGUI_DIR}" "${IMGUI_DIR}/backends" "${MINIZ_DIR}")
 target_compile_definitions(setup_libraries PUBLIC MINIZ_NO_STDIO MINIZ_NO_TIME)
+# Otherwise the backend loads XInput by its bare name, which could find a DLL next to Setup.
+target_compile_definitions(setup_libraries PRIVATE IMGUI_IMPL_WIN32_DISABLE_GAMEPAD)
 
 # Built on request, like the Inno Setup installer it replaces: cmake --build build --config Release --target installer
 add_executable(installer WIN32 EXCLUDE_FROM_ALL
@@ -135,8 +137,11 @@ target_compile_definitions(installer PRIVATE UNISHADE_USER_AGENT="Unishade-Setup
 target_compile_definitions(installer PRIVATE UNISHADE_VERSION_RESOURCE=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0)
 target_compile_options(installer PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(installer PRIVATE setup_libraries d3d11 dxgi d3dcompiler dwmapi windowscodecs winhttp bcrypt imm32 delayimp)
-# Loaded from System32 at startup instead, see wWinMain.
-target_link_options(installer PRIVATE /DELAYLOAD:d3d11.dll)
+# Setup's copy lives next to ReShade's dxgi.dll, and Windows looks for DLLs in the exe's folder first. Its imports
+# load from System32 instead: the loader flag covers DLLs loaded at startup (Windows 10 1607 and later), and the DLLs
+# that are not KnownDLLs are delay-loaded, so they load after wWinMain has limited the search to System32.
+target_link_options(installer PRIVATE /DEPENDENTLOADFLAG:0x800 /DELAYLOAD:d3d11.dll /DELAYLOAD:d3dcompiler_47.dll
+    /DELAYLOAD:dwmapi.dll /DELAYLOAD:winhttp.dll /DELAYLOAD:bcrypt.dll)
 add_dependencies(installer Unishade)
 # Setup refuses to run a ReShade installer it cannot verify, so it is not built without the hash.
 if(NOT RESHADE_SETUP_SHA256)

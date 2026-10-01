@@ -1347,8 +1347,9 @@ Arguments ParseArguments()
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     // Setup's copy lives next to ReShade, which installs itself as dxgi.dll or d3d11.dll, and Windows looks
-    // in the exe's folder first. d3d11.dll is delay-loaded, so loading both from System32 before anything
-    // else keeps ReShade out of Setup; later loads by name get these copies.
+    // in the exe's folder first. From here on, DLLs loaded by name, including the delay-loaded imports, come
+    // from System32 only. dxgi.dll and d3d11.dll are loaded right away, so later loads by name get these copies.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
