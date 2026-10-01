@@ -170,9 +170,10 @@ struct MenuNotice
     std::string text;
 };
 
-// A preset ReShade saved into its cache, which it writes to disk from its present once a second has passed since.
+// ReShade writes a preset saved into its cache from its present, once more than a second has passed since.
 constexpr ULONGLONG kReShadeWriteDelay = 1100;
 
+// A preset ReShade has yet to write, and when it was saved into the cache.
 struct PendingWrite
 {
     fs::path preset;
@@ -1199,30 +1200,38 @@ bool EffectsLoaded()
 }
 
 // Writes the active preset to disk now instead of from a later present. ReShade only writes at once when exporting
-// to a file outside its cache, so the preset is exported beside itself and moved over it. Only done while the
+// to a file outside its cache, so the preset is exported to another file and moved over it. Only done while the
 // values on screen are the saved ones.
 void WriteActivePreset()
 {
     if (m.unwritten.preset.empty() || !SamePath(m.unwritten.preset, m.current) || m.unsaved || m.presetChanged || !EffectsLoaded())
         return;
     const fs::path& preset = m.current;
-    fs::path temporary = preset;
-    temporary += L".unishade";
     std::error_code error;
+    // Beside the preset when it is in the presets folder, so the move replaces it in one step. Nothing is created
+    // next to a preset elsewhere.
+    fs::path temporary = InPresets(preset) ? preset.parent_path() : fs::temp_directory_path(error);
+    temporary /= preset.filename();
+    temporary += L".unishade";
     // Starting from the file keeps what ReShade only writes for effects that are on, like settings of others.
-    if (fs::exists(preset, error))
+    if (!error && fs::exists(preset, error))
         fs::copy_file(preset, temporary, fs::copy_options::overwrite_existing, error);
-    else
+    else if (!error)
         fs::remove(temporary, error);
     if (error)
         return;
     m.runtime->export_current_preset(Utf8(temporary.wstring()).c_str());
     fs::rename(temporary, preset, error);
+    // Moving fails from a temporary folder on another drive, so the file is copied there instead.
     if (error)
     {
-        fs::remove(temporary, error);
-        return;
+        error.clear();
+        fs::copy_file(temporary, preset, fs::copy_options::overwrite_existing, error);
+        std::error_code ignored;
+        fs::remove(temporary, ignored);
     }
+    if (error)
+        return;
     m.unwritten = {};
     // ReShade still writes the same values from its cache later. Saving into the cache again dates them after this
     // file, which ReShade would otherwise take for a change made elsewhere and report that it could not save.
