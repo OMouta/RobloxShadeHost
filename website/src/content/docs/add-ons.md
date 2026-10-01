@@ -26,7 +26,7 @@ In the Unishade menu, click the **DLSS5** tab, then turn off **Require DLSS**.
 
 ### 2. Run Unishade on your RTX card
 
-Open Windows **Settings > System > Display > Graphics**, click **Add desktop app** and add `Unishade.exe` from your install folder.
+Open Windows **Settings > System > Display > Graphics**, click **Add desktop app** and add `Unishade.exe` from your install folder. Unless you picked another folder in Setup, that's `%LOCALAPPDATA%\Programs\Unishade`: paste it into the address bar at the top of the file picker and press **Enter**.
 
 ![Adding a desktop app in Windows' graphics settings](./images/dlss5-exe-graphics.png)
 

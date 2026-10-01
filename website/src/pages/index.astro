@@ -2,6 +2,7 @@
 import { Image } from 'astro:assets';
 import Base from '../layouts/Base.astro';
 import DownloadButton from '../components/DownloadButton.astro';
+import { steps } from '../site';
 import banner from '../../../assets/unishade-banner.png';
 import menu from '../assets/menu-effects-crop.jpg';
 import launcher from '../content/docs/images/launcher.png';
@@ -16,12 +17,12 @@ import setup from '../content/docs/images/setup-addons.png';
   <main>
     <section class="hero">
       <div class="stage">
-        <Image src={banner} widths={[900, 1800]} sizes="100vw" alt="Six games with Unishade effects" class="banner" loading="eager" />
+        <Image src={banner} widths={[900, 1800]} sizes="100vw" alt="Six games with Unishade effects" class="banner" priority />
       </div>
       <div class="lede">
         <h1>Universal post-processing without injection.</h1>
         <p>ReShade effects for games where ReShade can't run. Formerly RobloxShadeHost.</p>
-        <DownloadButton />
+        <DownloadButton detect />
       </div>
     </section>
 
@@ -32,7 +33,7 @@ import setup from '../content/docs/images/setup-addons.png';
         <p class="dim">Works with games in windowed or borderless mode.</p>
         <a href="/docs/games/">More about games</a>
       </div>
-      <Image src={launcher} widths={[620, 1240]} sizes="(max-width: 900px) 100vw, 620px" alt="The Unishade window with three saved games" class="shot" />
+      <Image src={launcher} sizes="(max-width: 900px) 100vw, 620px" alt="The Unishade window with three saved games" class="shot" />
     </section>
 
     <section class="menu">
@@ -54,15 +55,12 @@ import setup from '../content/docs/images/setup-addons.png';
         <h2>One installer, a few minutes</h2>
         <p>Setup brings ReShade, every official effect and a set of presets. Depth estimation and DLSS5 are there if you want them.</p>
         <ol>
-          <li>Download Setup and run it.</li>
-          <li>Pick your add-ons.</li>
-          <li>Open your game and add it in Unishade.</li>
-          <li>Press Home in the game.</li>
+          {steps.map((step) => <li>{step}</li>)}
         </ol>
         <DownloadButton />
         <a href="/docs/">Read the install guide</a>
       </div>
-      <Image src={setup} widths={[900, 1800]} sizes="(max-width: 900px) 100vw, 55vw" alt="Setup's add-ons page" class="shot" />
+      <Image src={setup} sizes="(max-width: 900px) 100vw, 55vw" alt="Setup's add-ons page" class="shot" />
     </section>
   </main>
 </Base>
