@@ -313,6 +313,7 @@ int Run()
         {
             if (msg.message == WM_QUIT)
             {
+                FlushPresets();
                 ShutdownDepth();
                 ShutdownAddon();
                 DestroyLauncher();
@@ -347,7 +348,11 @@ int Run()
 
         UpdateOverlay();
         if (!g.overlayVisible)
+        {
             g.frameStatistics.Reset(FrameStatistics::Clock::now(), g.capturedFrames.load(std::memory_order_relaxed));
+            // ReShade writes preset changes from its present, which stops while the overlay is hidden.
+            FlushPresets();
+        }
         UpdateInputHotkey();
         UpdateHeldCompare();
         UpdateLauncher();

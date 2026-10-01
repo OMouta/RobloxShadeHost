@@ -15,6 +15,7 @@ using std::min;
 #include "capture.h"
 #include "config.h"
 #include "log.h"
+#include "menu.h"
 #include "overlay.h"
 #include "resource.h"
 #include "shell.h"
@@ -1901,6 +1902,30 @@ void ShowLauncher()
     SetForegroundWindow(l.pickerWindow ? l.pickerWindow : g.launcher);
 }
 
+// Asks about preset changes that are not saved before Unishade quits, since they are lost otherwise. Returns false
+// when the user wants to stay.
+bool ConfirmQuit()
+{
+    if (!MenuHasUnsavedChanges())
+    {
+        FlushPresets();
+        return true;
+    }
+    const std::wstring name = ActivePresetName();
+    const std::wstring question = L"Save the changes to " + (name.empty() ? std::wstring(L"the preset") : name) + L" before quitting?";
+    switch (MessageBoxW(g.launcher, question.c_str(), L"Unishade", MB_YESNOCANCEL | MB_ICONWARNING))
+    {
+    case IDYES:
+        FlushPresets(true);
+        return true;
+    case IDNO:
+        FlushPresets();
+        return true;
+    default:
+        return false;
+    }
+}
+
 void TrayMenu(int x, int y)
 {
     const HMENU menu = CreatePopupMenu();
@@ -1927,7 +1952,8 @@ void TrayMenu(int x, int y)
         ToggleOverlay();
         break;
     case kQuitCommand:
-        DestroyWindow(g.launcher);
+        if (ConfirmQuit())
+            DestroyWindow(g.launcher);
         break;
     }
 }
@@ -2298,6 +2324,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_SHOWWINDOW:
         if (wParam && !IsIconic(hwnd))
             Refresh();
+        break;
+    case WM_CLOSE:
+        if (!ConfirmQuit())
+            return 0;
         break;
     case WM_SIZE:
     {
