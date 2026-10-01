@@ -60,6 +60,8 @@ enum class Action
     DetectAutomatically,
     ToggleGame,
     RemoveGame,
+    DismissNotices,
+    OpenUrl,
 };
 
 enum class Look
@@ -106,11 +108,18 @@ struct Entry
     RECT badge{};
 };
 
+// A word of a notice, placed where DrawText's word wrapping would put it.
+struct Word
+{
+    RECT rect;
+    std::wstring text;
+};
+
 struct Row
 {
     RECT rect;
     LogLevel level;
-    std::wstring text;
+    std::vector<Word> words; // without the web addresses, which are links
 };
 
 // What the launcher shows depends on, compared every loop to know when to describe it again. Cheap to read.
@@ -186,7 +195,7 @@ struct Launcher
     RECT updateText{};
     RECT gamesTitle{};
     RECT list{};
-    RECT setupTitle{};
+    RECT noticesTitle{};
     std::vector<Row> rows;
     int footer = 0;
     std::vector<Target> targets;
@@ -409,6 +418,58 @@ void Describe()
     l.setup = GetFileAttributesW(setup.c_str()) != INVALID_FILE_ATTRIBUTES ? setup : L"";
 }
 
+// Places a notice's words one by one, so the web addresses in it can be links. links counts the links so far.
+// Returns the bottom of the last line.
+int PlaceWords(HDC dc, Row& row, const std::wstring& text, int left, int top, int right, size_t& links)
+{
+    const HGDIOBJ previous = SelectObject(dc, ui->body);
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    const auto width = [dc](const std::wstring& part) {
+        SIZE size{};
+        GetTextExtentPoint32W(dc, part.c_str(), static_cast<int>(part.size()), &size);
+        return static_cast<int>(size.cx);
+    };
+    const int space = width(L" ");
+    const int line = metrics.tmHeight;
+    int x = left;
+    int y = top;
+    for (size_t start = 0; start < text.size();)
+    {
+        const size_t end = std::min(text.find_first_of(L" \n", start), text.size());
+        if (std::wstring word = text.substr(start, end - start); !word.empty())
+        {
+            std::wstring link;
+            if (word.starts_with(L"https://"))
+            {
+                // A sentence can end right after an address.
+                link = word.substr(0, word.find_last_not_of(L".,;:!?)") + 1);
+                word.erase(0, link.size());
+            }
+            const int linkWidth = link.empty() ? 0 : width(link);
+            const int wordWidth = linkWidth + (word.empty() ? 0 : width(word));
+            if (x > left && x + wordWidth > right)
+            {
+                x = left;
+                y += line;
+            }
+            if (!link.empty())
+                l.targets.push_back({ { x, y, std::min(x + linkWidth, right), y + line }, Action::OpenUrl, Look::Link, links++, link });
+            if (!word.empty())
+                row.words.push_back({ { x + linkWidth, y, std::min(x + wordWidth, right), y + line }, word });
+            x += wordWidth + space;
+        }
+        if (end < text.size() && text[end] == L'\n')
+        {
+            x = left;
+            y += line;
+        }
+        start = end + 1;
+    }
+    SelectObject(dc, previous);
+    return y + line;
+}
+
 int ButtonWidth(HDC dc, HFONT font, const wchar_t* label)
 {
     return TextWidth(dc, font, label) + P(28);
@@ -495,19 +556,25 @@ void Layout(HDC dc)
     }
     y = l.list.bottom + P(26);
 
+    // Setup's checks, warnings and errors, until dismissed.
     l.rows.clear();
-    l.setupTitle = {};
+    l.noticesTitle = {};
     const std::vector<Notice> notices = Notices();
     if (!notices.empty())
     {
-        l.setupTitle = { pad, y, right, y + P(22) };
+        const int dismissWidth = TextWidth(dc, ui->body, L"Dismiss");
+        l.noticesTitle = { pad, y, right - dismissWidth - P(12), y + P(22) };
+        l.targets.push_back({ { right - dismissWidth, y, right, y + P(22) }, Action::DismissNotices, Look::Link, 0, L"Dismiss" });
         y += P(22) + P(10);
+        size_t links = 0;
         for (const Notice& notice : notices)
         {
             const int left = pad + P(26);
-            const int height = std::max(TextHeight(dc, ui->body, notice.text, right - left), P(18));
-            l.rows.push_back({ { left, y, right, y + height }, notice.level, notice.text });
-            y += height + P(8);
+            Row row{ .level = notice.level };
+            const int bottom = std::max(PlaceWords(dc, row, notice.text, left, y, right, links), y + P(18));
+            row.rect = { left, y, right, bottom };
+            l.rows.push_back(std::move(row));
+            y = bottom + P(8);
         }
         y += P(8);
     }
@@ -904,9 +971,10 @@ void Paint(HDC output)
                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
     if (!l.rows.empty())
-        PaintText(dc, ui->semibold, theme::kText, L"Setup", l.setupTitle, DT_SINGLELINE | DT_VCENTER);
+        PaintText(dc, ui->semibold, theme::kText, L"Messages", l.noticesTitle, DT_SINGLELINE | DT_VCENTER);
     for (const Row& row : l.rows)
-        PaintText(dc, ui->body, theme::kText, row.text, row.rect);
+        for (const Word& word : row.words)
+            PaintText(dc, ui->body, theme::kText, word.text, word.rect, DT_SINGLELINE | DT_END_ELLIPSIS);
 
     for (size_t i = 0; i < l.targets.size(); ++i)
     {
@@ -918,7 +986,8 @@ void Paint(HDC output)
             if (target.action == Action::Download)
                 PaintText(dc, ui->semibold, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE | DT_VCENTER);
             else
-                PaintText(dc, ui->body, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE);
+                PaintText(dc, ui->body, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect,
+                          DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             break;
         case Look::Button:
             PaintText(dc, ui->body, theme::kText, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
@@ -1159,6 +1228,7 @@ void Run(const Target& target)
     case Action::Help: ShellOpen(kHelpUrl); return;
     case Action::RunSetup: ShellOpen(l.setup); return;
     case Action::Download: ShellOpen(l.update.url); return;
+    case Action::OpenUrl: ShellOpen(target.label); return;
     case Action::AddGame: OpenPicker(Picker::Add); break;
     case Action::PickWindow: OpenPicker(Picker::Session); break;
     case Action::DetectAutomatically:
@@ -1181,6 +1251,9 @@ void Run(const Target& target)
             games.erase(games.begin() + static_cast<std::ptrdiff_t>(target.index));
             SaveGames(std::move(games));
         }
+        break;
+    case Action::DismissNotices:
+        ClearNotices();
         break;
     }
     Refresh();
