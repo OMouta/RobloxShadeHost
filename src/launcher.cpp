@@ -226,6 +226,9 @@ struct Launcher
     std::optional<Control> pressed;
     // Whose tip shows, after the mouse rests on it.
     std::optional<Control> tip;
+    // Like in Windows, the focus only shows once the keyboard is used.
+    std::optional<Control> focus;
+    bool focusShown = false;
     std::optional<Removed> removed;
 
     // The picker, a dialog over the launcher listing the open windows.
@@ -240,6 +243,7 @@ struct Launcher
     int pickerHovered = -1;
     bool pickerTracking = false;
     HWND pickerPressed = nullptr; // the window whose row the click was pressed on
+    HWND pickerFocus = nullptr;   // the window whose row has the keyboard focus
 };
 Launcher l;
 // The scaling of the window being laid out or painted, which P, F and the fonts follow.
@@ -617,8 +621,8 @@ void Layout(HDC dc)
             continue;
         }
         const RECT toggle{ remove.left - P(10) - P(36), middle - P(10), remove.left - P(10), middle + P(10) };
-        l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, entry.game, L"", false, L"Remove from list" });
         l.targets.push_back({ toggle, Action::ToggleGame, Look::Switch, entry.game, L"", entry.enabled });
+        l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, entry.game, L"", false, L"Remove from list" });
         int nameRight = toggle.left - P(14);
         entry.badge = {};
         if (entry.running)
@@ -780,9 +784,8 @@ RECT Inset(RECT rect, int by)
     return rect;
 }
 
-void FillRounded(Gdiplus::Graphics& graphics, const RECT& rect, float radius, const Gdiplus::Color& fill, const Gdiplus::Color& border)
+void RoundedPath(Gdiplus::GraphicsPath& path, const RECT& rect, float radius)
 {
-    Gdiplus::GraphicsPath path;
     const float x = F(rect.left) + 0.5f, y = F(rect.top) + 0.5f, w = F(rect.right - rect.left) - 1.0f, h = F(rect.bottom - rect.top) - 1.0f;
     const float d = std::min({ radius * 2, w, h });
     path.AddArc(x, y, d, d, 180, 90);
@@ -790,9 +793,25 @@ void FillRounded(Gdiplus::Graphics& graphics, const RECT& rect, float radius, co
     path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
     path.AddArc(x, y + h - d, d, d, 90, 90);
     path.CloseFigure();
+}
+
+void FillRounded(Gdiplus::Graphics& graphics, const RECT& rect, float radius, const Gdiplus::Color& fill, const Gdiplus::Color& border)
+{
+    Gdiplus::GraphicsPath path;
+    RoundedPath(path, rect, radius);
     Gdiplus::SolidBrush brush(fill);
     graphics.FillPath(&brush, &path);
     Gdiplus::Pen pen(border, 1.0f);
+    graphics.DrawPath(&pen, &path);
+}
+
+// The keyboard focus, around a control.
+void FocusRing(Gdiplus::Graphics& graphics, const RECT& control)
+{
+    const RECT rect = Inset(control, -P(3));
+    Gdiplus::GraphicsPath path;
+    RoundedPath(path, rect, std::min(F(8.0f), F(rect.bottom - rect.top) / 2));
+    Gdiplus::Pen pen(Plus(theme::kAccentHover), F(2.0f));
     graphics.DrawPath(&pen, &path);
 }
 
@@ -962,6 +981,7 @@ void Paint(HDC output)
     const int width = client.right;
     const int height = client.bottom;
     l.scroll = std::clamp(l.scroll, 0, std::max(0, l.height - height));
+    const bool focusShown = l.focusShown && GetFocus() == g.launcher;
     const HDC dc = CreateCompatibleDC(output);
     const HBITMAP bitmap = CreateCompatibleBitmap(output, width, height);
     const HGDIOBJ previousBitmap = SelectObject(dc, bitmap);
@@ -1034,6 +1054,9 @@ void Paint(HDC output)
         for (const Row& row : l.rows)
             Icon(graphics, Gdiplus::PointF(F(row.rect.left) - F(18.0f), F(row.rect.top) + F(9.0f)), row.level);
 
+        if (const int focused = FindTarget(l.focus); focused >= 0 && focusShown)
+            FocusRing(graphics, l.targets[focused].rect);
+
         graphics.DrawLine(&line, 0, l.footer, width, l.footer);
     }
 
@@ -1098,7 +1121,10 @@ void Paint(HDC output)
     }
 
     // Over everything else, below the button or above it at the bottom of the window.
-    if (const int tip = FindTarget(l.tip); tip >= 0 && l.targets[tip].tip)
+    int tip = FindTarget(l.tip);
+    if (tip < 0 && focusShown)
+        tip = FindTarget(l.focus);
+    if (tip >= 0 && l.targets[tip].tip)
     {
         const Target& target = l.targets[tip];
         const int tipWidth = TextWidth(dc, ui->note, target.tip) + P(16);
@@ -1178,6 +1204,14 @@ void ResizePicker()
     InvalidateRect(l.pickerWindow, nullptr, FALSE);
 }
 
+int PickerFocusRow()
+{
+    for (size_t i = 0; i < l.windows.size(); ++i)
+        if (l.windows[i].window == l.pickerFocus)
+            return static_cast<int>(i);
+    return -1;
+}
+
 int ChoiceAt(POINT point)
 {
     for (size_t i = 0; i < l.choices.size(); ++i)
@@ -1215,6 +1249,8 @@ void PaintPicker(HDC output)
         }
         if (l.pickerHovered >= 0 && l.pickerHovered < static_cast<int>(l.choices.size()))
             FillRounded(graphics, Inset(l.choices[l.pickerHovered].rect, P(4)), F(8.0f), Plus(theme::kCardHover), Plus(theme::kCardHover));
+        if (const int focused = PickerFocusRow(); focused >= 0 && focused < static_cast<int>(l.choices.size()))
+            FocusRing(graphics, Inset(l.choices[focused].rect, P(7)));
         for (const Entry& choice : l.choices)
             EntryIcon(graphics, choice);
     }
@@ -1251,6 +1287,8 @@ void OpenPicker(Picker picker)
     l.pickerScroll = 0;
     l.pickerHovered = -1;
     ListWindows();
+    // Opened with the keyboard, the first window has the focus.
+    l.pickerFocus = l.focusShown && !l.windows.empty() ? l.windows.front().window : nullptr;
     // Opened over the launcher, so it starts at the scaling of the launcher's monitor.
     RECT owner{};
     GetWindowRect(g.launcher, &owner);
@@ -1315,6 +1353,9 @@ void ForgetRemoved()
     if (!key.empty() && std::none_of(g.autoGames.begin(), g.autoGames.end(),
                                      [&](const AutoGame& game) { return _wcsicmp(FolderName(game.name).c_str(), key.c_str()) == 0; }))
         RemoveGamePreset(key);
+    // The focus stays in the list when Undo goes away.
+    if (l.focus == Control{ Action::UndoRemove } && !g.autoGames.empty())
+        l.focus = Control{ Action::ToggleGame, std::min(l.removed->index, g.autoGames.size() - 1) };
     l.removed.reset();
 }
 
@@ -1330,6 +1371,8 @@ void RemoveGame(size_t index)
         return;
     l.removed = std::move(removed);
     SetTimer(g.launcher, kUndoTimer, kUndoMilliseconds, nullptr);
+    // So pressing Enter again does not remove the next game.
+    l.focus = Control{ Action::UndoRemove };
 }
 
 void UndoRemove()
@@ -1342,9 +1385,11 @@ void UndoRemove()
             return _wcsicmp(game.executable.c_str(), l.removed->game.executable.c_str()) == 0;
         }))
     {
-        games.insert(games.begin() + static_cast<std::ptrdiff_t>(std::min(l.removed->index, games.size())), l.removed->game);
+        const size_t index = std::min(l.removed->index, games.size());
+        games.insert(games.begin() + static_cast<std::ptrdiff_t>(index), l.removed->game);
         if (!SaveGames(std::move(games)))
             return;
+        l.focus = Control{ Action::RemoveGame, index };
     }
     KillTimer(g.launcher, kUndoTimer);
     l.removed.reset();
@@ -1428,6 +1473,113 @@ void Choose(size_t index)
     Refresh();
 }
 
+// Scrolls the launcher so a control is in view.
+void ScrollTo(RECT rect)
+{
+    RECT client{};
+    GetClientRect(g.launcher, &client);
+    const int margin = P(12);
+    int scroll = l.scroll;
+    if (rect.top < P(3) + margin)
+        scroll += rect.top - P(3) - margin;
+    else if (rect.bottom > client.bottom - margin)
+        scroll += rect.bottom - (client.bottom - margin);
+    scroll = std::clamp(scroll, 0, std::max(0, l.height - static_cast<int>(client.bottom)));
+    if (scroll == l.scroll)
+        return;
+    l.scroll = scroll;
+    Relayout();
+    UpdateHover();
+}
+
+// Tab and Shift+Tab move the focus through the controls, and Enter or Space use the focused one. Returns whether
+// the key was used.
+bool LauncherKey(WPARAM key, LPARAM flags)
+{
+    if (key == VK_TAB && !l.targets.empty())
+    {
+        const int count = static_cast<int>(l.targets.size());
+        const int current = FindTarget(l.focus);
+        const bool back = GetKeyState(VK_SHIFT) < 0;
+        const int next = current < 0 ? (back ? count - 1 : 0) : (current + (back ? count - 1 : 1)) % count;
+        l.focus = ControlOf(l.targets[next]);
+        l.focusShown = true;
+        ScrollTo(l.targets[next].rect);
+        InvalidateRect(g.launcher, nullptr, FALSE);
+        return true;
+    }
+    // A held key repeats, which should not use the control again.
+    const bool repeated = (flags & (1 << 30)) != 0;
+    if ((key == VK_RETURN || key == VK_SPACE) && l.focusShown && !repeated)
+        if (const int index = FindTarget(l.focus); index >= 0)
+        {
+            // Copied, since running it lays the window out again.
+            const Target target = l.targets[index];
+            Run(target);
+            return true;
+        }
+    return false;
+}
+
+// Scrolls the picker so a row is in view.
+void ScrollPickerTo(RECT rect)
+{
+    const PickerScaling scaling;
+    RECT client{};
+    GetClientRect(l.pickerWindow, &client);
+    int scroll = l.pickerScroll;
+    if (rect.top < P(3))
+        scroll += rect.top - P(3);
+    else if (rect.bottom > client.bottom)
+        scroll += rect.bottom - client.bottom;
+    scroll = std::clamp(scroll, 0, std::max(0, l.pickerHeight - static_cast<int>(client.bottom)));
+    if (scroll != l.pickerScroll)
+    {
+        l.pickerScroll = scroll;
+        l.pickerHovered = -1;
+    }
+}
+
+// The arrows, Home and End, Tab and Shift+Tab move the focus through the windows, Enter or Space picks the focused
+// one, and Escape closes the picker. Returns whether the key was used.
+bool PickerKey(WPARAM key, LPARAM flags)
+{
+    const int count = static_cast<int>(l.windows.size());
+    int row = PickerFocusRow();
+    const bool back = key == VK_UP || (key == VK_TAB && GetKeyState(VK_SHIFT) < 0);
+    switch (key)
+    {
+    case VK_ESCAPE:
+        ClosePicker();
+        return true;
+    case VK_RETURN:
+    case VK_SPACE:
+        // A held key repeats, which should not pick again.
+        if (row >= 0 && !(flags & (1 << 30)))
+            Choose(static_cast<size_t>(row));
+        return true;
+    case VK_UP:
+    case VK_DOWN:
+    case VK_TAB:
+        row = row < 0 ? (back ? count - 1 : 0) : std::clamp(row + (back ? -1 : 1), 0, count - 1);
+        break;
+    case VK_HOME:
+        row = 0;
+        break;
+    case VK_END:
+        row = count - 1;
+        break;
+    default:
+        return false;
+    }
+    if (row < 0 || row >= count)
+        return true;
+    l.pickerFocus = l.windows[row].window;
+    ScrollPickerTo(l.choices[row].rect);
+    InvalidateRect(l.pickerWindow, nullptr, FALSE);
+    return true;
+}
+
 LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -1509,11 +1661,8 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         l.pickerPressed = nullptr;
         return 0;
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE)
-        {
-            ClosePicker();
+        if (PickerKey(wParam, lParam))
             return 0;
-        }
         break;
     // A game opened while the picker was open shows up when the picker is activated again. A click that activates
     // it while the rows move is dropped, so it cannot pick the wrong window.
@@ -1546,6 +1695,7 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         l.pickerWindow = nullptr;
         l.picker = Picker::None;
         l.pickerTracking = false;
+        l.pickerFocus = nullptr;
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -1608,9 +1758,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             l.tip.reset();
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        // Clicking hides the focus until a key is used again.
+        if (l.focusShown)
+        {
+            l.focusShown = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         if (const int index = TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }); index >= 0)
         {
             l.pressed = ControlOf(l.targets[index]);
+            l.focus = l.pressed;
             SetCapture(hwnd);
         }
         return 0;
@@ -1632,6 +1789,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CAPTURECHANGED:
         l.pressed.reset();
         return 0;
+    case WM_KEYDOWN:
+        if (LauncherKey(wParam, lParam))
+            return 0;
+        break;
+    // The focus only shows while the launcher has it.
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+        InvalidateRect(hwnd, nullptr, FALSE);
+        break;
     case WM_TIMER:
         if (wParam == kUndoTimer)
         {
