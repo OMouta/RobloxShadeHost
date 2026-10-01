@@ -1,6 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { defineConfig } from 'astro/config';
 import { satteri } from '@astrojs/markdown-satteri';
+import sitemap from '@astrojs/sitemap';
 import { links } from './src/links.ts';
 
 // [Discord](links:discord) in Markdown links to links.discord, so the docs and the components share one list.
@@ -33,7 +34,8 @@ export default defineConfig({
     '/dlss5': '/docs/add-ons/#dlss5',
   },
   trailingSlash: 'always',
-  integrations: [checkLinks],
+  // The sitemap leaves out the redirects and the 404 page.
+  integrations: [checkLinks, sitemap()],
   markdown: { processor: satteri({ mdastPlugins: [siteLinks] }) },
   vite: { server: { fs: { allow: ['..'] } } },
 });
