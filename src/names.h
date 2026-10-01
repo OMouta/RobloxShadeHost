@@ -81,7 +81,7 @@ bool ReservedName(std::basic_string_view<Char> name)
     if (number.size() == 1 && number[0] >= Char('0') && number[0] <= Char('9'))
         return true;
     // U+00B9, U+00B2 and U+00B3, which take two bytes in UTF-8.
-    const auto superscript = [](char32_t code) { return code == 0xB9 || code == 0xB2 || code == 0xB3; };
+    const auto superscript = [](char32_t code) { return code == U'\xB9' || code == U'\xB2' || code == U'\xB3'; };
     if constexpr (sizeof(Char) == 1)
         return number.size() == 2 && static_cast<unsigned char>(number[0]) == 0xC2 && superscript(static_cast<unsigned char>(number[1]));
     else
@@ -137,7 +137,7 @@ inline std::wstring FolderName(std::wstring name)
     return name_rules::FolderName(std::move(name));
 }
 
-// game is set for a game's name.
+// What keeps a typed name from being used, if anything. game is set for a game's name.
 inline NameIssue CheckName(std::string_view name, bool game)
 {
     return name_rules::CheckName(name, game);
