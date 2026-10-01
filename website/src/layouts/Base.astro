@@ -1,0 +1,374 @@
+---
+import '../styles/global.css';
+import { Font, Image, getImage } from 'astro:assets';
+import logo from '../../../assets/UnishadeSmall.png';
+import icon from '../../../assets/Unishade.ico?url';
+import appIcon from '../../../assets/Unishade.png';
+import banner from '../../../assets/unishade-banner1.png';
+import { links } from '../links';
+import BookIcon from '../icons/book.svg';
+import DiscordIcon from '../icons/discord.svg';
+import GithubIcon from '../icons/github.svg';
+import KofiIcon from '../icons/kofi.svg';
+import MenuIcon from '../icons/menu.svg';
+
+interface Props {
+  title: string;
+  description: string;
+  // The home page lays its navigation over the picture.
+  overlay?: boolean;
+  // Keeps the page out of search results, like the 404 page, which Cloudflare shows at any address without a page.
+  noindex?: boolean;
+}
+
+const { title, description, overlay = false, noindex = false } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+
+// Small icons for browser tabs and home screens. The .ico stays for older browsers.
+const favicon = await getImage({ src: appIcon, width: 32, height: 32, format: 'png', layout: 'none' });
+const touchIcon = await getImage({ src: appIcon, width: 180, height: 180, format: 'png', background: '#0f1024', layout: 'none' });
+// The picture link previews show, cropped to their 1.91:1. The banner is 600px tall, and images aren't enlarged.
+const preview = await getImage({ src: banner, width: 1146, height: 600, fit: 'cover', format: 'jpg', quality: 80, layout: 'none' });
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
+    <meta name="theme-color" content="#0f1024" />
+    <Font cssVariable="--font-archivo" preload />
+    <link rel="icon" href={icon} sizes="48x48" />
+    <link rel="icon" href={favicon.src} type="image/png" sizes="32x32" />
+    <link rel="apple-touch-icon" href={touchIcon.src} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Unishade" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    {!noindex && <meta property="og:url" content={canonical} />}
+    <meta property="og:image" content={new URL(preview.src, Astro.site)} />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content={String(preview.attributes.width)} />
+    <meta property="og:image:height" content={String(preview.attributes.height)} />
+    <meta property="og:image:alt" content="The Unishade logo over six games with effects, and the words Universal post-processing without injection." />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+  <body>
+    <header class:list={['nav', { overlay }]}>
+      <a class="brand" href="/" aria-label="Unishade home">
+        <Image src={logo} alt="" width={40} layout="fixed" loading="eager" class="brand-logo" />
+        <span class="brand-name">Unishade</span>
+      </a>
+      <nav aria-label="Main">
+        <ul id="nav-links">
+          <li><a href="/docs/"><BookIcon aria-hidden="true" />Docs</a></li>
+          <li><a href={links.discord}><DiscordIcon aria-hidden="true" />Discord</a></li>
+          <li><a href={links.github}><GithubIcon aria-hidden="true" />GitHub</a></li>
+          <li><a class="kofi" href={links.kofi}><KofiIcon aria-hidden="true" />Ko-fi</a></li>
+        </ul>
+        <a class="button button-primary" href="/download/">Download</a>
+        <button class="menu-button" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
+          <MenuIcon aria-hidden="true" />
+        </button>
+      </nav>
+    </header>
+
+    <script>
+      const nav = document.querySelector<HTMLElement>('.nav')!;
+      const update = () => nav.classList.toggle('scrolled', window.scrollY > 0);
+      addEventListener('scroll', update, { passive: true });
+      update();
+
+      // On narrow screens the links fold into a menu.
+      const button = nav.querySelector<HTMLButtonElement>('.menu-button')!;
+      const open = (value: boolean) => {
+        button.setAttribute('aria-expanded', String(value));
+        nav.classList.toggle('menu-open', value);
+      };
+      button.addEventListener('click', () => open(!nav.classList.contains('menu-open')));
+      addEventListener('click', (event) => {
+        if (!nav.contains(event.target as Node)) open(false);
+      });
+      addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape' || !nav.classList.contains('menu-open')) return;
+        open(false);
+        button.focus();
+      });
+    </script>
+
+    <slot />
+
+    <footer class="footer">
+      <div class="footer-inner">
+        <div class="footer-about">
+          <a class="brand" href="/">
+            <Image src={logo} alt="" width={40} layout="fixed" class="brand-logo" />
+            Unishade
+          </a>
+          <p class="dim">ReShade effects for games where ReShade can't run. Free and open source.</p>
+        </div>
+        <div class="footer-links">
+          <div>
+            <h2>Unishade</h2>
+            <ul>
+              <li><a href="/download/">Download</a></li>
+              <li><a href="/docs/">Docs</a></li>
+              <li><a href="/docs/troubleshooting/">Troubleshooting</a></li>
+              <li><a href={links.releases}>Releases</a></li>
+            </ul>
+          </div>
+          <div>
+            <h2>Community</h2>
+            <ul>
+              <li><a href={links.discord}>Discord</a></li>
+              <li><a href={links.github}>GitHub</a></li>
+              <li><a href={links.kofi}>Ko-fi</a></li>
+            </ul>
+          </div>
+          <div>
+            <h2>Legal</h2>
+            <ul>
+              <li><a href="/terms/">Terms</a></li>
+              <li><a href="/privacy/">Privacy</a></li>
+              <li><a href="/cookies/">Cookies</a></li>
+              <li><a href={links.license}>MIT license</a></li>
+            </ul>
+          </div>
+        </div>
+        <div class="footer-bottom dim">
+          <p>© {new Date().getFullYear()} Unishade contributors</p>
+          <p>
+            Effects run on <a href={links.reshade}>ReShade</a> by crosire. Unishade isn't affiliated with the games it runs on.
+          </p>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>
+
+<style>
+  /* Spans the window so the background does too, with the links on the page's edges. */
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    height: var(--nav-height);
+    padding: 0 calc((100% - var(--page)) / 2);
+    transition: background-color 0.2s, box-shadow 0.2s;
+  }
+
+  .nav.overlay {
+    position: fixed;
+    inset: 0 0 auto;
+    background-image: linear-gradient(to bottom, rgb(15 16 36 / 0.7), transparent);
+  }
+
+  .nav.scrolled {
+    box-shadow: 0 1px 0 var(--line);
+    background-color: rgb(15 16 36 / 0.8);
+    backdrop-filter: blur(16px);
+  }
+
+  .nav .button {
+    min-height: 40px;
+    padding: 0 18px;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--ink);
+    font-weight: 750;
+    font-stretch: 118%;
+    text-decoration: none;
+  }
+
+  .brand-logo {
+    width: 40px;
+    height: auto;
+  }
+
+  nav,
+  nav ul {
+    display: flex;
+    align-items: center;
+    gap: 26px;
+  }
+
+  nav ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  nav li {
+    display: flex;
+  }
+
+  nav a:not(.button) {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ink);
+    text-decoration: none;
+  }
+
+  nav svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .kofi svg {
+    color: #ff5e5b;
+  }
+
+  .menu-button {
+    display: none;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    color: var(--ink);
+    background: none;
+    cursor: pointer;
+  }
+
+  .menu-button:hover,
+  .menu-open .menu-button {
+    border-color: var(--haze);
+  }
+
+  nav a:not(.button):hover {
+    color: var(--accent);
+  }
+
+  .footer {
+    margin-top: clamp(80px, 12vw, 140px);
+    border-top: 1px solid var(--line);
+  }
+
+  .footer-inner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 48px clamp(32px, 6vw, 96px);
+    width: var(--page);
+    margin: 0 auto;
+    padding: 56px 0 40px;
+  }
+
+  .footer-about {
+    display: grid;
+    gap: 14px;
+    align-content: start;
+    justify-items: start;
+    max-width: 30ch;
+  }
+
+  .footer-links {
+    display: grid;
+    grid-template-columns: repeat(3, auto);
+    gap: 32px clamp(40px, 6vw, 88px);
+  }
+
+  .footer-links h2 {
+    margin-bottom: 14px;
+    color: var(--haze);
+    font-size: 0.9rem;
+    font-weight: 600;
+    font-stretch: 100%;
+    letter-spacing: 0;
+  }
+
+  .footer-links ul {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .footer-links a {
+    color: var(--ink);
+    text-decoration: none;
+  }
+
+  .footer-links a:hover {
+    color: var(--accent);
+  }
+
+  .footer-bottom {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px 24px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    font-size: 0.9rem;
+  }
+
+  @media (max-width: 780px) {
+    nav {
+      gap: 12px;
+    }
+
+    .menu-button {
+      display: grid;
+    }
+
+    /* The links drop down under the bar, at its right edge. */
+    nav ul {
+      position: absolute;
+      top: calc(var(--nav-height) - 8px);
+      right: calc((100% - var(--page)) / 2);
+      display: none;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 2px;
+      min-width: 200px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--night-raised);
+      box-shadow: 0 16px 40px rgb(0 0 0 / 0.4);
+    }
+
+    .menu-open ul {
+      display: flex;
+    }
+
+    nav ul a:not(.button) {
+      display: flex;
+      padding: 10px 12px;
+      border-radius: 8px;
+    }
+
+    nav ul a:not(.button):hover {
+      background: var(--night);
+    }
+
+    .footer-inner {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  @media (max-width: 440px) {
+    .brand-name {
+      display: none;
+    }
+
+    .footer-links {
+      grid-template-columns: repeat(2, auto);
+    }
+  }
+</style>

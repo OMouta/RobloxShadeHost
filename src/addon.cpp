@@ -3,9 +3,9 @@
 #include "state.h"
 
 // Shown in ReShade's add-on list.
-extern "C" __declspec(dllexport) const char* NAME = "RobloxShadeHost";
+extern "C" __declspec(dllexport) const char* NAME = "Unishade";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Draws the RobloxShadeHost menu and supplies estimated depth when depth estimation is installed.";
+    "Draws the Unishade menu and supplies estimated depth when depth estimation is installed.";
 
 namespace
 {
@@ -15,16 +15,39 @@ bool reshadeMenuOpen = false;
 bool allowReShadeMenu = false;
 // The host has one swapchain, so ReShade creates one runtime for it.
 reshade::api::effect_runtime* runtime = nullptr;
+// When ReShade may have started making effects, 0 when it is done.
+ULONGLONG loadingSince = 0;
+// In case the end of loading is missed, such as after a preset switch that loads nothing.
+constexpr ULONGLONG kLoadingLimit = 10000;
 
 void OnInitRuntime(reshade::api::effect_runtime* created)
 {
     runtime = created;
+    loadingSince = GetTickCount64();
+}
+
+// ReShade compiles effects in the background, applies the preset, then makes one effect per frame and reports reloaded
+// effects once all are made. It reports reloaded effects before compiling too, which needs no frames.
+void OnSetPresetPath(reshade::api::effect_runtime* changed, const char*)
+{
+    if (changed == runtime)
+        loadingSince = GetTickCount64();
+}
+
+void OnReloadedEffects(reshade::api::effect_runtime* reloaded)
+{
+    if (reloaded == runtime)
+        loadingSince = 0;
 }
 
 void OnDestroyRuntime(reshade::api::effect_runtime* destroyed)
 {
-    if (runtime == destroyed)
-        runtime = nullptr;
+    if (runtime != destroyed)
+        return;
+    runtime = nullptr;
+    // Its menu goes with it, such as when the device is lost, and the next runtime starts with it closed.
+    reshadeMenuOpen = false;
+    loadingSince = 0;
 }
 
 bool OnOpenOverlay(reshade::api::effect_runtime*, bool open, reshade::api::input_source)
@@ -60,6 +83,8 @@ bool InitAddon()
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
     reshade::register_event<reshade::addon_event::reshade_open_overlay>(OnOpenOverlay);
+    reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(OnSetPresetPath);
+    reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
     return true;
 }
 
@@ -85,6 +110,11 @@ void OpenReShadeMenu(bool open)
 bool ReShadeMenuOpen()
 {
     return reshadeMenuOpen;
+}
+
+bool ReShadeLoadingEffects()
+{
+    return loadingSince && GetTickCount64() - loadingSince < kLoadingLimit;
 }
 
 void ShutdownAddon()

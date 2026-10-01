@@ -2,6 +2,7 @@
 #include "config.h"
 #include "ini_text.h"
 #include "log.h"
+#include "text.h"
 #include "theme.h"
 
 #include <windows.h>
@@ -9,20 +10,13 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 
 namespace
 {
-std::string Utf8(const std::wstring& text)
-{
-    const int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    std::string result(size, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), result.data(), size, nullptr, nullptr);
-    return result;
-}
-
 std::string Color(unsigned rgb, float alpha = 1.0f)
 {
     char text[64];
@@ -105,7 +99,7 @@ void ApplyTheme(IniText& ini)
 
 void PrepareReShadeConfig()
 {
-    const std::wstring path = ExeDirectory() + L"ReShade.ini";
+    const std::filesystem::path path = ExeDirectory() + L"ReShade.ini";
     std::ifstream input(path, std::ios::binary);
     IniText ini{ std::string(std::istreambuf_iterator<char>(input), {}) };
     input.close();
@@ -120,7 +114,8 @@ void PrepareReShadeConfig()
             const size_t end = std::min(value.find(',', start), value.size());
             const std::string name = value.substr(start, end - start);
             start = end + 1;
-            if (!name.empty() && name != "RobloxShadeHost" && name.rfind("RobloxShadeHost@", 0) != 0)
+            if (!name.empty() && name != "Unishade" && name.rfind("Unishade@", 0) != 0 &&
+                name != "RobloxShadeHost" && name.rfind("RobloxShadeHost@", 0) != 0)
                 kept += (kept.empty() ? "" : ",") + name;
         }
         if (kept != value)
@@ -139,7 +134,7 @@ void PrepareReShadeConfig()
     {
         PWSTR pictures = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, 0, nullptr, &pictures)))
-            ini.Set("SCREENSHOT", "SavePath", Utf8(std::wstring(pictures) + L"\\RobloxShadeHost\\"));
+            ini.Set("SCREENSHOT", "SavePath", Utf8(std::wstring(pictures) + L"\\Unishade\\"));
         CoTaskMemFree(pictures);
     }
     if (!ini.Get("STYLE", "StyleIndex", value))
@@ -147,8 +142,14 @@ void PrepareReShadeConfig()
 
     if (!ini.Changed())
         return;
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    // Written beside it and moved over it, so a crash while writing cannot damage the user's ReShade settings.
+    const std::filesystem::path temporary = path.native() + L".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     output << ini.Text();
-    if (!output)
+    output.close();
+    if (!output || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        DeleteFileW(temporary.c_str());
         Log(LogLevel::Warning, L"Could not update %ls, so ReShade may show its own tutorial.", path.c_str());
+    }
 }

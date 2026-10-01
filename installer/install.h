@@ -1,6 +1,6 @@
 #pragma once
 
-#include "net.h"
+#include "../src/net.h"
 
 #include <atomic>
 #include <filesystem>
@@ -27,13 +27,14 @@ struct InstallOptions
     bool portable = false;
 };
 
-// Download locations. Tests point them elsewhere from the command line.
+// Download locations. Tests point them elsewhere from the command line, and may give a local file for the effect
+// package list and the add-on manifests.
 struct Sources
 {
     std::wstring effects = L"https://raw.githubusercontent.com/crosire/reshade-shaders/list/EffectPackages.ini";
-    std::wstring presets = L"https://raw.githubusercontent.com/OMouta/RobloxShadeHost/main/presets";
-    std::wstring dlss5 = L"https://github.com/OMouta/RobloxShadeHost/releases/download/dlss5-assets/downloads.ini";
-    std::wstring depth = L"https://github.com/OMouta/RobloxShadeHost/releases/download/depth-assets/downloads.ini";
+    std::wstring presets = L"https://raw.githubusercontent.com/OMouta/Unishade/main/presets";
+    std::wstring dlss5 = L"https://github.com/OMouta/Unishade/releases/download/dlss5-assets/downloads.ini";
+    std::wstring depth = L"https://github.com/OMouta/Unishade/releases/download/depth-assets/downloads.ini";
 };
 inline Sources sources;
 
@@ -78,15 +79,17 @@ const std::filesystem::path& SetupLogPath();
 // A resource embedded in Setup, such as the host exe.
 std::string_view Resource(int id);
 
-// Finds the newest ReShade on reshade.me and downloads its license.
+// Finds the newest ReShade on reshade.me and downloads its license from that version's source tag.
 ReShadeRelease FetchReShadeRelease(const std::atomic<bool>& cancel);
 
-// Downloads everything into a temporary folder first, so a failed or cancelled download leaves the
-// installation folder untouched. Throws std::runtime_error or Cancelled.
-void Install(const InstallOptions& options, const ReShadeRelease& release, Progress& progress);
+// Downloads everything into a temporary folder first, so a failed or cancelled download leaves the installation
+// folder untouched. An effect package, preset or add-on that cannot be installed is left out with a note, and the
+// result is false. Throws std::runtime_error or Cancelled.
+bool Install(const InstallOptions& options, const ReShadeRelease& release, Progress& progress);
 
-// Removes what Setup installed. ReShade.ini, presets and RobloxShadeHost.ini stay unless deleteUserFiles is set.
-// When Setup runs from the folder, it moves its own exe out first; call DeleteMovedSetup before exiting.
+// Removes the files Setup installed and the logs. With deleteUserFiles, also removes ReShade.ini, ReShadePreset.ini,
+// RobloxShadeHost.ini, games.ini and the presets and reshade-shaders folders. Refuses a folder that is not a Unishade
+// installation. When Setup runs from the folder, it moves its own exe out first; call DeleteMovedSetup before exiting.
 void Uninstall(const std::filesystem::path& directory, bool deleteUserFiles);
 void DeleteMovedSetup();
 
@@ -104,3 +107,9 @@ std::wstring ReadShortcut(const std::filesystem::path& directory, const wchar_t*
 
 bool HostRunning(const std::filesystem::path& directory);
 void LaunchHost(const std::filesystem::path& directory);
+
+// The GPU preference for the folder's Unishade.exe in Windows' graphics settings: 0 lets Windows decide, 1 saves
+// power and 2 is high performance. -1 when it has none.
+int GpuPreference(const std::filesystem::path& directory);
+// Sets it to high performance, keeping its other graphics settings.
+void SetHighPerformanceGpu(const std::filesystem::path& directory);

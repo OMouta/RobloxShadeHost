@@ -1,62 +1,38 @@
 <p align="center">
-  <img src="assets/RobloxShadeHostSmall.png" alt="RobloxShadeHost logo" width="280">
+  <img src="assets/unishade-banner1.png" alt="Unishade"/>
 </p>
-
-<h1 align="center">RobloxShadeHost</h1>
-
-<p align="center">Run ReShade on Roblox without modifying the game.</p>
 
 <p align="center">
-  <a href="https://github.com/OMouta/RobloxShadeHost/releases/latest">Download for Windows</a>
+  <a href="https://unishade.me/download/">Download</a>
   &nbsp;·&nbsp;
-  <a href="https://pages.mouta.me/RobloxShadeHost/">Website</a>
+  <a href="https://unishade.me/docs/">Docs</a>
   &nbsp;·&nbsp;
-  <a href="https://pages.mouta.me/RobloxShadeHost/install/">Installation guide</a>
-  &nbsp;·&nbsp;
-  <a href="https://discord.gg/wVbVUdENas">Discord &amp; community presets</a>
+  <a href="https://discord.gg/wVbVUdENas">Discord</a>
 </p>
 
-![Roblox with RobloxShadeHost](assets/ReadmeShowcase1.jpg)
+Unishade is an open-source project for universal post-processing without injection. It runs outside the game process and is built for games where traditional ReShade injection isn't available or desirable.
 
-RobloxShadeHost runs next to Roblox, copies its picture and draws ReShade's effects on top. It never touches Roblox's files, and nothing is loaded into the Roblox process.
+## Getting started
 
-#### *If you like this project, please consider starring to support development and help others find it.*
+1. [Download Setup](https://unishade.me/download/) and run it. You get ReShade, every official effect and a set of presets.
+2. Open your game, click **Add game** in Unishade and pick its window.
+3. Press **Home** in the game and pick a preset.
 
-<a href="https://www.star-history.com/?repos=omouta%2Frobloxshadehost&type=date&releases=&legend=bottom-right">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=omouta/robloxshadehost&type=date&theme=dark&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=omouta/robloxshadehost&type=date&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=omouta/robloxshadehost&type=date&legend=bottom-right" />
- </picture>
-</a>
+Games need to run windowed or borderless. Unishade also runs on [macOS and Linux](https://unishade.me/docs/macos-linux/), where ReShade itself doesn't.
 
-## Press Home, pick a look
+If regular ReShade already works in your game, use that.
 
-The menu opens right over the game. Switch presets, turn effects on, and drag their sliders while you watch the result. Hold **Compare** to see plain Roblox for a second.
+> [!NOTE]
+> Setup isn't code-signed yet, so the first time Windows may say **Windows protected your PC**. Click **More info**, then **Run anyway**.
 
-![The RobloxShadeHost menu over Roblox](assets/docs/menu-effects.jpg)
+## Help and presets
 
-- **Every ReShade effect.** Setup installs every package on ReShade's official list, plus presets made for Roblox.
-- **Depth effects.** Roblox keeps its depth buffer to itself, so the optional depth add-on estimates depth from the picture with an AI model. Ambient occlusion, depth of field and fog work from that.
-- **DLSS5.** An optional add-on for NVIDIA RTX cards, through RenoDX.
-- **One installer.** Setup downloads ReShade, the effects and the presets, and updates them later without touching your presets.
+Ask on [Discord](https://discord.gg/wVbVUdENas). People share their presets there too. The [docs](https://unishade.me/docs/) cover the menu, add-ons and troubleshooting.
 
-Effects cost frame rate. The host copies Roblox's picture every frame and runs the effects on your GPU next to the game.
+To build Unishade or send a preset, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Get started
-
-Download **RobloxShadeHost-Setup** from the [latest release](https://github.com/OMouta/RobloxShadeHost/releases/latest) and follow the [installation guide](https://pages.mouta.me/RobloxShadeHost/install/). You need 64-bit Windows 10 version 1903 or newer, or Windows 11.
-
-## Help and updates
-
-Ask on [Discord](https://discord.gg/wVbVUdENas). That is also where people share presets.
-
-We only support the newest version, so update before asking. The host tells you when a new one is out. Run the new Setup and it keeps your presets and settings.
-
-## Build from source
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for building, presets and code changes.
+Unishade is free. If you want to support it, I'm on [Ko-fi](https://ko-fi.com/omouta).
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE)

@@ -1,11 +1,12 @@
-// RobloxShadeHost Setup: installs the host with ReShade, its effects, presets and an optional add-on, and
+// Unishade Setup: installs the host with ReShade, its effects, presets and an optional add-on, and
 // later changes shortcuts or uninstalls. Drawn with Dear ImGui, the UI library ReShade's own menu uses.
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "install.h"
 #include "resource.h"
-#include "text.h"
 #include "../src/hotkey.h"
+#include "../src/text.h"
+#include "../src/theme.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -40,25 +41,30 @@ constexpr float kStrip = 3;
 constexpr float kSidebar = 236;
 constexpr float kFooter = 74;
 
-constexpr ImU32 kBackground = IM_COL32(17, 18, 23, 255);
-constexpr ImU32 kSidebarColor = IM_COL32(12, 13, 17, 255);
-constexpr ImU32 kCard = IM_COL32(25, 26, 33, 255);
-constexpr ImU32 kCardHover = IM_COL32(31, 32, 41, 255);
-constexpr ImU32 kBorder = IM_COL32(40, 42, 53, 255);
-constexpr ImU32 kBorderStrong = IM_COL32(74, 77, 94, 255);
-constexpr ImU32 kText = IM_COL32(236, 236, 241, 255);
-constexpr ImU32 kDim = IM_COL32(150, 152, 167, 255);
-constexpr ImU32 kAccent = IM_COL32(112, 122, 255, 255);
-constexpr ImU32 kAccentHover = IM_COL32(132, 141, 255, 255);
-constexpr ImU32 kAccentActive = IM_COL32(95, 104, 235, 255);
-constexpr ImU32 kWarning = IM_COL32(245, 192, 92, 255);
-constexpr ImU32 kError = IM_COL32(255, 118, 118, 255);
-constexpr ImU32 kSuccess = IM_COL32(104, 214, 148, 255);
-// The ring in the logo.
-constexpr ImU32 kRainbow[] = {
-    IM_COL32(255, 72, 96, 255),  IM_COL32(255, 158, 54, 255), IM_COL32(248, 228, 76, 255), IM_COL32(84, 222, 122, 255),
-    IM_COL32(62, 198, 255, 255), IM_COL32(84, 110, 255, 255), IM_COL32(186, 92, 255, 255),
-};
+constexpr ImU32 Color(unsigned rgb, int alpha = 255)
+{
+    return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, alpha);
+}
+
+constexpr ImU32 kBackground = Color(theme::kBackground);
+constexpr ImU32 kSidebarColor = Color(theme::kSidebar);
+constexpr ImU32 kCard = Color(theme::kCard);
+constexpr ImU32 kCardHover = Color(theme::kCardHover);
+constexpr ImU32 kBorder = Color(theme::kBorder);
+constexpr ImU32 kBorderStrong = Color(theme::kBorderStrong);
+constexpr ImU32 kText = Color(theme::kText);
+constexpr ImU32 kDim = Color(theme::kDim);
+constexpr ImU32 kAccent = Color(theme::kAccent);
+constexpr ImU32 kAccentHover = Color(theme::kAccentHover);
+constexpr ImU32 kAccentActive = Color(theme::kAccentActive);
+constexpr ImU32 kWarning = Color(theme::kWarning);
+constexpr ImU32 kError = Color(theme::kError);
+constexpr ImU32 kSuccess = Color(theme::kSuccess);
+
+// Exit codes of a silent run. 1 is also used when the command line is invalid.
+constexpr int kExitFailed = 1;
+// Installed, but an effect package, a preset or the requested add-on was left out. The setup log says which.
+constexpr int kExitIncomplete = 2;
 
 constexpr wchar_t kDefaultToggleKey[] = L"Home";
 constexpr wchar_t kDefaultOverlayToggleKey[] = L"Ctrl+F8";
@@ -170,9 +176,11 @@ struct App
     Hotkey overlayToggleKey;
     bool hostRunning = false;
     bool launch = true;
+    bool highPerformanceGpu = true;
 
     Task uninstallTask;
     bool deleteUserFiles = false;
+    bool folderLeft = false;
 };
 App app;
 
@@ -206,7 +214,7 @@ fs::path DefaultDirectory()
 {
     PWSTR path = nullptr;
     SHGetKnownFolderPath(FOLDERID_UserProgramFiles, 0, nullptr, &path);
-    fs::path directory = fs::path(path ? path : L"") / L"RobloxShadeHost";
+    fs::path directory = fs::path(path ? path : L"") / L"Unishade";
     CoTaskMemFree(path);
     return directory;
 }
@@ -233,6 +241,14 @@ void StartReleaseFetch()
     app.releaseTask.Start([] { app.fetchedRelease = FetchReShadeRelease(app.releaseCancel); });
 }
 
+// Setup started on the uninstall page has not loaded the license yet.
+void ShowLicensePage()
+{
+    if (!app.release && !app.releaseTask.Running())
+        StartReleaseFetch();
+    app.page = Page::License;
+}
+
 void StartInstall()
 {
     InstallOptions options;
@@ -254,7 +270,7 @@ void StartUninstall()
 std::string CheckDirectory(const fs::path& directory)
 {
     if (!directory.is_absolute() || !directory.has_filename())
-        return "Enter a full folder path, such as C:\\Games\\RobloxShadeHost.";
+        return "Enter a full folder path, such as C:\\Games\\Unishade.";
     std::error_code ignored;
     const std::wstring lower = [&] {
         std::wstring text = directory.wstring();
@@ -268,7 +284,7 @@ std::string CheckDirectory(const fs::path& directory)
     fs::path existing = directory;
     while (!fs::is_directory(existing, ignored) && existing.has_relative_path())
         existing = existing.parent_path();
-    const fs::path probe = existing / (L"RobloxShadeHost-" + std::to_wstring(GetCurrentProcessId()) + L".tmp");
+    const fs::path probe = existing / (L"Unishade-" + std::to_wstring(GetCurrentProcessId()) + L".tmp");
     HANDLE file = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
     if (file == INVALID_HANDLE_VALUE)
         return "Setup cannot write to this folder. Pick another one, such as the suggested folder.";
@@ -299,8 +315,8 @@ std::optional<fs::path> BrowseFolder(const fs::path& current)
     fs::path folder = path;
     CoTaskMemFree(path);
     // Keeps the files together instead of spreading them over the chosen folder.
-    if (_wcsicmp(folder.filename().c_str(), L"RobloxShadeHost") != 0)
-        folder /= L"RobloxShadeHost";
+    if (_wcsicmp(folder.filename().c_str(), L"Unishade") != 0 && _wcsicmp(folder.filename().c_str(), L"RobloxShadeHost") != 0)
+        folder /= L"Unishade";
     return folder;
 }
 
@@ -335,12 +351,14 @@ void Title(const std::string& text)
 
 void Rainbow(ImDrawList* draw, ImVec2 min, ImVec2 max)
 {
-    constexpr int count = IM_ARRAYSIZE(kRainbow);
+    constexpr int count = IM_ARRAYSIZE(theme::kRainbow);
     for (int i = 0; i + 1 < count; ++i)
     {
         const float left = min.x + (max.x - min.x) * i / (count - 1);
         const float right = min.x + (max.x - min.x) * (i + 1) / (count - 1);
-        draw->AddRectFilledMultiColor(ImVec2(left, min.y), ImVec2(right, max.y), kRainbow[i], kRainbow[i + 1], kRainbow[i + 1], kRainbow[i]);
+        const ImU32 from = Color(theme::kRainbow[i]);
+        const ImU32 to = Color(theme::kRainbow[i + 1]);
+        draw->AddRectFilledMultiColor(ImVec2(left, min.y), ImVec2(right, max.y), from, to, to, from);
     }
 }
 
@@ -552,9 +570,9 @@ void Sidebar(std::initializer_list<const char*> steps, int current)
     if (ui.logo)
         draw->AddImage(ImTextureID(reinterpret_cast<uintptr_t>(ui.logo.Get())), ImVec2(x - S(8), y), ImVec2(x - S(8) + S(80), y + S(80)));
     y += S(92);
-    draw->AddText(ui.semibold, S(18), ImVec2(x, y), kText, "RobloxShadeHost");
+    draw->AddText(ui.semibold, S(18), ImVec2(x, y), kText, "Unishade");
     y += S(25);
-    draw->AddText(ui.regular, S(13.5f), ImVec2(x, y), kDim, "Setup " ROBLOX_SHADE_HOST_VERSION);
+    draw->AddText(ui.regular, S(13.5f), ImVec2(x, y), kDim, "Setup " UNISHADE_VERSION);
     y += S(48);
 
     int index = 0;
@@ -565,13 +583,13 @@ void Sidebar(std::initializer_list<const char*> steps, int current)
             draw->AddLine(dot + ImVec2(0, S(9)), dot + ImVec2(0, S(27)), kBorder, S(1.5f));
         if (index < current)
         {
-            draw->AddCircleFilled(dot, S(7), IM_COL32(104, 214, 148, 40));
+            draw->AddCircleFilled(dot, S(7), Color(theme::kSuccess, 40));
             const ImVec2 check[] = { dot + ImVec2(-S(3.2f), 0), dot + ImVec2(-S(0.8f), S(2.5f)), dot + ImVec2(S(3.5f), -S(2.5f)) };
             draw->AddPolyline(check, 3, kSuccess, S(1.8f));
         }
         else if (index == current)
         {
-            draw->AddCircleFilled(dot, S(9), IM_COL32(112, 122, 255, 60));
+            draw->AddCircleFilled(dot, S(9), Color(theme::kAccent, 60));
             draw->AddCircleFilled(dot, S(5), kAccent);
         }
         else
@@ -614,8 +632,8 @@ void CreditsPopup()
 
 void WelcomePage()
 {
-    Title("Install RobloxShadeHost");
-    Text("ReShade effects for Roblox. RobloxShadeHost runs alongside the game and never modifies Roblox or its files.");
+    Title("Install Unishade");
+    Text("Universal post-processing without injection.");
     Text("Your frame rate will be lower while it runs.", kDim, 15);
     Spacing(18);
     Text("Install folder", kText, 15, ui.semibold);
@@ -637,11 +655,11 @@ void WelcomePage()
 
 void ManagePage()
 {
-    Title("RobloxShadeHost is installed");
-    std::string version = app.installation && !app.installation->version.empty() ? "Version " + app.installation->version : "RobloxShadeHost";
+    Title("Unishade is installed");
+    std::string version = app.installation && !app.installation->version.empty() ? "Version " + app.installation->version : "Unishade";
     Text(version + " is installed in " + app.directory + ".", kDim, 15);
-    if (app.installation && app.installation->version != ROBLOX_SHADE_HOST_VERSION)
-        Text("This setup installs version " ROBLOX_SHADE_HOST_VERSION ".", kDim, 15);
+    if (app.installation && app.installation->version != UNISHADE_VERSION)
+        Text("This setup installs version " UNISHADE_VERSION ".", kDim, 15);
     Spacing(14);
     if (Card("update", "Update or change add-ons", nullptr, 0,
              "Get the newest ReShade and effects, or add or remove depth estimation and DLSS5. Your settings and presets stay.", CardKind::Action))
@@ -649,7 +667,7 @@ void ManagePage()
         app.addon = InstalledAddon(Directory());
         app.page = Page::Addons;
     }
-    if (Card("uninstall", "Uninstall", nullptr, 0, "Remove RobloxShadeHost, ReShade and the effects from this PC.", CardKind::Action))
+    if (Card("uninstall", "Uninstall", nullptr, 0, "Remove Unishade, ReShade and the effects from this PC.", CardKind::Action))
         app.page = Page::Uninstall;
 }
 
@@ -658,7 +676,7 @@ void AddonsPage()
     Title("Choose what to install");
     Spacing(6);
     Card("reshade", "ReShade and effects", "Included", kDim, "ReShade from reshade.me and every effect package on ReShade's official list.", CardKind::Static);
-    if (Card("presets", "Presets", nullptr, 0, "Ready-made looks for Roblox. Pick one in the RobloxShadeHost menu.", CardKind::Toggle, app.presets))
+    if (Card("presets", "Presets", nullptr, 0, "Ready-made looks to start from. Pick one in the Unishade menu.", CardKind::Toggle, app.presets))
         app.presets = !app.presets;
     Spacing(8);
     Text("Optional add-ons", kText, 15, ui.semibold);
@@ -732,7 +750,7 @@ void FailedPage()
     if (!cancelled)
         Text(app.installTask.error, kError, 15);
     Spacing(6);
-    Text("Go back to try again, or leave out the part that failed.", kDim, 15);
+    Text("Go back to try again.", kDim, 15);
     Spacing(6);
     if (Link("Open the setup log", kAccentHover, 15))
         OpenFile(SetupLogPath());
@@ -740,10 +758,10 @@ void FailedPage()
 
 void FinishedPage()
 {
-    Title("RobloxShadeHost is ready");
-    Text("Open a Roblox experience and start RobloxShadeHost from the Start menu, in either order.", kDim, 15);
+    Title("Unishade is ready");
+    Text("Start Unishade and open your game. Roblox is detected automatically. Add other games in the Unishade window.", kDim, 15);
     Spacing(14);
-    KeyLine(app.toggleKey, "opens the RobloxShadeHost menu in Roblox. Press it again to go back to playing.");
+    KeyLine(app.toggleKey, "opens the Unishade menu over the game. Press it again to go back to playing.");
     if (app.overlayToggleKey.key)
         KeyLine(app.overlayToggleKey, "turns the overlay off and on.");
     Spacing(4);
@@ -753,19 +771,21 @@ void FinishedPage()
         Spacing(4);
         Text(note, kWarning, 14.5f);
     }
+    Spacing(14);
+    CheckLine("Run Unishade on the high-performance GPU", app.highPerformanceGpu);
     if (!app.hostRunning)
-    {
-        Spacing(14);
-        CheckLine("Start RobloxShadeHost now", app.launch);
-    }
+        CheckLine("Start Unishade now", app.launch);
 }
 
 void UninstallPage()
 {
-    Title("Uninstall RobloxShadeHost");
-    Text("Removes RobloxShadeHost, ReShade and the effects from " + std::string(app.directory) + ", and its Start menu shortcuts.", kDim, 15);
+    Title("Uninstall Unishade");
+    Text("Removes Unishade, ReShade and the effects from " + std::string(app.directory) + ", and its Start menu shortcuts.", kDim, 15);
     Spacing(10);
-    CheckLine("Also delete my presets, ReShade settings and shortcuts", app.deleteUserFiles);
+    CheckLine("Also delete my presets, settings and game list", app.deleteUserFiles);
+    Text("That deletes ReShade.ini, ReShadePreset.ini, RobloxShadeHost.ini and games.ini, and the presets and reshade-shaders folders with "
+         "everything in them. Other files in the folder, such as screenshots, stay.",
+         kDim, 14);
     if (app.uninstallTask.Running())
     {
         Spacing(10);
@@ -777,9 +797,11 @@ void UninstalledPage()
 {
     if (app.uninstallTask.error.empty())
     {
-        Title("RobloxShadeHost was uninstalled");
+        Title("Unishade was uninstalled");
         if (!app.deleteUserFiles)
-            Text("Your presets, ReShade settings and shortcuts are still in " + std::string(app.directory) + ".", kDim, 15);
+            Text("Your presets and settings are still in " + std::string(app.directory) + ".", kDim, 15);
+        else if (app.folderLeft)
+            Text("Files Setup did not create, such as screenshots, are still in " + std::string(app.directory) + ".", kDim, 15);
     }
     else
     {
@@ -807,13 +829,20 @@ void CollectTasks()
             app.installation = FindInstallation();
             LoadShortcuts();
             app.hostRunning = HostRunning(Directory());
+            // A different preference picked in Windows' settings stays unless the box is ticked.
+            const int preference = GpuPreference(Directory());
+            app.highPerformanceGpu = preference < 0 || preference == 2;
             app.page = Page::Finished;
         }
         if (app.closeRequested)
             DestroyWindow(ui.window);
     }
     if (app.uninstallTask.Collect())
+    {
+        std::error_code ignored;
+        app.folderLeft = fs::exists(Directory(), ignored);
         app.page = Page::Uninstalled;
+    }
 }
 
 void DrawUi()
@@ -885,7 +914,7 @@ void DrawUi()
         break;
     case Page::Addons:
         if (FooterButton(0, "Next", true))
-            app.page = Page::License;
+            ShowLicensePage();
         if (FooterButton(1, "Back", false))
             app.page = app.installation ? Page::Manage : Page::Welcome;
         break;
@@ -908,6 +937,9 @@ void DrawUi()
     case Page::Finished:
         if (FooterButton(0, "Finish", true))
         {
+            // Before starting Unishade, which picks its GPU when it starts.
+            if (app.highPerformanceGpu)
+                SetHighPerformanceGpu(Directory());
             if (app.launch && !app.hostRunning)
                 LaunchHost(Directory());
             DestroyWindow(ui.window);
@@ -1120,6 +1152,15 @@ void AddFonts()
 
 int RunWindow(const Arguments& arguments)
 {
+    // However the window ends, the license download stops first, so no hidden Setup keeps running.
+    struct StopReleaseFetch
+    {
+        ~StopReleaseFetch()
+        {
+            app.releaseCancel = true;
+            app.releaseTask.Wait();
+        }
+    } stopReleaseFetch;
     app.installation = FindInstallation();
     const fs::path directory = !arguments.directory.empty() ? fs::absolute(arguments.directory)
                                : app.installation        ? app.installation->directory
@@ -1140,13 +1181,13 @@ int RunWindow(const Arguments& arguments)
     windowClass.hIcon = LoadIconW(windowClass.hInstance, MAKEINTRESOURCEW(1));
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = CreateSolidBrush(RGB(17, 18, 23));
-    windowClass.lpszClassName = L"RobloxShadeHostSetup";
+    windowClass.lpszClassName = L"UnishadeSetup";
     RegisterClassExW(&windowClass);
     constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    ui.window = CreateWindowExW(0, windowClass.lpszClassName, L"RobloxShadeHost Setup", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr,
+    ui.window = CreateWindowExW(0, windowClass.lpszClassName, L"Unishade Setup", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr,
                                 nullptr, windowClass.hInstance, nullptr);
     if (!ui.window)
-        return 1;
+        return kExitFailed;
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(ui.window, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     const COLORREF caption = RGB(12, 13, 17);
@@ -1165,8 +1206,8 @@ int RunWindow(const Arguments& arguments)
 
     if (!CreateDeviceAndSwapchain())
     {
-        MessageBoxW(ui.window, L"Setup could not start its window because DirectX 11 is unavailable.", L"RobloxShadeHost Setup", MB_ICONERROR);
-        return 1;
+        MessageBoxW(ui.window, L"Setup could not start its window because DirectX 11 is unavailable.", L"Unishade Setup", MB_ICONERROR);
+        return kExitFailed;
     }
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
@@ -1222,8 +1263,6 @@ int RunWindow(const Arguments& arguments)
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 500, QS_ALLINPUT);
     }
 
-    app.releaseCancel = true;
-    app.releaseTask.Wait();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -1278,8 +1317,7 @@ int RunSilent(const Arguments& arguments)
 
         Progress progress;
         const ReShadeRelease release = options.reshade ? FetchReShadeRelease(progress.cancel) : ReShadeRelease{};
-        Install(options, release, progress);
-        return 0;
+        return Install(options, release, progress) ? 0 : kExitIncomplete;
     }
     catch (const Cancelled&)
     {
@@ -1289,7 +1327,7 @@ int RunSilent(const Arguments& arguments)
     {
         SetupLog(std::string("Error: ") + e.what());
     }
-    return 1;
+    return kExitFailed;
 }
 
 Arguments ParseArguments()
@@ -1341,21 +1379,22 @@ Arguments ParseArguments()
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     // Setup's copy lives next to ReShade, which installs itself as dxgi.dll or d3d11.dll, and Windows looks
-    // in the exe's folder first. d3d11.dll is delay-loaded, so loading both from System32 before anything
-    // else keeps ReShade out of Setup; later loads by name get these copies.
+    // in the exe's folder first. From here on, DLLs loaded by name, including the delay-loaded imports, come
+    // from System32 only. dxgi.dll and d3d11.dll are loaded right away, so later loads by name get these copies.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const Arguments arguments = ParseArguments();
-    OpenSetupLog(!arguments.log.empty() ? fs::absolute(arguments.log) : fs::temp_directory_path() / L"RobloxShadeHost-Setup.log");
-    SetupLog("RobloxShadeHost Setup " ROBLOX_SHADE_HOST_VERSION);
+    OpenSetupLog(!arguments.log.empty() ? fs::absolute(arguments.log) : fs::temp_directory_path() / L"Unishade-Setup.log");
+    SetupLog("Unishade Setup " UNISHADE_VERSION);
     if (!arguments.error.empty())
     {
         SetupLog(arguments.error);
         if (!arguments.silent)
-            MessageBoxW(nullptr, Wide(arguments.error).c_str(), L"RobloxShadeHost Setup", MB_ICONERROR);
-        return 1;
+            MessageBoxW(nullptr, Wide(arguments.error).c_str(), L"Unishade Setup", MB_ICONERROR);
+        return kExitFailed;
     }
     const int result = arguments.silent ? RunSilent(arguments) : RunWindow(arguments);
     DeleteMovedSetup();

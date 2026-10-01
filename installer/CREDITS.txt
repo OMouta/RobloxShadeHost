@@ -1,8 +1,8 @@
-RobloxShadeHost
-Copyright 2026 RobloxShadeHost contributors. MIT license.
-https://github.com/OMouta/RobloxShadeHost
+Unishade
+Copyright 2026 Unishade contributors. MIT license.
+https://github.com/OMouta/Unishade
 
-RobloxShadeHost Setup includes:
+Unishade Setup includes:
 Dear ImGui, copyright 2014-2026 Omar Cornut. MIT license.
 https://github.com/ocornut/imgui
 miniz, copyright 2013-2014 RAD Game Tools and Valve Software, 2010-2014 Rich Geldreich and Tenacious Software LLC. MIT license.
@@ -33,7 +33,7 @@ DirectML.dll: DirectML, Microsoft Corporation. Microsoft Software License Terms.
 https://github.com/microsoft/DirectML
 
 The DLSS5 and depth estimation files are downloaded separately and are not bundled in this installer.
-Third-party files are not covered by RobloxShadeHost's MIT license.
+Third-party files are not covered by Unishade's MIT license.
 Their inclusion does not imply endorsement by their authors.
 
 Removal requests: tiago@mouta.me

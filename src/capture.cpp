@@ -6,27 +6,88 @@
 #include "state.h"
 
 #include <winrt/Windows.Foundation.Metadata.h>
+#include <winrt/Windows.Security.Authorization.AppCapabilityAccess.h>
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 
+#include <atomic>
 #include <chrono>
+#include <utility>
 
 using winrt::Windows::Foundation::Metadata::ApiInformation;
 
+namespace
+{
+constexpr wchar_t kSessionClass[] = L"Windows.Graphics.Capture.GraphicsCaptureSession";
+// Set when Windows does not allow capture without its border, so capture keeps it instead of failing to start.
+std::atomic<bool> borderRequired = false;
+} // namespace
+
 void CreateDevice()
 {
+    // Made in locals, so a failure leaves no half-made device behind.
+    winrt::com_ptr<ID3D11Device> device;
+    winrt::com_ptr<ID3D11DeviceContext> context;
     winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                                           D3D11_SDK_VERSION, g.device.put(), nullptr, g.context.put()));
+                                           D3D11_SDK_VERSION, device.put(), nullptr, context.put()));
 
     // The capture pool uses the device from its own worker threads.
-    g.device.as<ID3D11Multithread>()->SetMultithreadProtected(TRUE);
+    device.as<ID3D11Multithread>()->SetMultithreadProtected(TRUE);
 
-    auto dxgiDevice = g.device.as<IDXGIDevice1>();
+    auto dxgiDevice = device.as<IDXGIDevice1>();
     dxgiDevice->SetMaximumFrameLatency(1);
 
     winrt::com_ptr<::IInspectable> inspectable;
     winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.get(), inspectable.put()));
     g.captureDevice = inspectable.as<IDirect3DDevice>();
+    g.device = std::move(device);
+    g.context = std::move(context);
+}
+
+bool DeviceLost(HRESULT error)
+{
+    return error == DXGI_ERROR_DEVICE_REMOVED || error == DXGI_ERROR_DEVICE_RESET || error == DXGI_ERROR_DEVICE_HUNG ||
+           (g.device && FAILED(g.device->GetDeviceRemovedReason()));
+}
+
+void ReleaseDevice()
+{
+    StopCapture();
+    g.swapchain = nullptr;
+    ReleaseDepthDevice();
+    g.captureDevice = nullptr;
+    if (g.context)
+    {
+        g.context->ClearState();
+        g.context->Flush();
+    }
+    g.context = nullptr;
+    g.device = nullptr;
+}
+
+void RequestBorderlessCapture()
+{
+    // Kept local, so they cannot clash with the global AsyncStatus of the Windows SDK's C headers.
+    using winrt::Windows::Foundation::AsyncStatus;
+    using winrt::Windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
+    if (!ApiInformation::IsPropertyPresent(kSessionClass, L"IsBorderRequired"))
+        return;
+    try
+    {
+        // Windows answers in the background. Programs that are not packaged are allowed without a prompt.
+        GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
+            .Completed([](const auto& request, AsyncStatus status) {
+                if (status == AsyncStatus::Completed && request.GetResults() == AppCapabilityAccessStatus::Allowed)
+                    return;
+                borderRequired = true;
+                Log(LogLevel::Info, L"Windows did not allow capture without a border, so it may draw one around the game.");
+            });
+    }
+    catch (const winrt::hresult_error& e)
+    {
+        borderRequired = true;
+        Log(LogLevel::Info, L"Could not ask to capture without a border: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
+    }
 }
 
 void StartCapture(HWND target)
@@ -37,23 +98,26 @@ void StartCapture(HWND target)
 
     g.poolSize = item.Size();
     g.pool = Direct3D11CaptureFramePool::CreateFreeThreaded(g.captureDevice, kPixelFormat, 2, g.poolSize);
-    g.frameArrived = g.pool.FrameArrived(winrt::auto_revoke, [](auto&&, auto&&) { SetEvent(g.frameEvent); });
+    g.capturedFrames.store(0, std::memory_order_relaxed);
+    g.frameStatistics.Reset(FrameStatistics::Clock::now(), 0);
+    g.frameArrived = g.pool.FrameArrived(winrt::auto_revoke, [](auto&&, auto&&) {
+        g.capturedFrames.fetch_add(1, std::memory_order_relaxed);
+        SetEvent(g.frameEvent);
+    });
     g.session = g.pool.CreateCaptureSession(item);
 
     // The real cursor is already drawn on top of the overlay.
     g.session.IsCursorCaptureEnabled(false);
-    if (ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsBorderRequired"))
-    {
-        GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless);
+    // RequestBorderlessCapture asked for this at startup.
+    if (!borderRequired && ApiInformation::IsPropertyPresent(kSessionClass, L"IsBorderRequired"))
         g.session.IsBorderRequired(false);
-    }
     // Without this, capture can be capped at 60 FPS.
-    if (ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession", L"MinUpdateInterval"))
+    if (ApiInformation::IsPropertyPresent(kSessionClass, L"MinUpdateInterval"))
         g.session.MinUpdateInterval(std::chrono::milliseconds(1));
 
     g.session.StartCapture();
     g.target = target;
-    Log(LogLevel::Info, L"Capturing Roblox (%dx%d)", g.poolSize.Width, g.poolSize.Height);
+    Log(LogLevel::Info, L"Capturing %ls (%dx%d)", g.activeGame->name.c_str(), g.poolSize.Width, g.poolSize.Height);
     ShowStartHint();
 }
 
@@ -62,15 +126,21 @@ void StopCapture()
     SetEditMode(false);
     g.frameArrived.revoke();
     g.latestFrame = nullptr;
-    g.session.Close();
+    if (g.session)
+        g.session.Close();
     g.session = nullptr;
-    g.pool.Close();
+    if (g.pool)
+        g.pool.Close();
     g.pool = nullptr;
     g.target = nullptr;
+    g.activeGame.reset();
+    g.frameStatistics.Reset(FrameStatistics::Clock::now(), g.capturedFrames.load(std::memory_order_relaxed));
 }
 
 void PresentLatestFrame()
 {
+    const auto started = FrameStatistics::Clock::now();
+    const int64_t frameTimestamp = g.latestFrame.SystemRelativeTime().count();
     winrt::com_ptr<ID3D11Texture2D> surface;
     auto access = g.latestFrame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     winrt::check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), surface.put_void()));
@@ -110,4 +180,7 @@ void PresentLatestFrame()
     g.context->CopyResource(backBuffer.get(), surface.get());
     UpdateDepth(surface.get());
     winrt::check_hresult(g.swapchain->Present(0, 0));
+    const auto finished = FrameStatistics::Clock::now();
+    g.frameStatistics.RecordPresent(frameTimestamp, std::chrono::duration<double, std::milli>(finished - started).count());
+    g.frameStatistics.Update(finished, g.capturedFrames.load(std::memory_order_relaxed));
 }

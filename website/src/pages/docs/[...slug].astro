@@ -1,0 +1,124 @@
+---
+import { getCollection, render, type CollectionEntry } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+
+export async function getStaticPaths() {
+  const pages = (await getCollection('docs')).sort((a, b) => a.data.order - b.data.order);
+  return pages.map((entry) => ({ params: { slug: entry.id === 'install' ? undefined : entry.id }, props: { entry, pages } }));
+}
+
+interface Props {
+  entry: CollectionEntry<'docs'>;
+  pages: CollectionEntry<'docs'>[];
+}
+
+const { entry, pages } = Astro.props;
+const { Content } = await render(entry);
+const href = (id: string) => (id === 'install' ? '/docs/' : `/docs/${id}/`);
+const next = pages[pages.indexOf(entry) + 1];
+---
+
+<Base title={`${entry.data.title} | Unishade`} description={entry.data.description}>
+  <div class="docs">
+    <nav class="sidebar" aria-label="Docs">
+      <ul>
+        {
+          pages.map((page) => (
+            <li>
+              <a href={href(page.id)} aria-current={page === entry ? 'page' : undefined}>
+                {page.data.title}
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </nav>
+    <main class="guide prose">
+      <h1>{entry.data.title}</h1>
+      <Content />
+      {
+        next && (
+          <a class="next" href={href(next.id)}>
+            <span class="dim">Next</span>
+            {next.data.title}
+          </a>
+        )
+      }
+    </main>
+  </div>
+</Base>
+
+<style>
+  .docs {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 720px);
+    gap: clamp(32px, 6vw, 88px);
+    width: var(--page);
+    margin: clamp(40px, 7vw, 80px) auto 0;
+  }
+
+  .sidebar ul {
+    position: sticky;
+    top: calc(var(--nav-height) + 24px);
+    display: grid;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .sidebar a {
+    display: block;
+    padding: 8px 12px;
+    border-radius: 8px;
+    color: var(--haze);
+    text-decoration: none;
+  }
+
+  .sidebar a:hover {
+    color: var(--ink);
+  }
+
+  .sidebar a[aria-current='page'] {
+    color: var(--ink);
+    background: var(--night-raised);
+  }
+
+  .guide h1 {
+    margin-bottom: 28px;
+  }
+
+  .next {
+    display: grid;
+    gap: 2px;
+    width: fit-content;
+    margin-top: 64px;
+    padding: 16px 22px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-weight: 650;
+    text-decoration: none;
+  }
+
+  .next:hover {
+    border-color: var(--haze);
+  }
+
+  .next .dim {
+    font-size: 0.85rem;
+    font-weight: 400;
+  }
+
+  @media (max-width: 860px) {
+    .docs {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .sidebar ul {
+      position: static;
+      display: flex;
+      flex-wrap: wrap;
+    }
+  }
+</style>

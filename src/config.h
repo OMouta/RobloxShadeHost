@@ -2,6 +2,8 @@
 
 #include "hotkey.h"
 
+#include <cstddef>
+#include <optional>
 #include <string>
 
 struct InputHotkeys
@@ -33,7 +35,7 @@ struct Shortcut
     int id;
     const wchar_t* name; // the entry in RobloxShadeHost.ini
     const wchar_t* fallback;
-    // Held for as long as the host runs. The others only while Roblox or the menu is in front, so other
+    // Held for as long as the host runs. The others only while the game or the menu is in front, so other
     // programs keep the keys.
     bool always;
 };
@@ -49,6 +51,17 @@ inline constexpr Shortcut kShortcuts[] = {
     { &InputHotkeys::previousPreset, kPreviousPresetHotkey, L"PreviousPresetKey", L"Ctrl+PageUp", false },
 };
 
+// Two shortcuts on the same keys, by their index in kShortcuts.
+struct ShortcutClash
+{
+    size_t earlier;
+    size_t later;
+};
+
+// The first two shortcuts on the same keys, in kShortcuts' order, or nothing when each has keys of its own.
+// Shortcuts without a key never clash.
+std::optional<ShortcutClash> FindShortcutClash(const InputHotkeys& hotkeys);
+
 // Reads shortcuts from RobloxShadeHost.ini beside the exe into g.hotkeys, creating the file on first run.
 // Invalid values are reported and replaced by the defaults.
 void LoadInputHotkeys();
@@ -57,7 +70,7 @@ void LoadInputHotkeys();
 void RegisterHotkeys();
 
 // Holding a bare key such as Home all the time would break it in every other program, so most shortcuts are
-// only registered while Roblox or the menu is in front. Called every loop.
+// only registered while the game or the menu is in front. Called every loop.
 void UpdateInputHotkey();
 
 // Unregisters every shortcut until called with false, so the menu can read them as ordinary keys.
@@ -71,5 +84,28 @@ std::wstring ChangeHotkeys(const InputHotkeys& hotkeys);
 bool AutoSavePresets();
 void SetAutoSavePresets(bool enabled);
 
-// Folder of RobloxShadeHost.exe, with a trailing backslash.
+bool DebugInfoEnabled();
+void SetDebugInfoEnabled(bool enabled);
+
+// The user's size for the menu, on top of the size that follows the game's window, from RobloxShadeHost.ini. 1 unless
+// changed, and kept between 0.75 and 2.
+float MenuScale();
+void SetMenuScale(float scale);
+
+// Whether the host asks GitHub for a newer version when it starts, from RobloxShadeHost.ini. On unless turned off.
+bool UpdateChecksEnabled();
+void SetUpdateChecksEnabled(bool enabled);
+
+// Whether effects stay over the game while another window is in front, from RobloxShadeHost.ini. Off unless turned on.
+bool KeepEffectsVisible();
+void SetKeepEffectsVisible(bool enabled);
+
+// The preset last used in a saved game, relative to the presets folder, from RobloxShadeHost.ini. Empty when the
+// game has none yet.
+std::wstring GamePreset(const std::wstring& game);
+void SetGamePreset(const std::wstring& game, const std::wstring& preset);
+// Forgets the game's preset, such as when the game is removed or renamed.
+void RemoveGamePreset(const std::wstring& game);
+
+// Folder of Unishade.exe, with a trailing backslash.
 std::wstring ExeDirectory();

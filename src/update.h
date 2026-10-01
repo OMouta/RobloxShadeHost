@@ -8,8 +8,11 @@ struct Update
     std::wstring url;     // the release page
 };
 
-// Asks GitHub for the newest release on a background thread.
+// Asks GitHub for the newest release on a background thread, unless update checks are off.
 void CheckForUpdate();
 
 // The newer release, once found. Empty version while checking, when up to date, or when the check failed.
 Update AvailableUpdate();
+
+// Changes whenever AvailableUpdate does, so it can be compared every loop without copying the update.
+unsigned AvailableUpdateVersion();
