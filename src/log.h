@@ -22,7 +22,8 @@ struct Notice
 void InitLog();
 
 // Writes a timestamped line to the log file. Warnings and errors are also shown in the launcher and the
-// menu. printf-style; use %ls for wide strings and %hs for narrow ones. Safe from any thread.
+// menu. printf-style; use %ls for wide strings and %hs for narrow ones. Safe from any thread. A line that
+// repeats right away is written once, followed by how often it repeated, and the file stops growing at 16 MB.
 void Log(LogLevel level, const wchar_t* format, ...);
 
 // Like Log, but shown in the launcher and the menu at any level. For what the user should see at a glance,
@@ -39,3 +40,6 @@ void ClearNotices();
 unsigned NoticeVersion();
 
 const std::wstring& LogPath();
+
+// Writes what the log still holds back, such as how often the last line repeated. Called before the host exits.
+void FlushLog();

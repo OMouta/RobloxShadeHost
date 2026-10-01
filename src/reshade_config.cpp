@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -105,7 +106,7 @@ void ApplyTheme(IniText& ini)
 
 void PrepareReShadeConfig()
 {
-    const std::wstring path = ExeDirectory() + L"ReShade.ini";
+    const std::filesystem::path path = ExeDirectory() + L"ReShade.ini";
     std::ifstream input(path, std::ios::binary);
     IniText ini{ std::string(std::istreambuf_iterator<char>(input), {}) };
     input.close();
@@ -148,8 +149,14 @@ void PrepareReShadeConfig()
 
     if (!ini.Changed())
         return;
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    // Written beside it and moved over it, so a crash while writing cannot damage the user's ReShade settings.
+    const std::filesystem::path temporary = path.native() + L".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     output << ini.Text();
-    if (!output)
+    output.close();
+    if (!output || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        DeleteFileW(temporary.c_str());
         Log(LogLevel::Warning, L"Could not update %ls, so ReShade may show its own tutorial.", path.c_str());
+    }
 }

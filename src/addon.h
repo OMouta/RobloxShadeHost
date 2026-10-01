@@ -18,4 +18,8 @@ void OpenReShadeMenu(bool open);
 
 bool ReShadeMenuOpen();
 
+// Whether ReShade is making the effects it loaded, which it does one per frame, so frames are worth showing at full
+// rate meanwhile. Always false without the add-on.
+bool ReShadeLoadingEffects();
+
 void ShutdownAddon();
