@@ -33,7 +33,7 @@ Reinstalling keeps `ReShade.ini`, presets, `RobloxShadeHost.ini` and the saved g
 
 When Setup creates the installation folder outside the user's profile, such as `C:\Games\Unishade`, the first folder it creates gets its own permissions: full control for the user, SYSTEM and Administrators, and read and run for other users. Otherwise it would inherit the permissions of a drive's root, where every signed-in user may change files, and another account could replace `dxgi.dll` or `Unishade.exe`. Folders that already exist keep their permissions.
 
-Setup copies itself into the installation folder as `Unishade-Setup.exe`, adds **Unishade** and **Unishade Setup** to the Start menu, and registers in Windows' app list under the key earlier Inno Setup versions used, so an update replaces their entry. Running it again from the Start menu offers updating and uninstalling. `RobloxShadeHost-Setup.files` lists the installed files for uninstalling. Setup records each file there as it copies it, so a failed installation can still be uninstalled. Entries that are absolute, contain a drive, `:` or `..`, or point outside the folder are dropped when the list is read or written, and the setup log names them.
+Setup copies itself into the installation folder as `Unishade-Setup.exe`, adds **Unishade** and **Unishade Setup** to the Start menu, and registers in Windows' app list under the key earlier Inno Setup versions used, so an update replaces their entry. Running it again from the Start menu offers updating and uninstalling. `RobloxShadeHost-Setup.files` lists the installed files for uninstalling. Setup writes the list also when copying fails partway, so whatever was copied can still be uninstalled. Entries that are absolute, contain a drive, `:` or `..`, or point outside the folder are dropped when the list is read or written, and the setup log names them.
 
 Setup uninstalls only from a Unishade or RobloxShadeHost installation: a folder with `Unishade.exe` or `RobloxShadeHost.exe` and `RobloxShadeHost-Setup.files`. Anywhere else it refuses and deletes nothing.
 
@@ -55,7 +55,7 @@ Setup only loads system DLLs from System32, since its copy in the installation f
 
 1. Change `version=` in `vendor/reshade/reshade.ini` and empty `sha256=`.
 2. In `CMakeLists.txt`, update the hashes of the ReShade headers, which CMake downloads from the same version's tag, and the Dear ImGui header to the version that ReShade release exports. `src/posix/posix.cmake` builds ReShade's effect compiler from the same version.
-3. Configure on Windows. CMake downloads the installer from reshade.me and prints a warning with the line to commit, such as `sha256=0123…`. Compare the file with one downloaded in a browser if in doubt, then commit the line.
+3. Configure on Windows. CMake downloads the installer from reshade.me to `build/reshade/` and prints a warning with the line to commit, such as `sha256=0123…`. Compare that file with one downloaded in a browser if in doubt, then commit the line.
 
 With a hash in the file, configuring downloads the installer and fails if it does not match. Without one, configuring uses the hash of the file reshade.me sends at that moment and warns. If the download fails as well, Setup is not built until the line is filled in. Setup checks the hash again on every installation.
 
