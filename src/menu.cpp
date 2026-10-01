@@ -2896,6 +2896,63 @@ void ConfirmDialog()
 
 // Status
 
+bool IsWebAddress(const std::string& word)
+{
+    return word.starts_with("https://") || word.starts_with("http://");
+}
+
+// Wraps a notice at the edge of the window, with the web addresses in it as links. Wrapped lines start where the
+// first one does.
+void NoticeText(const std::string& text)
+{
+    if (text.find("http://") == std::string::npos && text.find("https://") == std::string::npos)
+    {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(text.c_str(), text.c_str() + text.size());
+        ImGui::PopTextWrapPos();
+        return;
+    }
+    const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    const float space = ImGui::CalcTextSize(" ").x;
+    ImGui::BeginGroup();
+    bool first = true;
+    int index = 0;
+    for (size_t start = 0; start < text.size(); ++index)
+    {
+        const size_t end = std::min(text.find(' ', start), text.size());
+        std::string word = text.substr(start, end - start);
+        start = end + 1;
+        if (word.empty())
+            continue;
+        // Punctuation after an address, such as a full stop, is not part of it.
+        std::string after;
+        if (IsWebAddress(word))
+        {
+            const size_t cut = word.find_last_not_of(".,;:!?)'\"") + 1;
+            after = word.substr(cut);
+            word.resize(cut);
+        }
+        if (!first && ImGui::GetItemRectMax().x + space + ImGui::CalcTextSize((word + after).c_str()).x <= right)
+            ImGui::SameLine(0, space);
+        first = false;
+        if (IsWebAddress(word))
+        {
+            ImGui::PushID(index);
+            if (Link(word.c_str()))
+                ShellOpen(Wide(word));
+            ImGui::PopID();
+            if (!after.empty())
+            {
+                ImGui::SameLine(0, 0);
+                ImGui::TextUnformatted(after.c_str());
+            }
+        }
+        else
+            ImGui::TextUnformatted(word.c_str());
+    }
+    ImGui::EndGroup();
+}
+
 void StatusTab()
 {
     const Update& update = m.update;
@@ -2915,18 +2972,33 @@ void StatusTab()
         ImGui::Dummy(ImVec2(0, S(2)));
     }
 
+    const float x = ImGui::GetCursorPosX();
+    const float width = ImGui::GetContentRegionAvail().x;
     Heading("STATUS");
+    if (!m.notices.empty())
+    {
+        // The log keeps them.
+        PushSize(12);
+        const char* dismiss = "Dismiss all";
+        ImGui::SameLine(x + width - ImGui::CalcTextSize(dismiss).x);
+        if (Link(dismiss, kDim))
+            ClearNotices();
+        ImGui::PopFont();
+    }
     ImDrawList* draw = ImGui::GetWindowDrawList();
     PushSize(13.5f);
-    for (const MenuNotice& notice : m.notices)
+    for (size_t i = 0; i < m.notices.size(); ++i)
     {
+        const MenuNotice& notice = m.notices[i];
         const ImVec2 start = ImGui::GetCursorScreenPos();
         NoticeIcon(draw, start + ImVec2(S(8), ImGui::GetFontSize() / 2 + S(1)), notice.level);
         ImGui::SetCursorScreenPos(start + ImVec2(S(26), 0));
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(notice.text.c_str(), notice.text.c_str() + notice.text.size());
-        ImGui::PopTextWrapPos();
+        ImGui::PushID(static_cast<int>(i));
+        NoticeText(notice.text);
+        ImGui::PopID();
     }
+    if (m.notices.empty())
+        ImGui::TextDisabled("No messages.");
     ImGui::PopFont();
 
     ImGui::Dummy(ImVec2(0, S(4)));
