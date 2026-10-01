@@ -17,6 +17,11 @@ bool HasExtension(const std::vector<VkExtensionProperties>& extensions, const ch
     return std::any_of(extensions.begin(), extensions.end(), [name](const VkExtensionProperties& e) { return !strcmp(e.extensionName, name); });
 }
 
+// How long drawing waits for the graphics card before it skips a frame, rather than hanging when the card or the
+// window system stops answering.
+constexpr uint64_t kFenceTimeout = 2'000'000'000;
+constexpr uint64_t kAcquireTimeout = 250'000'000;
+
 int DeviceRank(VkPhysicalDeviceType type)
 {
     switch (type)
@@ -189,7 +194,11 @@ bool Gpu::Init(bool headless, std::string& error)
     VkCommandPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = queueFamily;
-    vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
+    if (VkResult result = vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool); result != VK_SUCCESS)
+    {
+        error = "The graphics card is out of memory (Vulkan error " + std::to_string(result) + ").";
+        return false;
+    }
 
     Log(LogLevel::Info, "Frames stay on the graphics card: %s", metalObjects || dmaBuf ? "yes" : "no, they are copied through memory");
     Log(LogLevel::Info, "Graphics: %s (Vulkan %u.%u.%u)", properties.deviceName, VK_API_VERSION_MAJOR(properties.apiVersion),
@@ -202,9 +211,11 @@ void Gpu::Shutdown()
     if (device)
     {
         vkDeviceWaitIdle(device);
-        vkDestroyCommandPool(device, commandPool, nullptr);
+        if (commandPool)
+            vkDestroyCommandPool(device, commandPool, nullptr);
         vkDestroyDevice(device, nullptr);
     }
+    commandPool = VK_NULL_HANDLE;
     if (instance)
         vkDestroyInstance(instance, nullptr);
     device = VK_NULL_HANDLE;
@@ -275,8 +286,13 @@ bool Gpu::CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t
         DestroyImage(image);
         return false;
     }
-    vkBindImageMemory(device, image.image, image.memory, 0);
+    if (vkBindImageMemory(device, image.image, image.memory, 0) != VK_SUCCESS)
+    {
+        DestroyImage(image);
+        return false;
+    }
 
+    bool viewsMade = true;
     const auto makeView = [&](VkFormat viewFormat, uint32_t base, uint32_t count) {
         VkImageViewCreateInfo view{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         view.image = image.image;
@@ -291,7 +307,11 @@ bool Gpu::CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t
             view.pNext = &viewUsage;
         }
         VkImageView result = VK_NULL_HANDLE;
-        vkCreateImageView(device, &view, nullptr, &result);
+        if (vkCreateImageView(device, &view, nullptr, &result) != VK_SUCCESS)
+        {
+            viewsMade = false;
+            return VkImageView(VK_NULL_HANDLE);
+        }
         return result;
     };
     const bool sampled = usage & VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -309,6 +329,11 @@ bool Gpu::CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t
     if (usage & VK_IMAGE_USAGE_STORAGE_BIT)
         for (uint32_t level = 0; level < levels; ++level)
             image.storage.push_back(makeView(format, level, 1));
+    if (!viewsMade)
+    {
+        DestroyImage(image);
+        return false;
+    }
     return true;
 }
 
@@ -342,14 +367,13 @@ bool Gpu::CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags 
     allocation.allocationSize = requirements.size;
     allocation.memoryTypeIndex = MemoryType(requirements.memoryTypeBits, hostVisible ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
                                                                                       : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (allocation.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device, &allocation, nullptr, &buffer.memory) != VK_SUCCESS)
+    if (allocation.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device, &allocation, nullptr, &buffer.memory) != VK_SUCCESS ||
+        vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0) != VK_SUCCESS ||
+        (hostVisible && vkMapMemory(device, buffer.memory, 0, VK_WHOLE_SIZE, 0, &buffer.mapped) != VK_SUCCESS))
     {
         DestroyBuffer(buffer);
         return false;
     }
-    vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0);
-    if (hostVisible)
-        vkMapMemory(device, buffer.memory, 0, VK_WHOLE_SIZE, 0, &buffer.mapped);
     return true;
 }
 
@@ -369,26 +393,54 @@ VkCommandBuffer Gpu::BeginCommands()
     info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     info.commandBufferCount = 1;
     VkCommandBuffer commands = VK_NULL_HANDLE;
-    vkAllocateCommandBuffers(device, &info, &commands);
+    if (vkAllocateCommandBuffers(device, &info, &commands) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
     VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(commands, &begin);
+    if (vkBeginCommandBuffer(commands, &begin) != VK_SUCCESS)
+    {
+        vkFreeCommandBuffers(device, commandPool, 1, &commands);
+        return VK_NULL_HANDLE;
+    }
     return commands;
 }
 
-void Gpu::SubmitAndWait(VkCommandBuffer commands)
+bool Gpu::SubmitAndWait(VkCommandBuffer commands)
 {
-    vkEndCommandBuffer(commands);
+    if (!commands)
+        return false;
     VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     VkFence fence = VK_NULL_HANDLE;
-    vkCreateFence(device, &fenceInfo, nullptr, &fence);
     VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &commands;
-    vkQueueSubmit(queue, 1, &submit, fence);
-    vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(device, fence, nullptr);
-    vkFreeCommandBuffers(device, commandPool, 1, &commands);
+    bool submitted = false;
+    VkResult result = vkEndCommandBuffer(commands);
+    if (result == VK_SUCCESS)
+        result = vkCreateFence(device, &fenceInfo, nullptr, &fence);
+    if (result == VK_SUCCESS && (result = vkQueueSubmit(queue, 1, &submit, fence)) == VK_SUCCESS)
+    {
+        submitted = true;
+        result = vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    }
+    if (result == VK_ERROR_DEVICE_LOST)
+        ReportLost();
+    // Commands still running keep their buffer and fence.
+    if (!submitted || result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST)
+    {
+        if (fence)
+            vkDestroyFence(device, fence, nullptr);
+        vkFreeCommandBuffers(device, commandPool, 1, &commands);
+    }
+    return result == VK_SUCCESS;
+}
+
+void Gpu::ReportLost()
+{
+    if (lost)
+        return;
+    lost = true;
+    Report(LogLevel::Error, "The graphics card stopped responding (Vulkan device lost), so Unishade stopped drawing. Restart Unishade.");
 }
 
 void FullBarrier(VkCommandBuffer commands)
@@ -486,18 +538,16 @@ bool Surface::Create(GLFWwindow* glfwWindow, bool wantLowLatency, std::string& e
     passInfo.pSubpasses = &subpass;
     passInfo.dependencyCount = 1;
     passInfo.pDependencies = &dependency;
-    vkCreateRenderPass(gpu.device, &passInfo, nullptr, &renderPass);
-
     VkCommandBufferAllocateInfo commandInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
     commandInfo.commandPool = gpu.commandPool;
     commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     commandInfo.commandBufferCount = 1;
-    vkAllocateCommandBuffers(gpu.device, &commandInfo, &commands);
-    VkSemaphoreCreateInfo semaphoreInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    vkCreateSemaphore(gpu.device, &semaphoreInfo, nullptr, &acquired);
-    VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    vkCreateFence(gpu.device, &fenceInfo, nullptr, &fence);
+    if (vkCreateRenderPass(gpu.device, &passInfo, nullptr, &renderPass) != VK_SUCCESS ||
+        vkAllocateCommandBuffers(gpu.device, &commandInfo, &commands) != VK_SUCCESS || !CreateSync())
+    {
+        error = "The graphics card is out of memory.";
+        return false;
+    }
 
     if (!CreateSwapchain())
     {
@@ -578,7 +628,7 @@ bool Surface::CreateSwapchain()
         viewInfo.format = format;
         viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         VkImageView view = VK_NULL_HANDLE;
-        vkCreateImageView(gpu.device, &viewInfo, nullptr, &view);
+        const VkResult viewMade = vkCreateImageView(gpu.device, &viewInfo, nullptr, &view);
         views.push_back(view);
 
         VkFramebufferCreateInfo framebufferInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -589,13 +639,17 @@ bool Surface::CreateSwapchain()
         framebufferInfo.height = extent.height;
         framebufferInfo.layers = 1;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
-        vkCreateFramebuffer(gpu.device, &framebufferInfo, nullptr, &framebuffer);
-        framebuffers.push_back(framebuffer);
-
         VkSemaphoreCreateInfo semaphoreInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         VkSemaphore semaphore = VK_NULL_HANDLE;
-        vkCreateSemaphore(gpu.device, &semaphoreInfo, nullptr, &semaphore);
+        const bool made = viewMade == VK_SUCCESS && vkCreateFramebuffer(gpu.device, &framebufferInfo, nullptr, &framebuffer) == VK_SUCCESS &&
+                          vkCreateSemaphore(gpu.device, &semaphoreInfo, nullptr, &semaphore) == VK_SUCCESS;
+        framebuffers.push_back(framebuffer);
         renderDone.push_back(semaphore);
+        if (!made)
+        {
+            DestroySwapchain();
+            return false;
+        }
     }
     recreated = true;
     needsRecreate = false;
@@ -620,6 +674,28 @@ void Surface::DestroySwapchain()
     swapchain = VK_NULL_HANDLE;
 }
 
+bool Surface::CreateSync()
+{
+    VkSemaphoreCreateInfo semaphoreInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    if (vkCreateSemaphore(gpu.device, &semaphoreInfo, nullptr, &acquired) == VK_SUCCESS &&
+        vkCreateFence(gpu.device, &fenceInfo, nullptr, &fence) == VK_SUCCESS)
+        return true;
+    DestroySync();
+    return false;
+}
+
+void Surface::DestroySync()
+{
+    if (acquired)
+        vkDestroySemaphore(gpu.device, acquired, nullptr);
+    if (fence)
+        vkDestroyFence(gpu.device, fence, nullptr);
+    acquired = VK_NULL_HANDLE;
+    fence = VK_NULL_HANDLE;
+}
+
 void Surface::Destroy()
 {
     if (!gpu.device)
@@ -628,24 +704,33 @@ void Surface::Destroy()
     DestroySwapchain();
     if (renderPass)
         vkDestroyRenderPass(gpu.device, renderPass, nullptr);
-    if (acquired)
-        vkDestroySemaphore(gpu.device, acquired, nullptr);
-    if (fence)
-        vkDestroyFence(gpu.device, fence, nullptr);
+    DestroySync();
     if (commands)
         vkFreeCommandBuffers(gpu.device, gpu.commandPool, 1, &commands);
     if (surface)
         vkDestroySurfaceKHR(gpu.instance, surface, nullptr);
     renderPass = VK_NULL_HANDLE;
-    acquired = VK_NULL_HANDLE;
-    fence = VK_NULL_HANDLE;
     commands = VK_NULL_HANDLE;
     surface = VK_NULL_HANDLE;
 }
 
 bool Surface::BeginFrame()
 {
-    vkWaitForFences(gpu.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (gpu.lost)
+    {
+        // Nothing can draw the error anymore, so the window's title says it.
+        if (!lostShown)
+            glfwSetWindowTitle(window, "Unishade - the graphics card stopped responding, restart Unishade");
+        lostShown = true;
+        return false;
+    }
+    if (!fence && !CreateSync())
+        return false;
+    const VkResult waited = vkWaitForFences(gpu.device, 1, &fence, VK_TRUE, kFenceTimeout);
+    if (waited == VK_ERROR_DEVICE_LOST)
+        gpu.ReportLost();
+    if (waited != VK_SUCCESS)
+        return false;
 
     int width = 0, height = 0;
     glfwGetFramebufferSize(window, &width, &height);
@@ -658,23 +743,28 @@ bool Surface::BeginFrame()
             return false;
     }
 
-    VkResult result = vkAcquireNextImageKHR(gpu.device, swapchain, UINT64_MAX, acquired, VK_NULL_HANDLE, &index);
+    VkResult result = vkAcquireNextImageKHR(gpu.device, swapchain, kAcquireTimeout, acquired, VK_NULL_HANDLE, &index);
     if (result == VK_ERROR_OUT_OF_DATE_KHR)
     {
         needsRecreate = true;
         return false;
     }
+    if (result == VK_ERROR_DEVICE_LOST)
+        gpu.ReportLost();
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
         return false;
     if (result == VK_SUBOPTIMAL_KHR)
         needsRecreate = true;
     image = images[index];
 
-    vkResetFences(gpu.device, 1, &fence);
-    vkResetCommandBuffer(commands, 0);
     VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(commands, &begin);
+    if (vkResetCommandBuffer(commands, 0) != VK_SUCCESS || vkBeginCommandBuffer(commands, &begin) != VK_SUCCESS)
+    {
+        Recover();
+        return false;
+    }
+    vkResetFences(gpu.device, 1, &fence);
 
     VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     barrier.srcAccessMask = 0;
@@ -701,7 +791,7 @@ void Surface::BeginRenderPass()
 void Surface::EndFrame()
 {
     vkCmdEndRenderPass(commands);
-    vkEndCommandBuffer(commands);
+    const VkResult ended = vkEndCommandBuffer(commands);
 
     const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -712,9 +802,15 @@ void Surface::EndFrame()
     submit.pCommandBuffers = &commands;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &renderDone[index];
-    if (vkQueueSubmit(gpu.queue, 1, &submit, fence) != VK_SUCCESS)
+    if (const VkResult submitted = ended == VK_SUCCESS ? vkQueueSubmit(gpu.queue, 1, &submit, fence) : ended; submitted != VK_SUCCESS)
     {
-        Log(LogLevel::Error, "The graphics card stopped drawing.");
+        if (submitted == VK_ERROR_DEVICE_LOST)
+            gpu.ReportLost();
+        else
+        {
+            Log(LogLevel::Error, "The graphics card could not draw a frame (Vulkan error %d).", submitted);
+            Recover();
+        }
         return;
     }
 
@@ -727,4 +823,16 @@ void Surface::EndFrame()
     const VkResult result = vkQueuePresentKHR(gpu.queue, &present);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
         needsRecreate = true;
+    else if (result == VK_ERROR_DEVICE_LOST)
+        gpu.ReportLost();
+}
+
+// After a frame was acquired but not submitted: its fence will never be signalled and the acquired semaphore
+// stays signalled, so both are made again, and the swapchain too, which takes back the image.
+void Surface::Recover()
+{
+    vkDeviceWaitIdle(gpu.device);
+    DestroySync();
+    CreateSync();
+    needsRecreate = true;
 }
