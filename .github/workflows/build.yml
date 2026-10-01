@@ -14,7 +14,9 @@ jobs:
   build:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Configure
         run: cmake -S . -B build -A x64 -DBUILD_TESTING=ON
       - name: Build
@@ -23,7 +25,7 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Build installer
         run: cmake --build build --config Release --target installer
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Unishade-windows-x64
           path: |
@@ -37,7 +39,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -56,18 +60,21 @@ jobs:
         run: |
           shaders="$XDG_DATA_HOME/unishade/reshade-shaders"
           mkdir -p "$shaders/Shaders" "$shaders/Textures"
+          # Each package at a fixed commit, so a change upstream can't change the result.
           fetch() {
-            git clone --quiet --depth 1 ${3:+--branch $3} "$1" "$RUNNER_TEMP/package"
+            git init --quiet "$RUNNER_TEMP/package"
+            git -C "$RUNNER_TEMP/package" fetch --quiet --depth 1 "$1" "$3"
+            git -C "$RUNNER_TEMP/package" checkout --quiet FETCH_HEAD
             mkdir -p "$shaders/Shaders/$2" "$shaders/Textures/$2"
             cp -r "$RUNNER_TEMP"/package/Shaders/. "$shaders/Shaders/$2"
             if [ -d "$RUNNER_TEMP/package/Textures" ]; then cp -r "$RUNNER_TEMP"/package/Textures/. "$shaders/Textures/$2"; fi
             rm -rf "$RUNNER_TEMP/package"
           }
-          fetch https://github.com/crosire/reshade-shaders "" slim
-          fetch https://github.com/crosire/reshade-shaders "" legacy
-          fetch https://github.com/CeeJayDK/SweetFX ""
-          fetch https://github.com/luluco250/FXShaders FXShaders
-          fetch https://github.com/BlueSkyDefender/AstrayFX AstrayFX
+          fetch https://github.com/crosire/reshade-shaders "" fd0022170615ce0d8162d219bff07232fa6dd84f # slim
+          fetch https://github.com/crosire/reshade-shaders "" bcb5ba54199f4455026dd8ba66dc1b74461d3152 # legacy
+          fetch https://github.com/CeeJayDK/SweetFX "" 93ddf39b357f5da534ed6d34ba4ec8cc7dcfa361 # master
+          fetch https://github.com/luluco250/FXShaders FXShaders 76365e35c48e30170985ca371e67d8daf8eb9a98 # master
+          fetch https://github.com/BlueSkyDefender/AstrayFX AstrayFX 59bae8b33e34f37a8e521e666864085ccbf08535 # master
           # A real game picture from the repository's own screenshots.
           for preset in presets/GenericPreset*.ini; do
             ./build/unishade --render assets/ReadmeShowcase1.jpg "$preset" "$(basename "$preset" .ini).png"
@@ -86,7 +93,7 @@ jobs:
           mkdir -p package/Unishade
           cp build/unishade LICENSE src/posix/CREDITS.txt package/Unishade/
           tar -czf Unishade-linux-x64.tar.gz -C package Unishade
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Unishade-linux-x64
           path: |
@@ -98,7 +105,9 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install dependencies
         run: brew install molten-vk vulkan-headers
       - name: Configure
@@ -117,7 +126,7 @@ jobs:
           cd build
           ditto -c -k --keepParent Unishade.app Unishade-macOS.zip
           zip -j Unishade-macOS.zip LICENSE CREDITS.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Unishade-macOS
           path: build/Unishade-macOS.zip
@@ -132,18 +141,19 @@ jobs:
       # To start the website workflow.
       actions: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: Unishade-windows-x64
           path: release
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: Unishade-linux-x64
           path: release
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: Unishade-macOS
           path: release
