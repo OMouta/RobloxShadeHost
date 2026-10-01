@@ -23,9 +23,10 @@ constexpr uint64_t kAddonLimit = 1ull << 30;     // add-on files, such as the de
 // interrupts a download that is still connecting or waiting for the server.
 std::string Fetch(const std::wstring& url, const std::atomic<bool>& cancel, uint64_t maxSize = kListLimit, const DownloadProgress& progress = {});
 
-// Downloads an HTTPS url to a file. A non-empty sha256 (lowercase hex) must match the downloaded data.
-void Download(const std::wstring& url, const std::filesystem::path& path, const std::string& sha256, uint64_t maxSize,
-              const std::atomic<bool>& cancel, const DownloadProgress& progress = {});
+// Downloads an HTTPS url to a file. A non-empty sha256 (lowercase hex) must match the downloaded data. Returns the
+// SHA-256 of the data as it came from the server.
+std::string Download(const std::wstring& url, const std::filesystem::path& path, const std::string& sha256, uint64_t maxSize,
+                     const std::atomic<bool>& cancel, const DownloadProgress& progress = {});
 
 // The SHA-256 (lowercase hex) of the rest of an open file, read through its handle.
 std::string Sha256(void* file);

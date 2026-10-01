@@ -13,7 +13,7 @@ Output: `build/installer/Unishade-Setup-<version>.exe`.
 
 Setup downloads everything into a new temporary folder with a random name first. A failed or cancelled download stops before the installation folder is touched. Cancelling, or closing the window, also stops a download that is still connecting and ends ReShade's installer if it is running.
 
-ReShade is the version in `vendor/reshade/reshade.ini`, which is also the version whose headers the host is built against, so the menu matches the Dear ImGui that ReShade exports. Setup downloads `ReShade_Setup_<version>_Addon.exe` from reshade.me and checks it against the SHA-256 built into Setup. It keeps the file open so that nothing can replace it between that check and starting it. Setup shows the license from that version's source tag before installing. It runs ReShade's own installer in headless mode against a temporary copy of the host and keeps only `dxgi.dll` and `ReShade.ini`.
+ReShade comes from reshade.me at installation time, so users get ReShade updates without a new Setup. Setup finds the newest version in the download link on reshade.me's home page and downloads `ReShade_Setup_<version>_Addon.exe` over HTTPS. The version must be three numbers separated by dots, since it becomes part of the download and license addresses. There is no checksum to compare the installer with, since the version changes. Setup keeps the downloaded file open so that nothing can replace it before ReShade's installer has started from it, and checks that the file it opened is the one it downloaded. Setup shows the license from that version's source tag before installing. It runs ReShade's own installer in headless mode against a temporary copy of the host and keeps only `dxgi.dll` and `ReShade.ini`.
 
 Effect packages come from `EffectPackages.ini` in the `crosire/reshade-shaders` repository, the same list the ReShade installer uses. Setup installs every package on the list, not only the ones the list enables by default, because the presets use effects from packages that are off by default there. Each package is extracted into `reshade-shaders/Shaders` and `reshade-shaders/Textures`, skipping the files the list denies. Only these file types are installed: effect sources (`.fx`, `.fxh`), textures ReShade can load (`.png`, `.jpg`, `.jpeg`, `.bmp`, `.tga`, `.dds`, `.hdr`, `.cube`), and plain-text licenses and readmes (`.txt`, `.md`, and `LICENSE`, `LICENCE`, `COPYING`, `NOTICE` or `README` without an extension). Add-ons, DLLs, programs and anything else in a package stay out. A package whose zip names a file outside its own folder, or a file name with a colon, which on Windows names a drive or a stream of another file, is left out. The macOS and Linux host unpacks packages with the same code, in `src/package_files.h`. The packages come from the moving branch heads the list names, so they are not checksummed; the file types are what limits them. ReShade's installer writes search paths ending in `\**\**`, which find nothing, so Setup shortens them to `\**`.
 
@@ -27,7 +27,7 @@ DLSS5 and depth estimation do not work together, so the add-ons page allows only
 
 Downloads use HTTPS and check certificates for revocation. When the revocation check cannot be completed, for example because the network blocks the revocation servers, Setup repeats the download without it, as browsers do, rather than failing every installation on such networks; a certificate Windows reports as revoked still fails. A proxy that asks to sign in with Windows authentication gets the user's Windows account.
 
-Downloads have size limits, so a broken or hostile server cannot fill the memory or the disk: 16 MB for download lists, presets and the license, 256 MB for an effect package or ReShade's installer, and 1 GB for an add-on file. Before unpacking, an effect package may hold at most 20,000 files, 128 MB per file and 1 GB in total.
+Downloads have size limits, so a broken or hostile server cannot fill the memory or the disk: 16 MB for download lists, reshade.me's home page, presets and the license, 256 MB for an effect package or ReShade's installer, and 1 GB for an add-on file. Before unpacking, an effect package may hold at most 20,000 files, 128 MB per file and 1 GB in total.
 
 Reinstalling keeps `ReShade.ini`, presets, `RobloxShadeHost.ini` and the saved game list in `games.ini`. The configuration and `RobloxShadeHost-Setup.files` manifest retain their original filenames to preserve existing install state without conversion. The host writes `RobloxShadeHost.ini` on its first start and when shortcuts change in its menu.
 
@@ -51,13 +51,7 @@ Setup only loads system DLLs from System32, since its copy in the installation f
 
 ### ReShade
 
-`vendor/reshade/reshade.ini` holds the ReShade version Setup installs and the SHA-256 of `ReShade_Setup_<version>_Addon.exe`. To move to another ReShade version:
-
-1. Change `version=` in `vendor/reshade/reshade.ini` and empty `sha256=`.
-2. In `CMakeLists.txt`, update the hashes of the ReShade headers, which CMake downloads from the same version's tag, and the Dear ImGui header to the version that ReShade release exports. `src/posix/posix.cmake` builds ReShade's effect compiler from the same version.
-3. Configure on Windows. CMake downloads the installer from reshade.me to `build/reshade/` and prints a warning with the line to commit, such as `sha256=0123…`. Compare that file with one downloaded in a browser if in doubt, then commit the line.
-
-With a hash in the file, configuring downloads the installer and fails if it does not match. Without one, configuring uses the hash of the file reshade.me sends at that moment and warns. If the download fails as well, Setup is not built until the line is filled in. Setup checks the hash again on every installation.
+Setup installs the newest ReShade on reshade.me, so a new ReShade version needs no Setup release. The host is built against the ReShade headers that `CMakeLists.txt` downloads from a version's tag, and the Dear ImGui header that version exports. To build against a newer version, update the tag and hashes of both there; `src/posix/posix.cmake` builds ReShade's effect compiler from the same version.
 
 ### Add-ons
 

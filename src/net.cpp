@@ -275,12 +275,13 @@ std::string Fetch(const std::wstring& url, const std::atomic<bool>& cancel, uint
     return data;
 }
 
-void Download(const std::wstring& url, const std::filesystem::path& path, const std::string& sha256, uint64_t maxSize,
-              const std::atomic<bool>& cancel, const DownloadProgress& progress)
+std::string Download(const std::wstring& url, const std::filesystem::path& path, const std::string& sha256, uint64_t maxSize,
+                     const std::atomic<bool>& cancel, const DownloadProgress& progress)
 {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file)
         throw std::runtime_error("Could not write " + Utf8(path.wstring()) + ".");
+    std::string received;
     try
     {
         Sha256Hasher hasher;
@@ -293,7 +294,8 @@ void Download(const std::wstring& url, const std::filesystem::path& path, const 
         file.close();
         if (!file)
             throw std::runtime_error("Could not write " + Utf8(path.wstring()) + ".");
-        if (!sha256.empty() && hasher.Finish() != sha256)
+        received = hasher.Finish();
+        if (!sha256.empty() && received != sha256)
             throw std::runtime_error("The download from " + Utf8(url) + " does not match its checksum.");
     }
     catch (...)
@@ -303,6 +305,7 @@ void Download(const std::wstring& url, const std::filesystem::path& path, const 
         std::filesystem::remove(path, ignored);
         throw;
     }
+    return received;
 }
 
 std::string Sha256(void* file)

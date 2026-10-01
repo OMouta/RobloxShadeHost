@@ -1,5 +1,4 @@
 #include "install.h"
-#include "pinned.h"
 #include "resource.h"
 #include "../src/package_files.h"
 #include "../src/preset_ini.h"
@@ -174,6 +173,20 @@ bool IsSha256(const std::string& text)
     return text.size() == 64 && text.find_first_not_of("0123456789abcdef") == std::string::npos;
 }
 
+// A version such as 6.8.0: three numbers of one to nine digits, separated by dots.
+bool IsVersion(const std::string& text)
+{
+    size_t start = 0;
+    for (int part = 0; part < 3; ++part)
+    {
+        const size_t end = part < 2 ? text.find('.', start) : text.size();
+        if (end == std::string::npos || end == start || end - start > 9 || text.find_first_not_of("0123456789", start) < end)
+            return false;
+        start = end + 1;
+    }
+    return true;
+}
+
 std::wstring IniString(const fs::path& file, const std::wstring& section, const wchar_t* key, const wchar_t* fallback = L"")
 {
     wchar_t value[4096]{};
@@ -296,23 +309,19 @@ std::string FetchList(const std::wstring& location, const std::atomic<bool>& can
 
 void InstallReShade(const fs::path& work, const fs::path& files, const ReShadeRelease& release, bool presets, Progress& progress)
 {
-    // The hash comes from vendor/reshade/reshade.ini when Setup is built. CMake does not build Setup without it.
-    const std::string sha256 = RESHADE_SETUP_SHA256;
-    if (!IsSha256(sha256))
-        throw std::runtime_error("This Setup was built without the checksum of ReShade's installer, so it cannot install ReShade.");
     progress.Status("Downloading ReShade " + release.version);
     const fs::path setup = work / L"ReShade-Setup.exe";
-    Download(L"https://reshade.me/downloads/ReShade_Setup_" + Wide(release.version) + L"_Addon.exe", setup, sha256, kPackageLimit, progress.cancel,
-             ByteProgress(progress, 0.0f, 0.05f));
+    const std::string sha256 = Download(L"https://reshade.me/downloads/ReShade_Setup_" + Wide(release.version) + L"_Addon.exe", setup, "",
+                                        kPackageLimit, progress.cancel, ByteProgress(progress, 0.0f, 0.05f));
 
-    // Checked again through a handle that keeps anyone from changing, renaming or deleting the file until ReShade's
-    // installer has started from it.
+    // Opened through a handle that keeps anyone from changing, renaming or deleting the file until ReShade's installer
+    // has started from it. Checking it against what was downloaded covers the moment before it was opened.
     const HANDLE opened = CreateFileW(setup.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (opened == INVALID_HANDLE_VALUE)
         throw std::runtime_error("Could not open the ReShade installer: " + SystemError(GetLastError()) + ".");
     Handle verified(opened);
     if (Sha256(verified.get()) != sha256)
-        throw std::runtime_error("The ReShade installer does not match its checksum.");
+        throw std::runtime_error("The ReShade installer changed after it was downloaded.");
 
     // ReShade's installer also leaves an empty preset and a log next to the exe, which must not replace
     // the user's files, so it runs in a folder of its own and only its DLL and settings are kept.
@@ -947,12 +956,21 @@ std::string_view Resource(int id)
 
 ReShadeRelease FetchReShadeRelease(const std::atomic<bool>& cancel)
 {
+    // The download button on reshade.me links ReShade_Setup_<version>_Addon.exe of the newest version.
+    const std::string page = Fetch(L"https://reshade.me/", cancel, kListLimit);
+    const size_t end = page.find("_Addon.exe");
+    const size_t start = end == std::string::npos || end == 0 ? std::string::npos : page.rfind('_', end - 1);
+    if (start == std::string::npos)
+        throw std::runtime_error("Could not find ReShade's download on reshade.me.");
     ReShadeRelease release;
-    release.version = RESHADE_VERSION;
-    release.license = Fetch(L"https://raw.githubusercontent.com/crosire/reshade/v" + Wide(release.version) + L"/LICENSE.md", cancel);
+    release.version = page.substr(start + 1, end - start - 1);
+    // The version becomes part of the download and license addresses.
+    if (!IsVersion(release.version))
+        throw std::runtime_error("reshade.me lists an unexpected ReShade version.");
+    release.license = Fetch(L"https://raw.githubusercontent.com/crosire/reshade/v" + Wide(release.version) + L"/LICENSE.md", cancel, kListLimit);
     if (release.license.find("Redistribution and use") == std::string::npos)
         throw std::runtime_error("Could not load the ReShade license.");
-    SetupLog("Loaded the license of ReShade " + release.version);
+    SetupLog("Newest ReShade: " + release.version);
     return release;
 }
 

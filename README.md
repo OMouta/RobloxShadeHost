@@ -24,7 +24,7 @@ Games need to run windowed or borderless. Unishade also runs on [macOS and Linux
 
 If regular ReShade already works in your game, use that.
 
-Setup isn't code-signed yet, so the first time Windows may say **Windows protected your PC**. Click **More info**, then **Run anyway**. [Releases](https://github.com/OMouta/Unishade/releases) from 0.6.0 on come with `SHA256SUMS.txt`, the SHA-256 of each file, so you can check what you downloaded. Setup installs a fixed ReShade version and checks it against a SHA-256 kept in this repository.
+Setup isn't code-signed yet, so the first time Windows may say **Windows protected your PC**. Click **More info**, then **Run anyway**. [Releases](https://github.com/OMouta/Unishade/releases) from 0.6.0 on come with `SHA256SUMS.txt`, the SHA-256 of each file, so you can check what you downloaded.
 
 ## Help and presets
 

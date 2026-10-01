@@ -3,7 +3,6 @@
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "install.h"
-#include "pinned.h"
 #include "resource.h"
 #include "../src/hotkey.h"
 #include "../src/text.h"
@@ -663,8 +662,7 @@ void ManagePage()
         Text("This setup installs version " UNISHADE_VERSION ".", kDim, 15);
     Spacing(14);
     if (Card("update", "Update or change add-ons", nullptr, 0,
-             "Get ReShade " RESHADE_VERSION " and the newest effects, or add or remove depth estimation and DLSS5. Your settings and presets stay.",
-             CardKind::Action))
+             "Get the newest ReShade and effects, or add or remove depth estimation and DLSS5. Your settings and presets stay.", CardKind::Action))
     {
         app.addon = InstalledAddon(Directory());
         app.page = Page::Addons;
@@ -677,8 +675,7 @@ void AddonsPage()
 {
     Title("Choose what to install");
     Spacing(6);
-    Card("reshade", "ReShade and effects", "Included", kDim, "ReShade " RESHADE_VERSION " from reshade.me and every effect package on ReShade's official list.",
-         CardKind::Static);
+    Card("reshade", "ReShade and effects", "Included", kDim, "ReShade from reshade.me and every effect package on ReShade's official list.", CardKind::Static);
     if (Card("presets", "Presets", nullptr, 0, "Ready-made looks to start from. Pick one in the Unishade menu.", CardKind::Toggle, app.presets))
         app.presets = !app.presets;
     Spacing(8);
@@ -718,7 +715,7 @@ void LicensePage()
         Spinner(S(14));
         ImGui::SameLine(0, S(12));
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(4));
-        Text("Loading the ReShade license...", kDim, 15);
+        Text("Finding the newest ReShade...", kDim, 15);
     }
     else
     {
@@ -1316,7 +1313,7 @@ int RunSilent(const Arguments& arguments)
             throw std::runtime_error("Presets and add-ons need ReShade. Add reshade to --components.");
         if (options.reshade && !arguments.acceptLicense)
             throw std::runtime_error("Installing ReShade needs --accept-reshade-license. Read the license first: "
-                                     "https://github.com/crosire/reshade/blob/v" RESHADE_VERSION "/LICENSE.md");
+                                     "https://github.com/crosire/reshade/blob/main/LICENSE.md");
 
         Progress progress;
         const ReShadeRelease release = options.reshade ? FetchReShadeRelease(progress.cancel) : ReShadeRelease{};
