@@ -12,12 +12,21 @@
 namespace
 {
 constexpr size_t kMaxNotices = 40;
+// The log stops growing here, so something that keeps logging cannot fill the disk.
+constexpr unsigned long long kMaxLogSize = 16ull * 1024 * 1024;
 
 // Never destroyed, since other threads, such as the update check, may still log while the host exits.
 struct Shared
 {
     std::mutex mutex;
     std::vector<Notice> notices;
+    unsigned long long size = 0;
+    bool full = false;
+    // The last line written, without its time, and how often it came again right after.
+    LogLevel lastLevel = LogLevel::Info;
+    std::string lastText;
+    unsigned repeats = 0;
+    std::string repeatStamp;
 };
 Shared& shared = *new Shared;
 HANDLE file = INVALID_HANDLE_VALUE;
@@ -32,11 +41,27 @@ std::string Utf8(const wchar_t* text)
     return result;
 }
 
-void WriteToFile(const std::string& text)
+// Called with the mutex held.
+void WriteToFile(std::string text)
 {
+    if (file == INVALID_HANDLE_VALUE || shared.full)
+        return;
+    if (shared.size + text.size() > kMaxLogSize)
+    {
+        shared.full = true;
+        text = "Unishade.log reached 16 MB, so nothing more is written to it until Unishade restarts.\r\n";
+    }
     DWORD written = 0;
-    if (file != INVALID_HANDLE_VALUE)
-        WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+    WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+    shared.size += written;
+}
+
+// Called with the mutex held.
+void WriteRepeats()
+{
+    if (shared.repeats)
+        WriteToFile(shared.repeatStamp + "(repeated " + std::to_string(shared.repeats) + " times)\r\n");
+    shared.repeats = 0;
 }
 
 void Write(LogLevel level, bool notice, const wchar_t* format, va_list args)
@@ -47,12 +72,25 @@ void Write(LogLevel level, bool notice, const wchar_t* format, va_list args)
     static constexpr const char* kNames[] = { "", "ok", "warning", "error" };
     SYSTEMTIME time{};
     GetLocalTime(&time);
-    char line[64];
-    snprintf(line, sizeof(line), "%04u-%02u-%02u %02u:%02u:%02u.%03u  %-7s  ", time.wYear, time.wMonth, time.wDay, time.wHour,
+    char stamp[64];
+    snprintf(stamp, sizeof(stamp), "%04u-%02u-%02u %02u:%02u:%02u.%03u  %-7s  ", time.wYear, time.wMonth, time.wDay, time.wHour,
              time.wMinute, time.wSecond, time.wMilliseconds, kNames[static_cast<int>(level)]);
+    std::string text = Utf8(buffer);
 
     std::lock_guard lock(shared.mutex);
-    WriteToFile(line + Utf8(buffer) + "\r\n");
+    // A line that keeps coming, such as from a retry, is written once and then counted.
+    if (level == shared.lastLevel && text == shared.lastText)
+    {
+        ++shared.repeats;
+        shared.repeatStamp = stamp;
+    }
+    else
+    {
+        WriteRepeats();
+        WriteToFile(stamp + text + "\r\n");
+        shared.lastLevel = level;
+        shared.lastText = std::move(text);
+    }
     if (!notice && level != LogLevel::Warning && level != LogLevel::Error)
         return;
     auto& notices = shared.notices;
@@ -71,6 +109,7 @@ void InitLog()
     path = ExeDirectory() + L"Unishade.log";
     MoveFileExW(path.c_str(), (ExeDirectory() + L"Unishade.old.log").c_str(), MOVEFILE_REPLACE_EXISTING);
     file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD error = GetLastError();
 
     // GetVersionEx reports Windows 8 to programs without a compatibility manifest.
     RTL_OSVERSIONINFOW version{ sizeof(version) };
@@ -80,10 +119,19 @@ void InitLog()
     char header[512];
     snprintf(header, sizeof(header), "Unishade %s on Windows %lu.%lu.%lu\r\n", UNISHADE_VERSION,
              version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber);
-    WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory().c_str()) + "\r\n\r\n");
+    {
+        std::lock_guard lock(shared.mutex);
+        WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory().c_str()) + "\r\n\r\n");
+    }
 
     if (file == INVALID_HANDLE_VALUE)
-        Log(LogLevel::Warning, L"Could not create %ls (error %lu), so nothing is logged this time.", path.c_str(), GetLastError());
+        Log(LogLevel::Warning, L"Could not create %ls (error %lu), so nothing is logged this time.", path.c_str(), error);
+}
+
+void FlushLog()
+{
+    std::lock_guard lock(shared.mutex);
+    WriteRepeats();
 }
 
 void Log(LogLevel level, const wchar_t* format, ...)
@@ -111,6 +159,8 @@ std::vector<Notice> Notices()
 void ClearNotices()
 {
     std::lock_guard lock(shared.mutex);
+    if (shared.notices.empty())
+        return;
     shared.notices.clear();
     ++noticeVersion;
 }

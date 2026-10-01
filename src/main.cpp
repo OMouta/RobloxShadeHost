@@ -175,6 +175,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         ShowError(L"Unishade stopped because of an error.");
     }
     CloseHandle(instance);
+    FlushLog();
     // Releasing the swapchain makes ReShade wait for the effects it is still compiling, which can take minutes
     // right after installing. ReShade writes settings and presets a second after they change, so the host exits
     // without that wait.
