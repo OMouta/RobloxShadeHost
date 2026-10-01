@@ -102,11 +102,15 @@ fetch_file("${IMGUI_URL}/backends/imgui_impl_glfw.cpp" 41b11f71c17e05a748d4eaf89
 fetch_file("${IMGUI_URL}/backends/imgui_impl_vulkan.h" 351aa104d643f8a575b891d99645389d45d321bcbd33d41270d2ebf0276351f3 "${IMGUI_DIR}/backends/imgui_impl_vulkan.h")
 fetch_file("${IMGUI_URL}/backends/imgui_impl_vulkan.cpp" 659590d8b74bcbd2ba6612d84a6d8871f97314f04da06a8a05508244adabf086 "${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp")
 
-# stb_image loads the textures effects bring along, stb_image_write saves screenshots.
+# stb_image loads the textures effects bring along and stb_image_resize2 sizes them, stb_image_write saves
+# screenshots. ReShade's own addition to stb_image reads DDS files.
 set(STB_DIR "${CMAKE_BINARY_DIR}/stb")
 set(STB_URL "https://raw.githubusercontent.com/nothings/stb/f58f558c120e9b32c217290b80bad1a0729fbb2c")
 fetch_file("${STB_URL}/stb_image.h" 594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3 "${STB_DIR}/stb_image.h")
 fetch_file("${STB_URL}/stb_image_write.h" cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05 "${STB_DIR}/stb_image_write.h")
+fetch_file("${STB_URL}/stb_image_resize2.h" af5fbe1ed423c44cec8155bd0dfea2b5ae6191912790b3a95e15b0b4f610d4df "${STB_DIR}/stb_image_resize2.h")
+fetch_file("https://raw.githubusercontent.com/crosire/reshade/v6.8.0/deps/stb_image/stb_image_dds.h"
+    6740af5e5d6e6bda48ad25b7f5fd990e5cd2f2c0442f9ba060700171f76a2ea0 "${STB_DIR}/stb_image_dds.h")
 
 # GLFW 3.4 is the first version that can pass mouse input through a window, which the overlay needs. Linux
 # builds only the X11 backend: Wayland does not let a window place itself over another program's window, while

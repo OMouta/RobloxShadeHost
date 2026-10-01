@@ -7,6 +7,8 @@
 #include <effect_preprocessor.hpp>
 
 #include <stb_image.h>
+#include <stb_image_dds.h>
+#include <stb_image_resize2.h>
 
 #include <unistd.h>
 
@@ -17,6 +19,7 @@
 #include <ctime>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <set>
 #include <tuple>
@@ -35,6 +38,8 @@ struct PassGpu
     bool toBackbuffer = false;
     bool clear = false;
     bool mipmaps = false;
+    bool stencil = false;      // uses the stencil attachment
+    bool clearStencil = false; // the technique's first pass that does
     uint32_t targetCount = 0;
     std::vector<const GpuImage*> written; // render targets and storage, for their mipmaps
     VkRenderPass renderPass = VK_NULL_HANDLE;
@@ -77,6 +82,8 @@ constexpr const char* kCompatibilityMacros =
 
 // A new size waits this long for the next before effects are compiled for it.
 constexpr auto kResizeDelay = std::chrono::milliseconds(250);
+// How long Update may spend preparing effects on the graphics card. Render prepares whatever is left.
+constexpr auto kPrepareBudget = std::chrono::milliseconds(8);
 // The compile cache drops the entries used longest ago beyond this.
 constexpr uintmax_t kCacheLimit = 256 * 1024 * 1024;
 
@@ -145,6 +152,16 @@ VkFormat TextureFormat(reshadefx::texture_format format)
     }
 }
 
+VkImageType ImageType(reshadefx::texture_type type)
+{
+    switch (type)
+    {
+    case reshadefx::texture_type::texture_1d: return VK_IMAGE_TYPE_1D;
+    case reshadefx::texture_type::texture_3d: return VK_IMAGE_TYPE_3D;
+    default: return VK_IMAGE_TYPE_2D;
+    }
+}
+
 VkBlendFactor BlendFactor(reshadefx::blend_factor factor)
 {
     using reshadefx::blend_factor;
@@ -173,6 +190,38 @@ VkBlendOp BlendOp(reshadefx::blend_op op)
     case blend_op::min: return VK_BLEND_OP_MIN;
     case blend_op::max: return VK_BLEND_OP_MAX;
     default: return VK_BLEND_OP_ADD;
+    }
+}
+
+VkStencilOp StencilOp(reshadefx::stencil_op op)
+{
+    using reshadefx::stencil_op;
+    switch (op)
+    {
+    case stencil_op::zero: return VK_STENCIL_OP_ZERO;
+    case stencil_op::replace: return VK_STENCIL_OP_REPLACE;
+    case stencil_op::increment_saturate: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+    case stencil_op::decrement_saturate: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+    case stencil_op::invert: return VK_STENCIL_OP_INVERT;
+    case stencil_op::increment: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+    case stencil_op::decrement: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+    default: return VK_STENCIL_OP_KEEP;
+    }
+}
+
+VkCompareOp CompareOp(reshadefx::stencil_func func)
+{
+    using reshadefx::stencil_func;
+    switch (func)
+    {
+    case stencil_func::never: return VK_COMPARE_OP_NEVER;
+    case stencil_func::less: return VK_COMPARE_OP_LESS;
+    case stencil_func::equal: return VK_COMPARE_OP_EQUAL;
+    case stencil_func::less_equal: return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case stencil_func::greater: return VK_COMPARE_OP_GREATER;
+    case stencil_func::not_equal: return VK_COMPARE_OP_NOT_EQUAL;
+    case stencil_func::greater_equal: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    default: return VK_COMPARE_OP_ALWAYS;
     }
 }
 
@@ -205,6 +254,7 @@ struct CompileJob
 {
     fs::path path;
     Definitions definitions;
+    bool decode = false; // the preset uses it, so its images are decoded right away
 };
 
 void BuildUniforms(Effect& effect)
@@ -698,6 +748,123 @@ void PruneCache(const fs::path& directory)
     }
 }
 
+// Texture images
+
+using TextureIndex = std::vector<std::pair<std::string, fs::path>>; // lowercase relative path, full path
+
+TextureIndex ScanTextures(const std::vector<fs::path>& roots)
+{
+    TextureIndex files;
+    for (const fs::path& root : roots)
+    {
+        std::error_code error;
+        for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, error), end; it != end; it.increment(error))
+            if (!error && it->is_regular_file(error))
+                files.emplace_back(Lowercase(it->path().lexically_relative(root).generic_string()), it->path());
+    }
+    return files;
+}
+
+fs::path FindTextureIn(const TextureIndex& files, const std::string& source)
+{
+    std::string wanted = Lowercase(source);
+    std::replace(wanted.begin(), wanted.end(), '\\', '/');
+    for (const auto& [relative, path] : files)
+        if (relative == wanted)
+            return path;
+    // Effects in subfolders often name textures without the folder they are in.
+    const std::string name = fs::path(wanted).filename().string();
+    for (const auto& [relative, path] : files)
+        if (fs::path(relative).filename() == name)
+            return path;
+    return {};
+}
+
+// Loads an image into a texture's format and size, the way ReShade does: formats with 8 or 32-bit float
+// channels, DDS files, and stb_image_resize2's default filter for images of another size.
+TextureImage DecodeTexture(const reshadefx::texture_desc& texture, const fs::path& file)
+{
+    TextureImage result;
+    using reshadefx::texture_format;
+    uint32_t channels = 4;
+    const bool floating = texture.format == texture_format::r32f || texture.format == texture_format::rg32f || texture.format == texture_format::rgba32f;
+    switch (texture.format)
+    {
+    case texture_format::r8:
+    case texture_format::r32f:
+        channels = 1;
+        break;
+    case texture_format::rg8:
+    case texture_format::rg32f:
+        channels = 2;
+        break;
+    case texture_format::rgba8:
+    case texture_format::rgba32f:
+        break;
+    default:
+        result.error = "images load only into R8, RG8, RGBA8 and 32-bit float textures";
+        return result;
+    }
+    std::string data;
+    if (file.empty() || !ReadText(file, data) || data.size() > size_t(std::numeric_limits<int>::max()))
+    {
+        result.error = "the file is missing";
+        return result;
+    }
+    const auto* bytes = reinterpret_cast<const stbi_uc*>(data.data());
+    const int length = static_cast<int>(data.size());
+    int width = 0, height = 0, depth = 1, components = 0;
+    void* pixels = floating ? static_cast<void*>(stbi_loadf_from_memory(bytes, length, &width, &height, &components, 4))
+                   : stbi_dds_test_memory(bytes, length) ? stbi_dds_load_from_memory(bytes, length, &width, &height, &depth, &components, 4)
+                                                         : stbi_load_from_memory(bytes, length, &width, &height, &components, 4);
+    if (!pixels)
+    {
+        result.error = "it is not an image stb_image can read";
+        return result;
+    }
+    const size_t componentSize = floating ? 4 : 1, pixelSize = channels * componentSize;
+    const size_t count = size_t(width) * height * depth;
+    if (depth != std::max<int>(1, texture.depth) || (depth > 1 && (uint32_t(width) != texture.width || uint32_t(height) != texture.height)))
+    {
+        stbi_image_free(pixels);
+        result.error = "3D images cannot be resized";
+        return result;
+    }
+    // Only the channels the format has.
+    auto* source = static_cast<uint8_t*>(pixels);
+    for (size_t i = 0; i < count; ++i)
+        std::memmove(source + i * pixelSize, source + i * 4 * componentSize, pixelSize);
+
+    const uint32_t textureHeight = texture.type == reshadefx::texture_type::texture_1d ? 1 : texture.height;
+    result.pixels.resize(size_t(texture.width) * textureHeight * depth * pixelSize);
+    if (uint32_t(width) == texture.width && uint32_t(height) == textureHeight)
+        std::memcpy(result.pixels.data(), source, result.pixels.size());
+    else
+    {
+        const stbir_pixel_layout layout = channels == 1 ? STBIR_1CHANNEL : channels == 2 ? STBIR_2CHANNEL : STBIR_RGBA;
+        if (!stbir_resize(source, width, height, 0, result.pixels.data(), int(texture.width), int(textureHeight), 0, layout,
+                          floating ? STBIR_TYPE_FLOAT : STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_DEFAULT))
+        {
+            result.pixels.clear();
+            result.error = "it could not be resized";
+        }
+    }
+    stbi_image_free(pixels);
+    return result;
+}
+
+void DecodeImages(Effect& effect, const TextureIndex& files, const std::function<bool()>& cancelled)
+{
+    for (const reshadefx::texture& texture : effect.module.textures)
+    {
+        if (cancelled && cancelled())
+            return;
+        const std::string source = AnnotationString(texture.annotations, "source");
+        if (!source.empty() && texture.semantic.empty())
+            effect.images[texture.unique_name] = DecodeTexture(texture, FindTextureIn(files, source));
+    }
+}
+
 // Reads the values of a uniform in ReShade's layout: every array element and every matrix row starts on
 // 16 bytes.
 size_t ComponentOffset(const Uniform& uniform, size_t i)
@@ -851,6 +1018,14 @@ Runtime::~Runtime()
 bool Runtime::Init(const Settings& initial)
 {
     settings = initial;
+    // The smallest format with stencil, which effects such as SMAA use to skip pixels. Depth goes unused.
+    for (VkFormat format : { VK_FORMAT_S8_UINT, VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT })
+        if (gpu.Supports(format, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        {
+            stencilFormat = format;
+            break;
+        }
+
     // Pipelines made before, so effects start faster. Data from another driver or graphics card is left out:
     // drivers should ignore it, but not all do.
     std::string data;
@@ -898,7 +1073,7 @@ void Runtime::Shutdown()
     for (auto& [desc, sampler] : samplers)
         vkDestroySampler(gpu.device, sampler, nullptr);
     samplers.clear();
-    for (GpuImage* image : { &backbuffer, &color, &depth, &blank })
+    for (GpuImage* image : { &backbuffer, &color, &depth, &blank, &stencil })
         gpu.DestroyImage(*image);
     gpu.DestroyBuffer(staging);
     gpu.DestroyBuffer(readback);
@@ -937,7 +1112,7 @@ void Runtime::JoinLoaders(bool wait)
 bool Runtime::CreateTargets()
 {
     vkDeviceWaitIdle(gpu.device);
-    for (GpuImage* image : { &backbuffer, &color })
+    for (GpuImage* image : { &backbuffer, &color, &stencil })
         gpu.DestroyImage(*image);
     gpu.DestroyBuffer(staging);
     const VkImageUsageFlags transfer = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -948,11 +1123,15 @@ bool Runtime::CreateTargets()
         Log(LogLevel::Error, "Could not create %ux%u images for effects.", width, height);
         return false;
     }
+    // Without it, passes that use stencil run on every pixel, which ReShade accepts too.
+    if (stencilFormat != VK_FORMAT_UNDEFINED && !gpu.CreateImage(stencil, width, height, 1, stencilFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        Log(LogLevel::Warning, "Could not create a %ux%u stencil image for effects.", width, height);
     VkCommandBuffer commands = gpu.BeginCommands();
     if (!commands)
         return false;
-    InitLayout(commands, backbuffer);
-    InitLayout(commands, color);
+    for (const GpuImage* image : { &backbuffer, &color, &stencil })
+        if (image->image)
+            InitLayout(commands, *image);
     return gpu.SubmitAndWait(commands);
 }
 
@@ -1013,6 +1192,7 @@ void Runtime::ReloadNow()
     SavePipelineCache();
     effects.clear();
     techniques.clear();
+    sharedTextures.clear();
     textureFilesScanned = false;
     compiledWidth = width;
     compiledHeight = height;
@@ -1037,7 +1217,7 @@ void Runtime::ReloadNow()
             // Presets name effects by file, so the first file of a name wins, as in ReShade.
             if (!seen.insert(Lowercase(file)).second)
                 continue;
-            CompileJob job{ it->path(), {} };
+            CompileJob job{ it->path(), {}, used.count(Lowercase(file)) != 0 };
             // The first definition of a name wins, so the effect's own come first.
             if (const auto found = presetDefinitions.effects.find(file); found != presetDefinitions.effects.end())
                 job.definitions = found->second;
@@ -1046,9 +1226,7 @@ void Runtime::ReloadNow()
             jobs.push_back(std::move(job));
         }
     }
-    std::stable_sort(jobs.begin(), jobs.end(), [&used](const CompileJob& a, const CompileJob& b) {
-        return used.count(Lowercase(a.path.filename().string())) > used.count(Lowercase(b.path.filename().string()));
-    });
+    std::stable_sort(jobs.begin(), jobs.end(), [](const CompileJob& a, const CompileJob& b) { return a.decode > b.decode; });
 
     CompileOptions options;
     options.width = width;
@@ -1070,8 +1248,9 @@ void Runtime::ReloadNow()
     loaderRunning = true;
     summaryPending = true;
     Loader& loader = *loaders.emplace_back(std::make_unique<Loader>());
-    loader.thread = std::thread([this, &loader, jobs = std::move(jobs), options, current] {
+    loader.thread = std::thread([this, &loader, jobs = std::move(jobs), options, texturePaths = settings.texturePaths, current] {
         const auto cancelled = [this, current] { return generation != current; };
+        const TextureIndex textureIndex = ScanTextures(texturePaths);
         std::atomic<size_t> next = 0;
         std::vector<std::thread> workers;
         const unsigned count = std::max(1u, std::min(std::thread::hardware_concurrency(), 8u));
@@ -1081,6 +1260,8 @@ void Runtime::ReloadNow()
                 {
                     Effect effect;
                     CompileEffect(effect, jobs[index].path, jobs[index].definitions, options, cancelled);
+                    if (effect.compiled && jobs[index].decode)
+                        DecodeImages(effect, textureIndex, cancelled);
                     std::lock_guard lock(finishedMutex);
                     if (cancelled())
                         return;
@@ -1133,6 +1314,7 @@ void Runtime::Update()
         for (const std::string& missing : MissingTechniques())
             Report(LogLevel::Warning, "The preset uses %s, which is not installed.", missing.c_str());
     }
+    PrepareEffects(kPrepareBudget);
 }
 
 void Runtime::AddEffect(Effect&& effect)
@@ -1148,6 +1330,7 @@ void Runtime::AddEffect(Effect&& effect)
     Effect& added = effects.back();
     if (!added.compiled)
         return;
+    ShareTextures(added, index);
     for (size_t i = 0; i < added.module.techniques.size(); ++i)
     {
         const reshadefx::technique& declared = added.module.techniques[i];
@@ -1164,8 +1347,55 @@ void Runtime::AddEffect(Effect&& effect)
     ApplyPreset(added, index);
 }
 
-// Presets list the techniques that are on and, optionally, the order of all of them. Techniques neither lists
-// keep their file's order and otherwise go by name, as in ReShade.
+// Textures of the same name are one texture in every effect that declares them alike, and pooled ones are shared
+// with another effect's of the same kind, as in ReShade. Either way it is made for every use any of them has.
+void Runtime::ShareTextures(Effect& effect, size_t index)
+{
+    for (const reshadefx::texture& texture : effect.module.textures)
+    {
+        if (!texture.semantic.empty())
+            continue;
+        const std::string source = AnnotationString(texture.annotations, "source");
+        const bool pooled = AnnotationInt(texture.annotations, "pooled", 0) != 0;
+        const auto alike = [&](const SharedTexture& shared) {
+            const reshadefx::texture_desc& desc = shared.desc;
+            return desc.width == texture.width && desc.height == texture.height && desc.depth == texture.depth && desc.levels == texture.levels &&
+                   desc.format == texture.format && desc.type == texture.type && shared.source == source;
+        };
+        std::string key = texture.unique_name;
+        auto found = sharedTextures.find(key);
+        if (found != sharedTextures.end() && !alike(found->second))
+        {
+            // Another effect has a texture of the same name that differs, so this one gets its own.
+            key += "@" + effect.file;
+            found = sharedTextures.find(key);
+        }
+        if (found == sharedTextures.end() && pooled)
+            found = std::find_if(sharedTextures.begin(), sharedTextures.end(), [&](const auto& entry) {
+                const SharedTexture& shared = entry.second;
+                return shared.pooled && alike(shared) && std::find(shared.users.begin(), shared.users.end(), index) == shared.users.end();
+            });
+        if (found == sharedTextures.end())
+        {
+            found = sharedTextures.emplace(key, SharedTexture{}).first;
+            found->second.desc = texture;
+            found->second.source = source;
+            found->second.pooled = pooled;
+        }
+        SharedTexture& shared = found->second;
+        shared.renderTarget |= texture.render_target;
+        shared.storage |= texture.storage_access;
+        if (std::find(shared.users.begin(), shared.users.end(), index) == shared.users.end())
+            shared.users.push_back(index);
+        effect.textures[texture.unique_name] = found->first;
+        // Images decoded with the effect wait for the texture to be made.
+        if (const auto image = effect.images.find(texture.unique_name); image != effect.images.end() && !shared.image.image &&
+                                                                         shared.loaded.pixels.empty() && shared.loaded.error.empty())
+            shared.loaded = std::move(image->second);
+    }
+    effect.images.clear();
+}
+
 void Runtime::SortTechniques()
 {
     const auto rank = [this](const Technique& technique) {
@@ -1596,7 +1826,8 @@ VkSampler Runtime::Sampler(const reshadefx::sampler_desc& desc)
     info.maxLod = std::clamp(desc.max_lod, info.minLod, 1000.0f);
     info.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
     VkSampler sampler = VK_NULL_HANDLE;
-    vkCreateSampler(gpu.device, &info, nullptr, &sampler);
+    if (vkCreateSampler(gpu.device, &info, nullptr, &sampler) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
     samplers.emplace_back(std::move(key), sampler);
     return sampler;
 }
@@ -1605,27 +1836,60 @@ fs::path Runtime::FindTexture(const std::string& source)
 {
     if (!textureFilesScanned)
     {
-        textureFiles.clear();
-        for (const fs::path& root : settings.texturePaths)
-        {
-            std::error_code error;
-            for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, error), end; it != end; it.increment(error))
-                if (!error && it->is_regular_file(error))
-                    textureFiles.emplace_back(Lowercase(it->path().lexically_relative(root).generic_string()), it->path());
-        }
+        textureFiles = ScanTextures(settings.texturePaths);
         textureFilesScanned = true;
     }
-    std::string wanted = Lowercase(source);
-    std::replace(wanted.begin(), wanted.end(), '\\', '/');
-    for (const auto& [relative, path] : textureFiles)
-        if (relative == wanted)
-            return path;
-    // Effects in subfolders often name textures without the folder they are in.
-    const std::string name = fs::path(wanted).filename().string();
-    for (const auto& [relative, path] : textureFiles)
-        if (fs::path(relative).filename() == name)
-            return path;
-    return {};
+    return FindTextureIn(textureFiles, source);
+}
+
+VkCommandBuffer Runtime::SetupCommands()
+{
+    if (!setup.commands)
+        setup.commands = gpu.BeginCommands();
+    return setup.commands;
+}
+
+// Submits what was recorded for new textures without waiting. Frames are submitted later on the same queue and
+// start with a barrier, which orders them after it.
+void Runtime::SubmitSetup()
+{
+    if (!setup.commands)
+        return;
+    VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &setup.commands;
+    VkResult result = vkEndCommandBuffer(setup.commands);
+    if (result == VK_SUCCESS)
+        result = vkCreateFence(gpu.device, &fenceInfo, nullptr, &setup.fence);
+    if (result == VK_SUCCESS)
+        result = vkQueueSubmit(gpu.queue, 1, &submit, setup.fence);
+    setups.push_back(std::move(setup));
+    setup = {};
+    if (result == VK_SUCCESS)
+        return;
+    // The new textures never got their first layout, so no effect may use them.
+    if (result == VK_ERROR_DEVICE_LOST)
+        gpu.ReportLost();
+    else
+        Report(LogLevel::Warning, "The graphics card could not prepare effects (Vulkan error %d).", result);
+    DestroyAllGpu();
+    for (Effect& effect : effects)
+        effect.gpuFailed = effect.compiled;
+}
+
+void Runtime::ReleaseSetups(bool wait)
+{
+    std::erase_if(setups, [wait](Setup& done) {
+        if (!wait && done.fence && vkGetFenceStatus(gpu.device, done.fence) == VK_NOT_READY)
+            return false;
+        if (done.fence)
+            vkDestroyFence(gpu.device, done.fence, nullptr);
+        vkFreeCommandBuffers(gpu.device, gpu.commandPool, 1, &done.commands);
+        for (GpuBuffer& buffer : done.buffers)
+            gpu.DestroyBuffer(buffer);
+        return true;
+    });
 }
 
 GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
@@ -1637,37 +1901,32 @@ GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
     if (!texture.semantic.empty())
         return &blank;
 
-    std::string key = texture.unique_name;
-    if (const auto found = sharedTextures.find(key); found != sharedTextures.end())
-    {
-        const reshadefx::texture_desc& desc = found->second.desc;
-        if (desc.width == texture.width && desc.height == texture.height && desc.depth == texture.depth && desc.levels == texture.levels &&
-            desc.format == texture.format && desc.type == texture.type)
-            return &found->second.image;
-        // Another effect has a texture of the same name that differs, so this one gets its own.
-        key += "@" + effect.file;
-        if (const auto own = sharedTextures.find(key); own != sharedTextures.end())
-            return &own->second.image;
-    }
+    const auto key = effect.textures.find(texture.unique_name);
+    const auto found = key == effect.textures.end() ? sharedTextures.end() : sharedTextures.find(key->second);
+    if (found == sharedTextures.end())
+        return nullptr;
+    SharedTexture& shared = found->second;
+    GpuImage& image = shared.image;
+    if (image.image && (!shared.renderTarget || image.target) && (!shared.storage || !image.storage.empty()))
+        return &image;
 
-    const VkFormat format = TextureFormat(texture.format);
-    const VkImageType type = texture.type == reshadefx::texture_type::texture_1d ? VK_IMAGE_TYPE_1D
-                           : texture.type == reshadefx::texture_type::texture_3d ? VK_IMAGE_TYPE_3D
-                                                                                 : VK_IMAGE_TYPE_2D;
+    const reshadefx::texture_desc& desc = shared.desc;
+    const VkFormat format = TextureFormat(desc.format);
+    const VkImageType type = ImageType(desc.type);
     // Render targets are 2D in ReShade too.
-    if (format == VK_FORMAT_UNDEFINED || (texture.render_target && type != VK_IMAGE_TYPE_2D))
+    if (format == VK_FORMAT_UNDEFINED || (shared.renderTarget && type != VK_IMAGE_TYPE_2D))
     {
         Log(LogLevel::Warning, "%s: texture %s has a format or shape the host does not support.", effect.file.c_str(), texture.name.c_str());
         return nullptr;
     }
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VkFormatFeatureFlags features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-    if (texture.render_target)
+    if (shared.renderTarget)
     {
         usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         features |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
     }
-    if (texture.storage_access)
+    if (shared.storage)
     {
         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         features |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
@@ -1678,74 +1937,77 @@ GpuImage* Runtime::Texture(const reshadefx::texture& texture, Effect& effect)
         return nullptr;
     }
 
-    SharedTexture& shared = sharedTextures[key];
-    shared.desc = texture;
-    const uint32_t levels = std::max<uint32_t>(1, texture.levels);
-    if (!gpu.CreateImage(shared.image, texture.width, texture.height, levels, format, usage, type, texture.depth))
+    if (image.image)
     {
-        sharedTextures.erase(key);
+        // An effect that came later uses the texture in a new way, so it is made again for every use, as ReShade
+        // does. The effects that use it already make their objects again too.
+        SubmitSetup();
+        vkDeviceWaitIdle(gpu.device);
+        ReleaseSetups(true);
+        for (size_t user : shared.users)
+            if (&effects[user] != &effect)
+                DestroyGpu(effects[user]);
+        gpu.DestroyImage(image);
+        texturesRemade = true;
+    }
+
+    const uint32_t levels = std::max<uint32_t>(1, desc.levels);
+    VkCommandBuffer commands = SetupCommands();
+    if (!commands || !gpu.CreateImage(image, desc.width, desc.height, levels, format, usage, type, desc.depth))
+    {
+        gpu.DestroyImage(image);
         Log(LogLevel::Warning, "%s: could not create texture %s.", effect.file.c_str(), texture.name.c_str());
         return nullptr;
     }
-
-    VkCommandBuffer commands = gpu.BeginCommands();
-    InitLayout(commands, shared.image);
+    InitLayout(commands, image);
     const VkClearColorValue zero{};
     const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1 };
-    vkCmdClearColorImage(commands, shared.image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+    vkCmdClearColorImage(commands, image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+    if (shared.source.empty())
+        return &image;
 
+    // Decoded before, unless the texture is made again for another use.
+    TextureImage loaded = std::move(shared.loaded);
+    shared.loaded = {};
+    if (loaded.pixels.empty() && loaded.error.empty())
+        loaded = DecodeTexture(desc, FindTexture(shared.source));
     GpuBuffer upload;
-    for (const reshadefx::annotation& annotation : texture.annotations)
+    if (!loaded.error.empty())
+        Log(LogLevel::Warning, "%s: could not load %s into texture %s: %s.", effect.file.c_str(), shared.source.c_str(), texture.name.c_str(),
+            loaded.error.c_str());
+    else if (gpu.CreateBuffer(upload, loaded.pixels.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true))
     {
-        if (annotation.name != "source" || annotation.type.base != reshadefx::type::t_string || type != VK_IMAGE_TYPE_2D)
-            continue;
-        const fs::path file = FindTexture(annotation.value.string_data);
-        int w = 0, h = 0, channels = 0;
-        stbi_uc* pixels = file.empty() ? nullptr : stbi_load(file.c_str(), &w, &h, &channels, 4);
-        if (!pixels)
-        {
-            Log(LogLevel::Warning, "%s: could not load texture %s.", effect.file.c_str(), annotation.value.string_data.c_str());
-            break;
-        }
-        // Resized to the size the effect declares, like ReShade does.
-        const uint32_t tw = texture.width, th = texture.height;
-        const uint32_t pixelSize = texture.format == reshadefx::texture_format::r8 ? 1 : texture.format == reshadefx::texture_format::rg8 ? 2 : 4;
-        if (texture.format != reshadefx::texture_format::rgba8 && pixelSize == 4)
-        {
-            Log(LogLevel::Warning, "%s: texture %s must be RGBA8 to load an image.", effect.file.c_str(), texture.name.c_str());
-            stbi_image_free(pixels);
-            break;
-        }
-        std::vector<uint8_t> data(size_t(tw) * th * pixelSize);
-        for (uint32_t y = 0; y < th; ++y)
-            for (uint32_t x = 0; x < tw; ++x)
-            {
-                const uint32_t sx = std::min<uint32_t>(x * w / tw, w - 1), sy = std::min<uint32_t>(y * h / th, h - 1);
-                std::memcpy(&data[(size_t(y) * tw + x) * pixelSize], &pixels[(size_t(sy) * w + sx) * 4], pixelSize);
-            }
-        stbi_image_free(pixels);
-        if (!gpu.CreateBuffer(upload, data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true))
-            break;
-        std::memcpy(upload.mapped, data.data(), data.size());
+        std::memcpy(upload.mapped, loaded.pixels.data(), loaded.pixels.size());
         FullBarrier(commands);
         VkBufferImageCopy copy{};
         copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copy.imageExtent = { tw, th, 1 };
-        vkCmdCopyBufferToImage(commands, upload.buffer, shared.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        copy.imageExtent = { image.width, image.height, image.depth };
+        vkCmdCopyBufferToImage(commands, upload.buffer, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
         FullBarrier(commands);
-        GenerateMipmaps(commands, shared.image);
-        break;
+        GenerateMipmaps(commands, image);
+        setup.buffers.push_back(upload);
     }
-    gpu.SubmitAndWait(commands);
-    gpu.DestroyBuffer(upload);
-    return &shared.image;
+    return &image;
 }
 
 void Runtime::GenerateMipmaps(VkCommandBuffer commands, const GpuImage& image)
 {
-    if (image.levels <= 1 || !gpu.Supports(image.format, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
-                                                              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+    if (image.levels <= 1)
         return;
+    // Formats that cannot be filtered, such as integer ones, scale by picking pixels instead. Those that cannot
+    // be scaled at all keep empty mipmaps.
+    VkFilter filter = VK_FILTER_LINEAR;
+    if (!gpu.Supports(image.format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+        filter = VK_FILTER_NEAREST;
+    if (!gpu.Supports(image.format, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT))
+    {
+        if (std::find(mipmapWarnings.begin(), mipmapWarnings.end(), image.format) == mipmapWarnings.end())
+        {
+            mipmapWarnings.push_back(image.format);
+            Log(LogLevel::Warning, "The graphics card cannot make mipmaps of format %d, so effects see them empty.", image.format);
+        }
+        return;
+    }
     for (uint32_t level = 1; level < image.levels; ++level)
     {
         VkImageBlit blit{};
@@ -1754,7 +2016,7 @@ void Runtime::GenerateMipmaps(VkCommandBuffer commands, const GpuImage& image)
                                std::max(1, int(image.depth >> (level - 1))) };
         blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 };
         blit.dstOffsets[1] = { std::max(1, int(image.width >> level)), std::max(1, int(image.height >> level)), std::max(1, int(image.depth >> level)) };
-        vkCmdBlitImage(commands, image.image, VK_IMAGE_LAYOUT_GENERAL, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
+        vkCmdBlitImage(commands, image.image, VK_IMAGE_LAYOUT_GENERAL, image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, filter);
         FullBarrier(commands);
     }
 }
@@ -1803,7 +2065,8 @@ bool Runtime::CreateGpu(Effect& effect)
     poolInfo.maxSets = std::max(1u, passCount * 3);
     poolInfo.poolSizeCount = static_cast<uint32_t>(sizes.size());
     poolInfo.pPoolSizes = sizes.data();
-    vkCreateDescriptorPool(gpu.device, &poolInfo, nullptr, &g.pool);
+    if (vkCreateDescriptorPool(gpu.device, &poolInfo, nullptr, &g.pool) != VK_SUCCESS)
+        return fail("out of descriptors", effect.file);
 
     const auto findTexture = [&module](const std::string& uniqueName) -> const reshadefx::texture* {
         for (const reshadefx::texture& texture : module.textures)
@@ -1814,6 +2077,8 @@ bool Runtime::CreateGpu(Effect& effect)
 
     g.techniques.resize(module.techniques.size());
     for (size_t t = 0; t < module.techniques.size(); ++t)
+    {
+        bool stencilCleared = false;
         for (const reshadefx::pass& pass : module.techniques[t].passes)
         {
             PassGpu& p = g.techniques[t].emplace_back();
@@ -1850,7 +2115,7 @@ bool Runtime::CreateGpu(Effect& effect)
                         }
                         else if (texture)
                             image = Texture(*texture, effect);
-                        if (!image || image == &blank || image == &depth)
+                        if (!image || image == &blank || image == &depth || !image->target)
                             return fail("a render target is missing", where);
                     }
                     targets.push_back(image);
@@ -1877,12 +2142,14 @@ bool Runtime::CreateGpu(Effect& effect)
                 VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
                 layoutInfo.bindingCount = static_cast<uint32_t>(bindings[set].size());
                 layoutInfo.pBindings = bindings[set].data();
-                vkCreateDescriptorSetLayout(gpu.device, &layoutInfo, nullptr, &p.setLayouts[set]);
+                if (vkCreateDescriptorSetLayout(gpu.device, &layoutInfo, nullptr, &p.setLayouts[set]) != VK_SUCCESS)
+                    return fail("out of memory", where);
             }
             VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
             layoutInfo.setLayoutCount = 3;
             layoutInfo.pSetLayouts = p.setLayouts;
-            vkCreatePipelineLayout(gpu.device, &layoutInfo, nullptr, &p.layout);
+            if (vkCreatePipelineLayout(gpu.device, &layoutInfo, nullptr, &p.layout) != VK_SUCCESS)
+                return fail("out of memory", where);
 
             VkDescriptorSetAllocateInfo allocation{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
             allocation.descriptorPool = g.pool;
@@ -1915,6 +2182,8 @@ bool Runtime::CreateGpu(Effect& effect)
                     image = &blank;
                 VkDescriptorImageInfo info{};
                 info.sampler = Sampler(sampler);
+                if (!info.sampler)
+                    return fail("out of samplers", where);
                 info.imageView = binding.srgb ? image->srgbView : image->view;
                 info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 images.push_back(info);
@@ -1967,8 +2236,28 @@ bool Runtime::CreateGpu(Effect& effect)
                 continue;
             }
 
+            VkFramebufferCreateInfo framebufferInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            framebufferInfo.width = p.extent.width;
+            framebufferInfo.height = p.extent.height;
+            framebufferInfo.layers = 1;
+            for (const GpuImage* target : targets)
+            {
+                framebufferInfo.width = std::min(framebufferInfo.width, target->width);
+                framebufferInfo.height = std::min(framebufferInfo.height, target->height);
+            }
+            const VkViewport viewport{ 0, 0, float(pass.viewport_width ? pass.viewport_width : framebufferInfo.width),
+                                       float(pass.viewport_height ? pass.viewport_height : framebufferInfo.height), 0, 1 };
+
+            // Passes as big as the picture use the stencil, as in ReShade, and the first of a technique clears it.
             if (pass.stencil_enable)
-                Log(LogLevel::Info, "%s (%s) uses stencil, which the host ignores.", effect.file.c_str(), where.c_str());
+            {
+                p.stencil = stencil.image && viewport.width == float(width) && viewport.height == float(height) &&
+                            framebufferInfo.width == width && framebufferInfo.height == height;
+                p.clearStencil = p.stencil && !stencilCleared;
+                stencilCleared |= p.stencil;
+                if (!stencil.image)
+                    Log(LogLevel::Info, "%s (%s) uses stencil, which the graphics card does not have.", effect.file.c_str(), where.c_str());
+            }
 
             std::vector<VkAttachmentDescription> attachments;
             std::vector<VkAttachmentReference> references;
@@ -1986,30 +2275,39 @@ bool Runtime::CreateGpu(Effect& effect)
                 attachments.push_back(attachment);
                 references.push_back({ i, VK_IMAGE_LAYOUT_GENERAL });
             }
+            const VkAttachmentReference stencilReference{ p.targetCount, VK_IMAGE_LAYOUT_GENERAL };
+            if (p.stencil)
+            {
+                VkAttachmentDescription attachment{};
+                attachment.format = stencilFormat;
+                attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+                attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                attachment.stencilLoadOp = p.clearStencil ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+                attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+                attachment.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+                attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+                attachments.push_back(attachment);
+                targetViews.push_back(stencil.target);
+            }
             VkSubpassDescription subpass{};
             subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
             subpass.colorAttachmentCount = p.targetCount;
             subpass.pColorAttachments = references.data();
+            subpass.pDepthStencilAttachment = p.stencil ? &stencilReference : nullptr;
             VkRenderPassCreateInfo passInfo{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
-            passInfo.attachmentCount = p.targetCount;
+            passInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
             passInfo.pAttachments = attachments.data();
             passInfo.subpassCount = 1;
             passInfo.pSubpasses = &subpass;
-            vkCreateRenderPass(gpu.device, &passInfo, nullptr, &p.renderPass);
+            if (vkCreateRenderPass(gpu.device, &passInfo, nullptr, &p.renderPass) != VK_SUCCESS)
+                return fail("out of memory", where);
 
-            VkFramebufferCreateInfo framebufferInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
             framebufferInfo.renderPass = p.renderPass;
-            framebufferInfo.attachmentCount = p.targetCount;
+            framebufferInfo.attachmentCount = static_cast<uint32_t>(targetViews.size());
             framebufferInfo.pAttachments = targetViews.data();
-            framebufferInfo.width = p.extent.width;
-            framebufferInfo.height = p.extent.height;
-            framebufferInfo.layers = 1;
-            for (const GpuImage* target : targets)
-            {
-                framebufferInfo.width = std::min(framebufferInfo.width, target->width);
-                framebufferInfo.height = std::min(framebufferInfo.height, target->height);
-            }
-            vkCreateFramebuffer(gpu.device, &framebufferInfo, nullptr, &p.framebuffer);
+            if (vkCreateFramebuffer(gpu.device, &framebufferInfo, nullptr, &p.framebuffer) != VK_SUCCESS)
+                return fail("out of memory", where);
 
             const auto vs = g.modules.find(pass.vs_entry_point);
             const auto ps = pass.ps_entry_point.empty() ? g.modules.end() : g.modules.find(pass.ps_entry_point);
@@ -2033,8 +2331,6 @@ bool Runtime::CreateGpu(Effect& effect)
             VkPipelineVertexInputStateCreateInfo vertexInput{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
             VkPipelineInputAssemblyStateCreateInfo assembly{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
             assembly.topology = Topology(pass.topology);
-            const VkViewport viewport{ 0, 0, float(pass.viewport_width ? pass.viewport_width : framebufferInfo.width),
-                                       float(pass.viewport_height ? pass.viewport_height : framebufferInfo.height), 0, 1 };
             const VkRect2D scissor{ { 0, 0 }, { framebufferInfo.width, framebufferInfo.height } };
             VkPipelineViewportStateCreateInfo viewportState{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
             viewportState.viewportCount = 1;
@@ -2064,6 +2360,14 @@ bool Runtime::CreateGpu(Effect& effect)
             VkPipelineColorBlendStateCreateInfo blend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
             blend.attachmentCount = p.targetCount;
             blend.pAttachments = blends;
+            // Depth is never tested: only the stencil part of the attachment is used.
+            VkPipelineDepthStencilStateCreateInfo depthStencil{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+            depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+            depthStencil.stencilTestEnable = VK_TRUE;
+            depthStencil.front = { StencilOp(pass.stencil_fail_op), StencilOp(pass.stencil_pass_op), StencilOp(pass.stencil_depth_fail_op),
+                                   CompareOp(pass.stencil_comparison_func), pass.stencil_read_mask, pass.stencil_write_mask,
+                                   pass.stencil_reference_value };
+            depthStencil.back = depthStencil.front;
 
             VkGraphicsPipelineCreateInfo info{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
             info.stageCount = stageCount;
@@ -2073,16 +2377,60 @@ bool Runtime::CreateGpu(Effect& effect)
             info.pViewportState = &viewportState;
             info.pRasterizationState = &raster;
             info.pMultisampleState = &multisample;
+            info.pDepthStencilState = p.stencil ? &depthStencil : nullptr;
             info.pColorBlendState = &blend;
             info.layout = p.layout;
             info.renderPass = p.renderPass;
             if (vkCreateGraphicsPipelines(gpu.device, pipelineCache, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
                 return fail("the graphics card rejected a shader", where);
         }
+    }
 
     effect.gpu = std::move(result);
     Log(LogLevel::Info, "%s is ready.", effect.file.c_str());
     return true;
+}
+
+// Whether the images the effect's textures load are decoded. Those of effects the preset did not use when they
+// compiled are decoded on a thread of their own, and the effect waits for them.
+bool Runtime::ImagesReady(Effect& effect)
+{
+    bool ready = true;
+    for (const auto& [name, key] : effect.textures)
+    {
+        SharedTexture& shared = sharedTextures.at(key);
+        if (shared.source.empty() || shared.image.image || !shared.loaded.pixels.empty() || !shared.loaded.error.empty())
+            continue;
+        if (!shared.decoding.valid())
+        {
+            std::packaged_task<TextureImage()> task([desc = shared.desc, file = FindTexture(shared.source)] { return DecodeTexture(desc, file); });
+            shared.decoding = task.get_future();
+            std::thread(std::move(task)).detach();
+        }
+        if (shared.decoding.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            shared.loaded = shared.decoding.get();
+        else
+            ready = false;
+    }
+    return ready;
+}
+
+// Prepares the effects that are on outside the frame, as far as the time allows.
+void Runtime::PrepareEffects(std::chrono::steady_clock::duration budget)
+{
+    if (!width || !height || resizePending || gpu.lost)
+        return;
+    const auto start = std::chrono::steady_clock::now();
+    for (const Technique& technique : techniques)
+    {
+        Effect& effect = effects[technique.effect];
+        if (!technique.enabled || !effect.compiled || effect.gpu || effect.gpuFailed || !ImagesReady(effect))
+            continue;
+        if (std::chrono::steady_clock::now() - start > budget)
+            break;
+        CreateGpu(effect);
+    }
+    SubmitSetup();
 }
 
 void Runtime::DestroyGpu(Effect& effect)
@@ -2108,11 +2456,20 @@ void Runtime::DestroyGpu(Effect& effect)
     effect.gpu.reset();
 }
 
+// Keeps which effects share which texture, which the effects' own data refers to.
 void Runtime::DestroyAllGpu()
 {
     if (!gpu.device)
         return;
+    // Commands not submitted yet only prepare the textures destroyed here, so they are dropped.
+    if (setup.commands)
+    {
+        vkEndCommandBuffer(setup.commands);
+        setups.push_back(std::move(setup));
+        setup = {};
+    }
     vkDeviceWaitIdle(gpu.device);
+    ReleaseSetups(true);
     for (Effect& effect : effects)
     {
         DestroyGpu(effect);
@@ -2120,7 +2477,6 @@ void Runtime::DestroyAllGpu()
     }
     for (auto& [name, texture] : sharedTextures)
         gpu.DestroyImage(texture.image);
-    sharedTextures.clear();
 }
 
 // Rendering
@@ -2164,12 +2520,13 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
 {
     if (!width || !height)
         return;
+    ReleaseSetups(false);
     FullBarrier(commands);
     if (source.image)
         // Straight from the capture on the graphics card. Alpha is whatever the window has, as in games where
         // ReShade runs.
         CopySource(commands, source, backbuffer.image, width, height);
-    else
+    else if (source.pixels && staging.mapped)
     {
         std::memcpy(staging.mapped, source.pixels, size_t(width) * height * 4);
         VkBufferImageCopy copy{};
@@ -2187,15 +2544,30 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
     if (!enabled || resizePending)
         return;
 
+    const auto runs = [this](const Technique& technique) {
+        const Effect& effect = effects[technique.effect];
+        return technique.enabled && effect.compiled && !effect.gpuFailed;
+    };
+    // Every effect that runs is prepared before any pass is recorded, since preparing one can make a texture it
+    // shares again, and with it the effects that already use it.
+    for (int round = 0; round < 3; ++round)
+    {
+        texturesRemade = false;
+        for (const Technique& technique : techniques)
+            if (runs(technique) && !effects[technique.effect].gpu && ImagesReady(effects[technique.effect]))
+                CreateGpu(effects[technique.effect]);
+        if (!texturesRemade)
+            break;
+    }
+    SubmitSetup();
+
     bool colorStale = true;
     for (const Technique& technique : techniques)
     {
-        if (!technique.enabled)
+        if (!runs(technique))
             continue;
         Effect& effect = effects[technique.effect];
-        if (!effect.compiled || effect.gpuFailed)
-            continue;
-        if (!effect.gpu && !CreateGpu(effect))
+        if (!effect.gpu)
             continue;
         EffectGpu& g = *effect.gpu;
         if (g.updatedFrame != frameCount)
@@ -2225,12 +2597,13 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
                 vkCmdDispatch(commands, p.dispatch[0], p.dispatch[1], p.dispatch[2]);
             else
             {
-                VkClearValue clears[8]{};
+                // Clear values for the targets, then the stencil, which clears to zero.
+                VkClearValue clears[9]{};
                 VkRenderPassBeginInfo begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
                 begin.renderPass = p.renderPass;
                 begin.framebuffer = p.framebuffer;
                 begin.renderArea.extent = p.extent;
-                begin.clearValueCount = p.clear ? p.targetCount : 0;
+                begin.clearValueCount = p.clearStencil ? p.targetCount + 1 : p.clear ? p.targetCount : 0;
                 begin.pClearValues = clears;
                 vkCmdBeginRenderPass(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
                 vkCmdDraw(commands, p.vertices, 1, 0, 0);

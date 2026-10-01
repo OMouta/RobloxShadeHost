@@ -10,6 +10,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -57,6 +58,13 @@ struct Technique
 
 struct EffectGpu;
 
+// An image a texture loads from its source annotation, decoded and sized for it.
+struct TextureImage
+{
+    std::vector<uint8_t> pixels; // every level after the first is made on the graphics card
+    std::string error;
+};
+
 struct Effect
 {
     std::filesystem::path path;
@@ -68,6 +76,8 @@ struct Effect
     std::unordered_map<std::string, std::vector<uint32_t>> spirv; // SPIR-V code by entry point
     std::vector<Uniform> uniforms;
     std::vector<uint8_t> uniformData;
+    std::unordered_map<std::string, TextureImage> images; // by texture, decoded while the effect compiled
+    std::unordered_map<std::string, std::string> textures; // the shared texture each of its textures uses
     std::shared_ptr<EffectGpu> gpu;
     bool gpuFailed = false;
 
@@ -153,7 +163,7 @@ public:
     bool Loading() const { return loaderRunning || reloadRequested || resizePending; }
     // How many effect files are compiled out of how many were found.
     std::pair<size_t, size_t> LoadingProgress() const { return { loadedCount.load(), totalCount.load() }; }
-    // Takes in compiled effects. Call once per frame on the main thread.
+    // Takes in compiled effects and prepares the ones that are on. Call once per frame on the main thread.
     void Update();
 
     // The game's picture: pixels in memory, or the part at (x, y) of an image on the graphics card, in
@@ -208,10 +218,27 @@ public:
     EffectInput input;
 
 private:
+    // A texture effects share by name, or through the pooled annotation, as in ReShade. It is made with every
+    // use any of them has for it.
     struct SharedTexture
     {
         GpuImage image;
         reshadefx::texture_desc desc;
+        std::string source; // the image it loads
+        bool renderTarget = false;
+        bool storage = false;
+        bool pooled = false;
+        std::vector<size_t> users; // effects
+        TextureImage loaded;       // decoded and waiting to be uploaded
+        std::future<TextureImage> decoding;
+    };
+
+    // Uploads and first layouts, recorded outside the frame and submitted together.
+    struct Setup
+    {
+        VkCommandBuffer commands = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        std::vector<GpuBuffer> buffers;
     };
 
     struct Loader
@@ -224,9 +251,12 @@ private:
     void JoinLoaders(bool wait);
     void ReloadNow();
     void AddEffect(Effect&& effect);
+    void ShareTextures(Effect& effect, size_t index);
     void SortTechniques();
     void ApplyPreset(Effect& effect, size_t effectIndex);
+    bool ImagesReady(Effect& effect);
     bool CreateGpu(Effect& effect);
+    void PrepareEffects(std::chrono::steady_clock::duration budget);
     void DestroyGpu(Effect& effect);
     void DestroyAllGpu();
     bool CreateTargets();
@@ -235,6 +265,9 @@ private:
     GpuImage* Texture(const reshadefx::texture& texture, Effect& effect);
     fs::path FindTexture(const std::string& source);
     void GenerateMipmaps(VkCommandBuffer commands, const GpuImage& image);
+    VkCommandBuffer SetupCommands();
+    void SubmitSetup();
+    void ReleaseSetups(bool wait);
     void SavePipelineCache();
     std::vector<uint8_t> ReadImage(VkImage image, uint32_t x, uint32_t y, bool foreign);
 
@@ -251,6 +284,8 @@ private:
     GpuImage color;      // a copy of backbuffer, which effects read as COLOR
     GpuImage depth;      // effects read DEPTH from here, which stays empty: the game's depth is out of reach
     GpuImage blank;      // bound where an effect reads a texture it is writing in the same pass
+    GpuImage stencil;    // the size of backbuffer, for passes that use stencil
+    VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
     GpuBuffer staging;
     GpuBuffer readback;
     VkPipelineCache pipelineCache = VK_NULL_HANDLE;
@@ -258,6 +293,10 @@ private:
     std::vector<std::pair<std::vector<uint8_t>, VkSampler>> samplers;
     std::vector<std::pair<std::string, fs::path>> textureFiles; // lowercase relative path, full path
     bool textureFilesScanned = false;
+    Setup setup;
+    std::vector<Setup> setups; // submitted, until the graphics card is done with them
+    bool texturesRemade = false;
+    std::vector<VkFormat> mipmapWarnings;
 
     std::vector<Effect> effects;
     std::vector<Technique> techniques;

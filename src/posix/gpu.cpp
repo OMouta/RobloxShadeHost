@@ -269,6 +269,25 @@ bool Gpu::Supports(VkFormat format, VkFormatFeatureFlags features) const
     return (props.optimalTilingFeatures & features) == features;
 }
 
+VkImageAspectFlags Aspects(VkFormat format)
+{
+    switch (format)
+    {
+    case VK_FORMAT_S8_UINT:
+        return VK_IMAGE_ASPECT_STENCIL_BIT;
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    case VK_FORMAT_D16_UNORM:
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_D32_SFLOAT:
+        return VK_IMAGE_ASPECT_DEPTH_BIT;
+    default:
+        return VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+}
+
 VkFormat SrgbFormat(VkFormat format)
 {
     switch (format)
@@ -330,7 +349,7 @@ bool Gpu::CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t
         view.image = image.image;
         view.viewType = type == VK_IMAGE_TYPE_1D ? VK_IMAGE_VIEW_TYPE_1D : type == VK_IMAGE_TYPE_3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
         view.format = viewFormat;
-        view.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, base, count, 0, 1 };
+        view.subresourceRange = { Aspects(format), base, count, 0, 1 };
         VkImageViewUsageCreateInfo viewUsage{ VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO };
         // An sRGB view cannot be used for storage, which the image as a whole may allow.
         if (viewFormat != format && (usage & VK_IMAGE_USAGE_STORAGE_BIT))
@@ -347,7 +366,7 @@ bool Gpu::CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t
         return result;
     };
     const bool sampled = usage & VK_IMAGE_USAGE_SAMPLED_BIT;
-    const bool target = usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    const bool target = usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
     if (sampled)
     {
         image.view = makeView(format, 0, levels);
@@ -509,7 +528,7 @@ void InitLayout(VkCommandBuffer commands, const GpuImage& image)
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image.image;
-    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, image.levels, 0, 1 };
+    barrier.subresourceRange = { Aspects(image.format), 0, image.levels, 0, 1 };
     vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 

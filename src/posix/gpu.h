@@ -42,7 +42,8 @@ public:
     bool Init(bool headless, std::string& error);
     void Shutdown();
 
-    // Every image the host makes is kept in VK_IMAGE_LAYOUT_GENERAL, so passes need only memory barriers.
+    // Every image the host makes is kept in VK_IMAGE_LAYOUT_GENERAL, so passes need only memory barriers. Depth
+    // and stencil formats make depth-stencil attachments.
     bool CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage,
                      VkImageType type = VK_IMAGE_TYPE_2D, uint32_t depth = 1);
     void DestroyImage(GpuImage& image);
@@ -93,6 +94,8 @@ VkFormat SrgbFormat(VkFormat format);
 void FullBarrier(VkCommandBuffer commands);
 // Moves a fresh image into VK_IMAGE_LAYOUT_GENERAL.
 void InitLayout(VkCommandBuffer commands, const GpuImage& image);
+// The aspects of a format: color, or depth and stencil.
+VkImageAspectFlags Aspects(VkFormat format);
 
 // A window's swapchain, with one frame in flight.
 class Surface
