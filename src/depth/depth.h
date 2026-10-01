@@ -10,4 +10,8 @@ bool InitDepth();
 // Frames that arrive while an estimate is in progress are skipped.
 void UpdateDepth(ID3D11Texture2D* frame);
 
+// Releases everything depth made on the D3D11 device, after the device was lost. It is made again on the new device
+// with the next frame. The model keeps running on its own D3D12 device.
+void ReleaseDepthDevice();
+
 void ShutdownDepth();
