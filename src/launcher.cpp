@@ -538,7 +538,7 @@ void Relayout()
     ReleaseDC(g.launcher, dc);
 }
 
-// Sizes the window to its content, keeping it where it is and on screen.
+// Sizes the window to its content, keeping it where it is unless it grows past the bottom of the screen.
 void Resize()
 {
     Relayout();
@@ -551,8 +551,15 @@ void Resize()
     AdjustWindowRectExForDpi(&frame, style, FALSE, 0, dpi);
     MONITORINFO monitor{ sizeof(monitor) };
     GetMonitorInfoW(MonitorFromWindow(g.launcher, MONITOR_DEFAULTTONEAREST), &monitor);
-    const int height = std::min<int>(frame.bottom - frame.top, monitor.rcWork.bottom - monitor.rcWork.top);
-    SetWindowPos(g.launcher, nullptr, 0, 0, frame.right - frame.left, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    const RECT& work = monitor.rcWork;
+    RECT window{};
+    GetWindowRect(g.launcher, &window);
+    const int height = std::min<int>(frame.bottom - frame.top, work.bottom - work.top);
+    // Only moved when it grows, so a window placed partly off the screen on purpose stays there.
+    int top = window.top;
+    if (height > window.bottom - window.top && top + height > work.bottom)
+        top = std::max<int>(work.top, work.bottom - height);
+    SetWindowPos(g.launcher, nullptr, window.left, top, frame.right - frame.left, height, SWP_NOZORDER | SWP_NOACTIVATE);
     InvalidateRect(g.launcher, nullptr, FALSE);
 }
 
