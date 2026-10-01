@@ -339,6 +339,12 @@ UInt32 KeyCode(ImGuiKey key)
         { ImGuiKey_PageUp, kVK_PageUp }, { ImGuiKey_PageDown, kVK_PageDown }, { ImGuiKey_Space, kVK_Space }, { ImGuiKey_Tab, kVK_Tab },
         { ImGuiKey_Escape, kVK_Escape }, { ImGuiKey_LeftArrow, kVK_LeftArrow }, { ImGuiKey_RightArrow, kVK_RightArrow },
         { ImGuiKey_UpArrow, kVK_UpArrow }, { ImGuiKey_DownArrow, kVK_DownArrow },
+        { ImGuiKey_Keypad0, kVK_ANSI_Keypad0 }, { ImGuiKey_Keypad1, kVK_ANSI_Keypad1 }, { ImGuiKey_Keypad2, kVK_ANSI_Keypad2 },
+        { ImGuiKey_Keypad3, kVK_ANSI_Keypad3 }, { ImGuiKey_Keypad4, kVK_ANSI_Keypad4 }, { ImGuiKey_Keypad5, kVK_ANSI_Keypad5 },
+        { ImGuiKey_Keypad6, kVK_ANSI_Keypad6 }, { ImGuiKey_Keypad7, kVK_ANSI_Keypad7 }, { ImGuiKey_Keypad8, kVK_ANSI_Keypad8 },
+        { ImGuiKey_Keypad9, kVK_ANSI_Keypad9 }, { ImGuiKey_KeypadMultiply, kVK_ANSI_KeypadMultiply }, { ImGuiKey_KeypadAdd, kVK_ANSI_KeypadPlus },
+        { ImGuiKey_KeypadSubtract, kVK_ANSI_KeypadMinus }, { ImGuiKey_KeypadDecimal, kVK_ANSI_KeypadDecimal },
+        { ImGuiKey_KeypadDivide, kVK_ANSI_KeypadDivide },
     };
     const auto found = codes.find(key);
     return found == codes.end() ? UINT32_MAX : found->second;

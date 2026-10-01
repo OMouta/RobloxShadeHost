@@ -81,12 +81,13 @@ inline constexpr Shortcut kShortcuts[] = {
 };
 #endif
 
-// Reads "Ctrl+Shift+F8". Modifiers come first, then exactly one key: a letter, a digit, F1 to F24, an arrow or
-// one of the named keys. Win, Super, Cmd and Command all mean the same modifier, as do Alt, Option and Opt.
+// Reads "Ctrl+Shift+F8". Modifiers come first, then exactly one key: a letter, a digit, F1 to F24, an arrow, a
+// number pad key such as Numpad5 or NumpadAdd, or one of the other named keys. Win, Super, Cmd and Command all mean
+// the same modifier, as do Alt, Option and Opt.
 bool ParseHotkey(std::string_view text, Hotkey& result);
 
 // Writes a hotkey the way ParseHotkey reads it. Empty for a key ParseHotkey does not accept.
 std::string FormatHotkey(const Hotkey& hotkey);
 
-// Whether the key can be part of a shortcut, for the menu's shortcut recorder.
+// Whether this system can make the key part of a shortcut, for the menu's shortcut recorder. macOS stops at F20.
 bool IsShortcutKey(ImGuiKey key);

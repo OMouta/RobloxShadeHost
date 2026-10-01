@@ -46,6 +46,24 @@ int main()
                     "every default shortcut survives writing and reading");
     }
 
+    // Number pad keys have the same names as on Windows.
+    ok &= Check(ParseHotkey("Numpad0", hotkey) && hotkey.modifiers == 0 && hotkey.key == ImGuiKey_Keypad0, "reads Numpad0");
+    ok &= Check(ParseHotkey("ctrl+numpad9", hotkey) && hotkey.modifiers == kCtrl && hotkey.key == ImGuiKey_Keypad9, "reads number pad names without case");
+    const std::pair<const char*, ImGuiKey> numpad[] = { { "NumpadMultiply", ImGuiKey_KeypadMultiply }, { "NumpadAdd", ImGuiKey_KeypadAdd },
+                                                        { "NumpadSubtract", ImGuiKey_KeypadSubtract }, { "NumpadDecimal", ImGuiKey_KeypadDecimal },
+                                                        { "NumpadDivide", ImGuiKey_KeypadDivide }, { "Numpad5", ImGuiKey_Keypad5 } };
+    for (const auto& [name, key] : numpad)
+        ok &= Check(ParseHotkey(std::string("Shift+") + name, hotkey) && hotkey.key == key && FormatHotkey(hotkey) == std::string("Shift+") + name &&
+                        IsShortcutKey(key),
+                    "reads and writes every number pad key, which can be recorded");
+    ok &= Check(!ParseHotkey("Numpad10", hotkey) && !ParseHotkey("Numpad", hotkey) && !ParseHotkey("NumpadEnter", hotkey),
+                "rejects number pad keys Windows does not name");
+#ifdef __APPLE__
+    ok &= Check(IsShortcutKey(ImGuiKey_F20) && !IsShortcutKey(ImGuiKey_F21), "macOS records function keys up to F20");
+#else
+    ok &= Check(IsShortcutKey(ImGuiKey_F24), "records function keys up to F24");
+#endif
+
     // Presets keep keys before the first section and the order of everything else.
     const std::string text = "PreprocessorDefinitions=A=1,B\r\nTechniques=Curves@Curves.fx,LumaSharpen@LumaSharpen.fx\r\n\r\n"
                              "[Curves.fx]\r\nContrast=0.650000\r\n\r\n[LumaSharpen.fx]\r\nsharp_strength=0.800000\r\n";

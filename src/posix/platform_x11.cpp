@@ -528,6 +528,9 @@ KeySym Keysym(ImGuiKey key)
         return XK_0 + (key - ImGuiKey_0);
     if (key >= ImGuiKey_F1 && key <= ImGuiKey_F24)
         return XK_F1 + (key - ImGuiKey_F1);
+    // The number pad's digits are one key with Num Lock on or off, so the shortcut works either way.
+    if (key >= ImGuiKey_Keypad0 && key <= ImGuiKey_Keypad9)
+        return XK_KP_0 + (key - ImGuiKey_Keypad0);
     switch (key)
     {
     case ImGuiKey_Home: return XK_Home;
@@ -545,6 +548,11 @@ KeySym Keysym(ImGuiKey key)
     case ImGuiKey_RightArrow: return XK_Right;
     case ImGuiKey_UpArrow: return XK_Up;
     case ImGuiKey_DownArrow: return XK_Down;
+    case ImGuiKey_KeypadMultiply: return XK_KP_Multiply;
+    case ImGuiKey_KeypadAdd: return XK_KP_Add;
+    case ImGuiKey_KeypadSubtract: return XK_KP_Subtract;
+    case ImGuiKey_KeypadDecimal: return XK_KP_Decimal;
+    case ImGuiKey_KeypadDivide: return XK_KP_Divide;
     default: return NoSymbol;
     }
 }
