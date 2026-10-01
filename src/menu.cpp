@@ -2410,7 +2410,7 @@ void DrawFpsGraph(const FrameStatistics& stats)
     ImGui::PopFont();
 
     const auto line = [&](double FrameStatistics::Sample::*rate, ImU32 color) {
-        ImVec2 points[60];
+        ImVec2 points[FrameStatistics::kHistory];
         int count = 0;
         for (size_t i = 0; i < stats.HistorySize(); ++i)
         {
