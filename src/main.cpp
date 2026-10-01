@@ -29,6 +29,10 @@ constexpr ULONGLONG kSearchInterval = 1000;
 // A capture that fails to start is tried again after this, doubling each time up to kMaxCaptureRetry.
 constexpr ULONGLONG kFirstCaptureRetry = 2000;
 constexpr ULONGLONG kMaxCaptureRetry = 30000;
+// The same frame is shown again this often, so toasts and hints still change over a paused game.
+constexpr ULONGLONG kRepeatInterval = 100;
+// After a shortcut, frames are shown on every wake-up for this long, so what it changed shows right away.
+constexpr ULONGLONG kShortcutResponse = 1000;
 
 struct CaptureRetry
 {
@@ -43,6 +47,12 @@ struct Loop
     HWND lastForeground = nullptr;
     HWND lastTarget = nullptr;
     std::map<HWND, CaptureRetry> captureRetries;
+
+    ULONGLONG nextRepeat = 0;
+    ULONGLONG fastUntil = 0;
+    bool presentPending = false;
+    bool wasInteractive = false;
+    bool wasVisible = false;
 };
 Loop loop;
 
@@ -139,6 +149,49 @@ void SearchForGame()
         Attach(*game);
 }
 
+// Effects run on every present, so the same picture is not shown over and over: a new frame is shown when it arrives,
+// and frames are shown on every wake-up only while the menu takes input, ReShade makes effects or a shortcut was just
+// used. Otherwise the last frame is shown again every kRepeatInterval.
+void ShowFrames()
+{
+    // Only the newest frame matters. Rendering every queued frame would add latency.
+    bool fresh = false;
+    while (auto frame = g.pool.TryGetNextFrame())
+    {
+        g.latestFrame = frame;
+        fresh = true;
+    }
+
+    if (g.latestFrame)
+    {
+        SizeInt32 size = g.latestFrame.ContentSize();
+        if ((size.Width != g.poolSize.Width || size.Height != g.poolSize.Height) && size.Width > 0 && size.Height > 0)
+        {
+            g.latestFrame = nullptr;
+            g.poolSize = size;
+            g.pool.Recreate(g.captureDevice, kPixelFormat, 2, size);
+            Log(LogLevel::Info, L"%ls resized to %dx%d", g.activeGame->name.c_str(), size.Width, size.Height);
+        }
+    }
+
+    // Opening or closing a menu and showing the overlay change the picture without a new frame.
+    const bool interactive = g.editMode || ReShadeMenuOpen();
+    if (interactive != loop.wasInteractive || (g.overlayVisible && !loop.wasVisible))
+        loop.presentPending = true;
+    loop.wasInteractive = interactive;
+    loop.wasVisible = g.overlayVisible;
+    if (!g.overlayVisible || !g.latestFrame)
+        return;
+
+    const ULONGLONG now = GetTickCount64();
+    if (fresh || interactive || loop.presentPending || ReShadeLoadingEffects() || now < loop.fastUntil || now >= loop.nextRepeat)
+    {
+        PresentLatestFrame();
+        loop.presentPending = false;
+        loop.nextRepeat = now + kRepeatInterval;
+    }
+}
+
 int Run()
 {
     if (!GraphicsCaptureSession::IsSupported())
@@ -179,6 +232,8 @@ int Run()
                 DestroyLauncher();
                 return 0;
             }
+            if (msg.message == WM_HOTKEY)
+                loop.fastUntil = GetTickCount64() + kShortcutResponse;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -203,27 +258,7 @@ int Run()
         UpdateLauncher();
 
         if (g.target)
-        {
-            // Only the newest frame matters. Rendering every queued frame would add latency.
-            while (auto frame = g.pool.TryGetNextFrame())
-                g.latestFrame = frame;
-
-            if (g.latestFrame)
-            {
-                SizeInt32 size = g.latestFrame.ContentSize();
-                if ((size.Width != g.poolSize.Width || size.Height != g.poolSize.Height) && size.Width > 0 && size.Height > 0)
-                {
-                    g.latestFrame = nullptr;
-                    g.poolSize = size;
-                    g.pool.Recreate(g.captureDevice, kPixelFormat, 2, size);
-                    Log(LogLevel::Info, L"%ls resized to %dx%d", g.activeGame->name.c_str(), size.Width, size.Height);
-                }
-            }
-
-            // Also re-presents on timeout, so the menu stays responsive if the game stops drawing.
-            if (g.overlayVisible && g.latestFrame)
-                PresentLatestFrame();
-        }
+            ShowFrames();
 
         MsgWaitForMultipleObjects(1, &g.frameEvent, FALSE, g.overlayVisible ? 16 : 250, QS_ALLINPUT);
     }
