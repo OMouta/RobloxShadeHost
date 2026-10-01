@@ -16,6 +16,7 @@ using std::min;
 #include "config.h"
 #include "log.h"
 #include "menu.h"
+#include "names.h"
 #include "overlay.h"
 #include "resource.h"
 #include "shell.h"
@@ -31,7 +32,6 @@ using std::min;
 #include <cmath>
 #include <cstdint>
 #include <cwchar>
-#include <cwctype>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -427,19 +427,6 @@ fs::path Executable(DWORD processId)
     {
         return {};
     }
-}
-
-// The name of a game's presets folder and of its entry in [GamePresets], like in the menu: its name without what
-// Windows does not allow in names.
-std::wstring FolderName(std::wstring name)
-{
-    for (wchar_t& character : name)
-        if (character < 32 || wcschr(L"\\/:*?\"<>|", character))
-            character = L' ';
-    name.erase(0, name.find_first_not_of(L' '));
-    // Windows drops dots and spaces from the end of names.
-    name.erase(name.find_last_not_of(L". ") + 1);
-    return name;
 }
 
 // Games saved by filename, like Roblox, move with every update, so their icon comes from a running copy.
@@ -1617,25 +1604,21 @@ void UndoRemove()
 // RobloxShadeHost.ini.
 std::wstring NameProblem(const std::wstring& name, size_t index)
 {
-    if (name.empty())
-        return L"Type a name.";
-    if (name.back() == L'.' || name.back() == L' ')
-        return L"A name can't end with a dot or a space.";
-    for (const wchar_t character : name)
+    switch (CheckName(name, true))
     {
-        if (iswcntrl(character))
-            return L"A name can't contain control characters.";
-        if (wcschr(L"\\/:*?\"<>|=;[]", character))
-            return L"A name can't contain \\ / : * ? \" < > | = ; [ or ].";
+    case NameIssue::None:
+        break;
+    case NameIssue::Empty:
+        return L"Type a name.";
+    case NameIssue::Control:
+        return L"A name can't contain control characters.";
+    case NameIssue::Character:
+        return L"A name can't contain \\ / : * ? \" < > | = ; [ or ].";
+    case NameIssue::End:
+        return L"A name can't end with a dot or a space.";
+    case NameIssue::Device:
+        return L"Windows keeps " + std::wstring(DeviceName(name)) + L" for devices.";
     }
-    // Windows keeps these for devices, even with an extension.
-    std::wstring device = name.substr(0, name.find(L'.'));
-    device.erase(device.find_last_not_of(L' ') + 1);
-    constexpr const wchar_t* kDevices[] = { L"CON", L"PRN", L"AUX", L"NUL" };
-    const bool numbered = device.size() == 4 && (_wcsnicmp(device.c_str(), L"COM", 3) == 0 || _wcsnicmp(device.c_str(), L"LPT", 3) == 0) &&
-                          wcschr(L"0123456789\u00B9\u00B2\u00B3", device[3]);
-    if (numbered || std::any_of(std::begin(kDevices), std::end(kDevices), [&](const wchar_t* reserved) { return _wcsicmp(device.c_str(), reserved) == 0; }))
-        return L"Windows keeps " + device + L" for devices.";
     for (size_t i = 0; i < g.autoGames.size(); ++i)
         if (i != index && _wcsicmp(FolderName(g.autoGames[i].name).c_str(), name.c_str()) == 0)
             return L"Another game has this name.";

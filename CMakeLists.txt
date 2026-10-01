@@ -174,6 +174,10 @@ if(BUILD_TESTING)
     target_compile_options(ini_text_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME ini_text_tests COMMAND ini_text_tests)
 
+    add_executable(names_tests tests/names_tests.cpp)
+    target_compile_options(names_tests PRIVATE /W4 /permissive- /EHsc)
+    add_test(NAME names_tests COMMAND names_tests)
+
     # miniz comes with Setup's other libraries.
     add_executable(package_files_tests tests/package_files_tests.cpp)
     target_compile_options(package_files_tests PRIVATE /W4 /permissive- /EHsc)

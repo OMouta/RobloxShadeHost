@@ -258,6 +258,10 @@ if(BUILD_TESTING)
     target_compile_options(posix_effects_tests PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
     add_test(NAME posix_effects_tests COMMAND posix_effects_tests)
 
+    add_executable(names_tests "${CMAKE_SOURCE_DIR}/tests/names_tests.cpp")
+    target_compile_options(names_tests PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+    add_test(NAME names_tests COMMAND names_tests)
+
     add_executable(package_files_tests "${CMAKE_SOURCE_DIR}/tests/package_files_tests.cpp")
     target_link_libraries(package_files_tests PRIVATE posix_libraries)
     target_compile_options(package_files_tests PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
