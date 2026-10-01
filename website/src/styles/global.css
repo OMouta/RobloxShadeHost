@@ -4,12 +4,12 @@
   --night: #0f1024;
   --night-raised: #161834;
   --line: #2a2d52;
+  /* Borders of buttons and other controls, at least 3:1 against the page. */
+  --line-strong: #62669a;
   --ink: #f1f1fa;
   --haze: #a3a6c8;
   --accent: #8c94ff;
   --accent-ink: #0f1024;
-  /* The ring in the logo. Only used where light is being changed. */
-  --spectrum: #ff4860, #ff9e36, #f8e44c, #54de7a, #3ec6ff, #546eff, #ba5cff;
 
   --page: min(1180px, 100% - 2 * var(--gutter));
   --gutter: clamp(20px, 4vw, 48px);
@@ -114,7 +114,7 @@ a:hover {
 
 .button-secondary {
   color: var(--ink);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
 }
 
 .button-secondary:hover {
