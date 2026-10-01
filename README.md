@@ -10,9 +10,7 @@
   <a href="https://discord.gg/wVbVUdENas">Discord</a>
 </p>
 
-Unishade puts ReShade effects on games where ReShade can't run. It used to be called RobloxShadeHost.
-
-It never touches the game. Unishade copies the game's window, runs the effects on the copy and draws the result on top. ReShade runs inside Unishade, and nothing gets injected into the game or changed in its files.
+Unishade is an open-source project for universal post-processing without injection. It runs outside the game process and is built for games where traditional ReShade injection isn't available or desirable.
 
 ## Getting started
 
@@ -24,13 +22,14 @@ Games need to run windowed or borderless. Unishade also runs on [macOS and Linux
 
 If regular ReShade already works in your game, use that.
 
-Setup isn't code-signed yet, so the first time Windows may say **Windows protected your PC**. Click **More info**, then **Run anyway**. [Releases](https://github.com/OMouta/Unishade/releases) from 0.6.0 on come with `SHA256SUMS.txt`, the SHA-256 of each file, so you can check what you downloaded.
+> [!NOTE]
+> Setup isn't code-signed yet, so the first time Windows may say **Windows protected your PC**. Click **More info**, then **Run anyway**.
 
 ## Help and presets
 
 Ask on [Discord](https://discord.gg/wVbVUdENas). People share their presets there too. The [docs](https://unishade.me/docs/) cover the menu, add-ons and troubleshooting.
 
-To build Unishade or send a preset, see [CONTRIBUTING.md](CONTRIBUTING.md). The macOS and Linux version lives in [src/posix](src/posix/README.md).
+To build Unishade or send a preset, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Unishade is free. If you want to support it, I'm on [Ko-fi](https://ko-fi.com/omouta).
 
