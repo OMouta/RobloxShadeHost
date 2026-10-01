@@ -12,6 +12,53 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+// Whether a game could be drawing in the window: visible, not owned, not a tool window, not cloaked, with a client area
+// and a title. The host's own windows never count.
+bool IsGameWindow(HWND window, DWORD process)
+{
+    if (process == GetCurrentProcessId() || !IsWindowVisible(window) || GetWindow(window, GW_OWNER) ||
+        (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW))
+        return false;
+    DWORD cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
+        return false;
+    RECT client{};
+    return GetClientRect(window, &client) && client.right > 0 && client.bottom > 0 && GetWindowTextLengthW(window) > 0;
+}
+
+struct Enumeration
+{
+    // Only these processes' windows are looked at, when set.
+    const std::vector<DWORD>* processes = nullptr;
+    std::vector<GameWindow> windows;
+};
+
+// Game windows from front to back, with their titles.
+std::vector<GameWindow> EnumerateGameWindows(const std::vector<DWORD>* processes)
+{
+    Enumeration enumeration{ processes };
+    EnumWindows(
+        [](HWND window, LPARAM param) -> BOOL {
+            auto& found = *reinterpret_cast<Enumeration*>(param);
+            DWORD process = 0;
+            GetWindowThreadProcessId(window, &process);
+            if (found.processes && std::find(found.processes->begin(), found.processes->end(), process) == found.processes->end())
+                return TRUE;
+            if (!IsGameWindow(window, process))
+                return TRUE;
+            std::wstring name(static_cast<size_t>(GetWindowTextLengthW(window)) + 1, L'\0');
+            name.resize(GetWindowTextW(window, name.data(), static_cast<int>(name.size())));
+            if (!name.empty())
+                found.windows.push_back({ window, std::move(name), process });
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&enumeration));
+    return std::move(enumeration.windows);
+}
+} // namespace
+
 fs::path ProcessExecutable(DWORD processId)
 {
     const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
@@ -90,30 +137,7 @@ void AddAutoGame(std::vector<AutoGame>& games, const GameWindow& window)
 
 std::vector<GameWindow> ListGameWindows()
 {
-    std::vector<GameWindow> windows;
-    EnumWindows(
-        [](HWND window, LPARAM param) -> BOOL {
-            DWORD process = 0;
-            GetWindowThreadProcessId(window, &process);
-            if (process == GetCurrentProcessId() || !IsWindowVisible(window) || GetWindow(window, GW_OWNER) ||
-                (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW))
-                return TRUE;
-            DWORD cloaked = 0;
-            if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
-                return TRUE;
-            RECT client{};
-            if (!GetClientRect(window, &client) || client.right <= 0 || client.bottom <= 0)
-                return TRUE;
-            const int length = GetWindowTextLengthW(window);
-            if (!length)
-                return TRUE;
-            std::wstring name(static_cast<size_t>(length) + 1, L'\0');
-            name.resize(GetWindowTextW(window, name.data(), static_cast<int>(name.size())));
-            if (!name.empty())
-                reinterpret_cast<std::vector<GameWindow>*>(param)->push_back({ window, std::move(name), process });
-            return TRUE;
-        },
-        reinterpret_cast<LPARAM>(&windows));
+    std::vector<GameWindow> windows = EnumerateGameWindows(nullptr);
     std::sort(windows.begin(), windows.end(), [](const GameWindow& a, const GameWindow& b) {
         return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
     });
@@ -129,7 +153,8 @@ std::optional<GameWindow> FindGameTarget(const std::optional<GameWindow>& select
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE)
         return std::nullopt;
-    std::vector<std::pair<DWORD, size_t>> processes;
+    std::vector<DWORD> processes;
+    std::vector<size_t> matches; // the game each process runs
     PROCESSENTRY32W entry{ sizeof(entry) };
     for (BOOL ok = Process32FirstW(snapshot, &entry); ok; ok = Process32NextW(snapshot, &entry))
         for (size_t i = 0; i < games.size(); ++i)
@@ -150,25 +175,45 @@ std::optional<GameWindow> FindGameTarget(const std::optional<GameWindow>& select
                     continue;
                 }
             }
-            processes.emplace_back(entry.th32ProcessID, i);
+            processes.push_back(entry.th32ProcessID);
+            matches.push_back(i);
             break;
         }
     CloseHandle(snapshot);
     if (processes.empty())
         return std::nullopt;
     std::optional<GameWindow> first;
-    for (GameWindow window : ListGameWindows())
-        for (const auto& [process, index] : processes)
-            if (window.processId == process)
-            {
-                window.name = games[index].name;
-                if (window.window == preferredWindow)
-                    return window;
-                if (!first)
-                    first = window;
-                break;
-            }
+    for (GameWindow window : EnumerateGameWindows(&processes))
+    {
+        const auto process = std::find(processes.begin(), processes.end(), window.processId);
+        window.name = games[matches[static_cast<size_t>(process - processes.begin())]].name;
+        if (window.window == preferredWindow)
+            return window;
+        if (!first)
+            first = std::move(window);
+    }
     return first;
+}
+
+std::optional<GameWindow> MatchGameWindow(HWND window, std::span<const AutoGame> games)
+{
+    DWORD process = 0;
+    if (!window || !GetWindowThreadProcessId(window, &process) || !IsGameWindow(window, process) ||
+        std::none_of(games.begin(), games.end(), [](const AutoGame& game) { return game.enabled; }))
+        return std::nullopt;
+    fs::path executable;
+    try
+    {
+        executable = ProcessExecutable(process);
+    }
+    catch (const std::system_error&)
+    {
+        return std::nullopt;
+    }
+    for (const AutoGame& game : games)
+        if (game.enabled && MatchesExecutable(game, executable))
+            return GameWindow{ window, game.name, process };
+    return std::nullopt;
 }
 
 bool GameWindowExists(const GameWindow& game)

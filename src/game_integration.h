@@ -29,9 +29,14 @@ struct GameWindow
     DWORD processId;
 };
 
+// Every window a game could be drawing in, sorted by title, for the window picker.
 std::vector<GameWindow> ListGameWindows();
 bool GameWindowExists(const GameWindow& game);
 void AddAutoGame(std::vector<AutoGame>& games, const GameWindow& window);
-// An empty selection keeps automatic detection. A closed selection does not attach to another game.
+// An empty selection keeps automatic detection. A closed selection does not attach to another game. Detection
+// prefers preferredWindow, then the frontmost window of an enabled game.
 std::optional<GameWindow> FindGameTarget(const std::optional<GameWindow>& selection, std::span<const AutoGame> games,
                                        HWND preferredWindow = nullptr);
+// The window as FindGameTarget would report it when it belongs to an enabled game, without looking at any other
+// window or process.
+std::optional<GameWindow> MatchGameWindow(HWND window, std::span<const AutoGame> games);
