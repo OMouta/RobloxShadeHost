@@ -14,9 +14,7 @@
 #include <chrono>
 #include <utility>
 
-using winrt::Windows::Foundation::AsyncStatus;
 using winrt::Windows::Foundation::Metadata::ApiInformation;
-using winrt::Windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
 
 namespace
 {
@@ -69,6 +67,9 @@ void ReleaseDevice()
 
 void RequestBorderlessCapture()
 {
+    // Kept local, so they cannot clash with the global AsyncStatus of the Windows SDK's C headers.
+    using winrt::Windows::Foundation::AsyncStatus;
+    using winrt::Windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
     if (!ApiInformation::IsPropertyPresent(kSessionClass, L"IsBorderRequired"))
         return;
     try
