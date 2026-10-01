@@ -27,6 +27,7 @@
 #include <dlfcn.h>
 #include <stb_image_write.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -230,6 +231,9 @@ struct Dri3Functions
     decltype(&xcb_dri3_buffers_from_pixmap_strides) strides = nullptr;
     decltype(&xcb_dri3_buffers_from_pixmap_offsets) offsets = nullptr;
     decltype(&xcb_dri3_buffers_from_pixmap_buffers) buffers = nullptr;
+    decltype(&xcb_dri3_open) open = nullptr;
+    decltype(&xcb_dri3_open_reply) openReply = nullptr;
+    decltype(&xcb_dri3_open_reply_fds) openReplyFds = nullptr;
 
     bool Load()
     {
@@ -248,23 +252,34 @@ struct Dri3Functions
         strides = reinterpret_cast<decltype(strides)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_strides"));
         offsets = reinterpret_cast<decltype(offsets)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_offsets"));
         buffers = reinterpret_cast<decltype(buffers)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_buffers"));
+        open = reinterpret_cast<decltype(open)>(dlsym(dri3, "xcb_dri3_open"));
+        openReply = reinterpret_cast<decltype(openReply)>(dlsym(dri3, "xcb_dri3_open_reply"));
+        openReplyFds = reinterpret_cast<decltype(openReplyFds)>(dlsym(dri3, "xcb_dri3_open_reply_fds"));
         return getConnection && extensionData && extension && queryVersion && queryVersionReply && buffersFromPixmap && buffersFromPixmapReply &&
-               strides && offsets && buffers;
+               strides && offsets && buffers && open && openReply && openReplyFds;
     }
 };
 
-// The pixmap's buffers, with DRI3 1.2's modifiers. Empty where the X server cannot share them, such as without
-// a GPU or with drivers that do not support DRI3.
-std::shared_ptr<DmaBuffer> BuffersFromPixmap(Display* d, Pixmap pixmap)
+// Null when DRI3 is missing, here or in the X server.
+const Dri3Functions* Dri3(Display* d)
 {
     static Dri3Functions dri3;
     static const bool loaded = dri3.Load();
     if (!loaded)
         return nullptr;
-    xcb_connection_t* connection = dri3.getConnection(d);
-    const xcb_query_extension_reply_t* present = dri3.extensionData(connection, dri3.extension);
-    if (!present || !present->present)
+    const xcb_query_extension_reply_t* present = dri3.extensionData(dri3.getConnection(d), dri3.extension);
+    return present && present->present ? &dri3 : nullptr;
+}
+
+// The pixmap's buffers, with DRI3 1.2's modifiers. Empty where the X server cannot share them, such as without
+// a GPU or with drivers that do not support DRI3.
+std::shared_ptr<DmaBuffer> BuffersFromPixmap(Display* d, Pixmap pixmap)
+{
+    const Dri3Functions* functions = Dri3(d);
+    if (!functions)
         return nullptr;
+    const Dri3Functions& dri3 = *functions;
+    xcb_connection_t* connection = dri3.getConnection(d);
     xcb_dri3_query_version_reply_t* version = dri3.queryVersionReply(connection, dri3.queryVersion(connection, 1, 2), nullptr);
     const bool modifiers = version && (version->major_version > 1 || version->minor_version >= 2);
     free(version);
@@ -878,6 +893,44 @@ void ReleaseImported()
     imported = {};
 }
 
+// Whether the graphics card can read the X server's buffer as it is laid out: its modifier with as many planes, for
+// copying from, imported from a dma-buf at its size.
+bool CanImport(const DmaBuffer& buffer, VkFormat format)
+{
+    VkDrmFormatModifierPropertiesListEXT list{ VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT };
+    VkFormatProperties2 properties{ VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2 };
+    properties.pNext = &list;
+    vkGetPhysicalDeviceFormatProperties2(gpu.physicalDevice, format, &properties);
+    std::vector<VkDrmFormatModifierPropertiesEXT> modifiers(list.drmFormatModifierCount);
+    list.pDrmFormatModifierProperties = modifiers.data();
+    vkGetPhysicalDeviceFormatProperties2(gpu.physicalDevice, format, &properties);
+    modifiers.resize(list.drmFormatModifierCount);
+    const auto modifier = std::find_if(modifiers.begin(), modifiers.end(),
+                                       [&](const VkDrmFormatModifierPropertiesEXT& entry) { return entry.drmFormatModifier == buffer.modifier; });
+    if (modifier == modifiers.end() || modifier->drmFormatModifierPlaneCount != buffer.fds.size() ||
+        !(modifier->drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
+        return false;
+
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifierInfo{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT };
+    modifierInfo.drmFormatModifier = buffer.modifier;
+    modifierInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkPhysicalDeviceExternalImageFormatInfo externalInfo{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO };
+    externalInfo.pNext = &modifierInfo;
+    externalInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkPhysicalDeviceImageFormatInfo2 info{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2 };
+    info.pNext = &externalInfo;
+    info.format = format;
+    info.type = VK_IMAGE_TYPE_2D;
+    info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    VkExternalImageFormatProperties external{ VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
+    VkImageFormatProperties2 result{ VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+    result.pNext = &external;
+    return vkGetPhysicalDeviceImageFormatProperties2(gpu.physicalDevice, &info, &result) == VK_SUCCESS &&
+           (external.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) &&
+           result.imageFormatProperties.maxExtent.width >= buffer.width && result.imageFormatProperties.maxExtent.height >= buffer.height;
+}
+
 VkImage Import(const std::shared_ptr<void>& held)
 {
     if (imported.buffer == held)
@@ -885,6 +938,14 @@ VkImage Import(const std::shared_ptr<void>& held)
     vkDeviceWaitIdle(gpu.device);
     ReleaseImported();
     const DmaBuffer& buffer = *static_cast<const DmaBuffer*>(held.get());
+    // XRGB8888 and ARGB8888, the formats of 24 and 32-bit windows.
+    const VkFormat format = VK_FORMAT_B8G8R8A8_UNORM;
+    if (buffer.fds.size() > 4 || !CanImport(buffer, format))
+    {
+        Log(LogLevel::Info, "The graphics card cannot read the X server's layout of the game's picture (modifier 0x%llx).",
+            static_cast<unsigned long long>(buffer.modifier));
+        return VK_NULL_HANDLE;
+    }
 
     // Every plane must be in one buffer object, which is how drivers lay out RGB images.
     struct stat first{}, other{};
@@ -907,8 +968,7 @@ VkImage Import(const std::shared_ptr<void>& held)
     VkImageCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     info.pNext = &external;
     info.imageType = VK_IMAGE_TYPE_2D;
-    // XRGB8888 and ARGB8888, the formats of 24 and 32-bit windows.
-    info.format = VK_FORMAT_B8G8R8A8_UNORM;
+    info.format = format;
     info.extent = { buffer.width, buffer.height, 1 };
     info.mipLevels = 1;
     info.arrayLayers = 1;
@@ -938,9 +998,13 @@ VkImage Import(const std::shared_ptr<void>& held)
     import.fd = fd;
     VkMemoryAllocateInfo allocation{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     allocation.pNext = &import;
-    allocation.allocationSize = std::max<VkDeviceSize>(requirements.size, lseek(fd, 0, SEEK_END));
+    // A dedicated allocation is the image's size, which the dma-buf must hold. Where the kernel cannot tell the
+    // dma-buf's size, the driver checks it.
+    const off_t size = fd >= 0 ? lseek(fd, 0, SEEK_END) : -1;
+    allocation.allocationSize = requirements.size;
     allocation.memoryTypeIndex = type;
-    if (type == UINT32_MAX || vkAllocateMemory(gpu.device, &allocation, nullptr, &result.memory) != VK_SUCCESS)
+    if (type == UINT32_MAX || (size >= 0 && VkDeviceSize(size) < requirements.size) ||
+        vkAllocateMemory(gpu.device, &allocation, nullptr, &result.memory) != VK_SUCCESS)
     {
         if (fd >= 0)
             close(fd);
@@ -1163,8 +1227,30 @@ std::string UiFont()
     return {};
 }
 
-bool DisplayDrmDevice(int64_t&, int64_t&)
+bool DisplayDrmDevice([[maybe_unused]] int64_t& deviceMajor, [[maybe_unused]] int64_t& deviceMinor)
 {
+#ifdef UNISHADE_HAVE_DRI3
+    const Dri3Functions* dri3 = display ? Dri3(display) : nullptr;
+    if (!dri3)
+        return false;
+    // The device the X server hands its clients for drawing, the same one its own buffers live on.
+    xcb_connection_t* connection = dri3->getConnection(display);
+    xcb_dri3_open_reply_t* reply = dri3->openReply(connection, dri3->open(connection, root, 0), nullptr);
+    if (!reply)
+        return false;
+    const int fd = reply->nfd == 1 ? dri3->openReplyFds(connection, reply)[0] : -1;
+    free(reply);
+    struct stat device{};
+    const bool found = fd >= 0 && fstat(fd, &device) == 0 && S_ISCHR(device.st_mode);
+    if (fd >= 0)
+        close(fd);
+    if (!found)
+        return false;
+    deviceMajor = major(device.st_rdev);
+    deviceMinor = minor(device.st_rdev);
+    return true;
+#else
     return false;
+#endif
 }
 } // namespace platform
