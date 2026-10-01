@@ -319,3 +319,16 @@ std::string Sha256(void* file)
         hasher.Add(buffer.data(), read);
     }
 }
+
+bool SplitHttpsUrl(const std::wstring& url, std::wstring& host, std::wstring& path)
+{
+    // A null component with a non-zero length makes WinHttpCrackUrl point into url.
+    URL_COMPONENTS parts{ sizeof(parts) };
+    parts.dwHostNameLength = parts.dwUserNameLength = parts.dwPasswordLength = parts.dwUrlPathLength = parts.dwExtraInfoLength = 1;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts) || parts.nScheme != INTERNET_SCHEME_HTTPS || parts.nPort != INTERNET_DEFAULT_HTTPS_PORT ||
+        parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength)
+        return false;
+    host.assign(parts.lpszHostName, parts.dwHostNameLength);
+    path.assign(parts.lpszUrlPath, parts.dwUrlPathLength);
+    return true;
+}

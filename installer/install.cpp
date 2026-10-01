@@ -10,7 +10,6 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
-#include <winhttp.h>
 #include <wrl/client.h>
 
 #include <miniz.h>
@@ -643,14 +642,9 @@ bool InstallPresets(const fs::path& work, const fs::path& files, Progress& progr
 // repository the manifests in vendor/ use. Addresses from before the repository was renamed move to the new name.
 std::optional<std::wstring> AddonUrl(const std::wstring& url)
 {
-    // A null component with a non-zero length makes WinHttpCrackUrl point into url.
-    URL_COMPONENTS parts{ sizeof(parts) };
-    parts.dwHostNameLength = parts.dwUserNameLength = parts.dwPasswordLength = parts.dwUrlPathLength = parts.dwExtraInfoLength = 1;
-    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts) || parts.nScheme != INTERNET_SCHEME_HTTPS || parts.nPort != INTERNET_DEFAULT_HTTPS_PORT ||
-        parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength)
+    std::wstring host, path;
+    if (!SplitHttpsUrl(url, host, path))
         return std::nullopt;
-    const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
-    std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
     constexpr std::wstring_view legacy = L"/OMouta/RobloxShadeHost/releases/download/";
     if (_wcsicmp(host.c_str(), L"github.com") == 0 && path.rfind(legacy, 0) == 0)
         path.replace(0, legacy.size(), L"/OMouta/Unishade/releases/download/");

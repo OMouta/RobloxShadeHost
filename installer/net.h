@@ -29,3 +29,7 @@ void Download(const std::wstring& url, const std::filesystem::path& path, const 
 
 // The SHA-256 (lowercase hex) of the rest of an open file, read through its handle.
 std::string Sha256(void* file);
+
+// Splits a plain HTTPS address on the default port into its host and path. False for anything else, including an
+// address with a user name, password, query or fragment.
+bool SplitHttpsUrl(const std::wstring& url, std::wstring& host, std::wstring& path);
