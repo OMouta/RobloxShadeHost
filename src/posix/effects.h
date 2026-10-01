@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "gpu.h"
+#include "preset_ini.h"
 
 #include <effect_module.hpp>
 
@@ -54,6 +55,12 @@ struct Technique
     bool enabled = false;
     bool hidden = false;
     bool enabledByDefault = false;
+    bool enabledInScreenshot = true;
+    int timeout = 0;     // milliseconds the technique stays on once turned on, or 0 for as long as it is on
+    float timeLeft = 0;
+    // The key that turns it on and off: a virtual-key code, then Ctrl, Shift and Alt, as presets write it.
+    std::array<unsigned, 4> toggleKey{};
+    bool toggleKeyInPreset = false; // rather than from the effect's own toggle annotations
 };
 
 struct EffectGpu;
@@ -117,10 +124,19 @@ struct EffectInput
     float wheelDelta = 0;
     bool overlayActive = false;  // a menu control is being used
     bool overlayHovered = false; // the cursor is over the menu
+    // The variable whose control is being used or is under the cursor, when the menu knows it. ReShade tells an
+    // effect which of its own variables that is.
+    const Uniform* activeUniform = nullptr;
+    const Uniform* hoveredUniform = nullptr;
+    bool screenshot = false; // the frame being rendered is saved as a screenshot
 };
 
 // "Name@File.fx", as presets list techniques.
 std::string TechniqueKey(const Technique& technique, const Effect& effect);
+
+// Puts techniques in the order they run: as sorting lists them, by key or by name. The rest go by label, each
+// effect's together in the order the file declares them, as in ReShade.
+void OrderTechniques(std::vector<Technique>& techniques, const std::vector<Effect>& effects, const std::vector<std::string>& sorting);
 
 // Compiling, which needs no graphics card.
 struct CompileOptions
@@ -254,12 +270,15 @@ private:
     void ShareTextures(Effect& effect, size_t index);
     void SortTechniques();
     void ApplyPreset(Effect& effect, size_t effectIndex);
+    bool WritePreset(const fs::path& path, PresetIni preset);
+    void Enable(Technique& technique, bool enabled);
     bool ImagesReady(Effect& effect);
     bool CreateGpu(Effect& effect);
     void PrepareEffects(std::chrono::steady_clock::duration budget);
     void DestroyGpu(Effect& effect);
     void DestroyAllGpu();
     bool CreateTargets();
+    void HandleToggleKeys();
     void UpdateSpecialUniforms(Effect& effect);
     VkSampler Sampler(const reshadefx::sampler_desc& desc);
     GpuImage* Texture(const reshadefx::texture& texture, Effect& effect);
@@ -302,6 +321,7 @@ private:
     std::vector<Technique> techniques;
     std::vector<std::string> sorting; // technique keys in the order they run
     fs::path presetPath;
+    PresetIni presetIni; // as loaded or last saved
     PresetDefinitions presetDefinitions;
     bool dirty = false;
 

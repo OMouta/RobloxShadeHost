@@ -1,6 +1,5 @@
 #include "effects.h"
 #include "log.h"
-#include "preset_ini.h"
 
 #include <effect_codegen.hpp>
 #include <effect_parser.hpp>
@@ -123,6 +122,14 @@ int AnnotationInt(const std::vector<reshadefx::annotation>& annotations, std::st
     if (annotation->type.is_floating_point())
         return static_cast<int>(annotation->value.as_float[0]);
     return annotation->type.is_numeric() ? annotation->value.as_int[0] : fallback;
+}
+
+std::string Uppercase(std::string text)
+{
+    for (char& c : text)
+        if (c >= 'a' && c <= 'z')
+            c = static_cast<char>(c - 'a' + 'A');
+    return text;
 }
 
 VkFormat TextureFormat(reshadefx::texture_format format)
@@ -865,6 +872,20 @@ void DecodeImages(Effect& effect, const TextureIndex& files, const std::function
     }
 }
 
+std::array<unsigned, 4> ParseKey(const std::string& text)
+{
+    std::array<unsigned, 4> key{};
+    const std::vector<std::string> items = PresetIni::Split(text);
+    for (size_t i = 0; i < key.size() && i < items.size(); ++i)
+        key[i] = static_cast<unsigned>(std::strtoul(items[i].c_str(), nullptr, 10));
+    return key;
+}
+
+std::string FormatKey(const std::array<unsigned, 4>& key)
+{
+    return std::to_string(key[0]) + "," + std::to_string(key[1]) + "," + std::to_string(key[2]) + "," + std::to_string(key[3]);
+}
+
 // Reads the values of a uniform in ReShade's layout: every array element and every matrix row starts on
 // 16 bytes.
 size_t ComponentOffset(const Uniform& uniform, size_t i)
@@ -899,6 +920,49 @@ fs::path CacheDirectory()
 std::string TechniqueKey(const Technique& technique, const Effect& effect)
 {
     return technique.name + "@" + effect.file;
+}
+
+void OrderTechniques(std::vector<Technique>& techniques, const std::vector<Effect>& effects, const std::vector<std::string>& sorting)
+{
+    std::unordered_map<std::string, size_t> listed;
+    for (size_t i = 0; i < sorting.size(); ++i)
+        listed.emplace(sorting[i], i);
+    struct Order
+    {
+        size_t rank;
+        std::string group;
+        size_t effect;
+        size_t index;
+    };
+    std::vector<Order> order(techniques.size());
+    // An effect's techniques at one rank stay together, in the file's order, behind the label of the first. That
+    // keeps the order the same however the sort compares them.
+    std::map<std::pair<size_t, size_t>, std::pair<size_t, std::string>> groups;
+    for (size_t i = 0; i < techniques.size(); ++i)
+    {
+        const Technique& technique = techniques[i];
+        auto found = listed.find(TechniqueKey(technique, effects[technique.effect]));
+        if (found == listed.end())
+            found = listed.find(technique.name);
+        order[i] = { found == listed.end() ? sorting.size() : found->second, {}, technique.effect, technique.index };
+        const std::string label = Uppercase(technique.label.empty() ? technique.name : technique.label);
+        const auto [group, added] = groups.try_emplace({ technique.effect, order[i].rank }, technique.index, label);
+        if (!added && technique.index < group->second.first)
+            group->second = { technique.index, label };
+    }
+    for (Order& entry : order)
+        entry.group = groups.at({ entry.effect, entry.rank }).second;
+    std::vector<size_t> sorted(techniques.size());
+    std::iota(sorted.begin(), sorted.end(), size_t(0));
+    std::sort(sorted.begin(), sorted.end(), [&order](size_t a, size_t b) {
+        return std::tie(order[a].rank, order[a].group, order[a].effect, order[a].index) <
+               std::tie(order[b].rank, order[b].group, order[b].effect, order[b].index);
+    });
+    std::vector<Technique> result;
+    result.reserve(techniques.size());
+    for (size_t i : sorted)
+        result.push_back(std::move(techniques[i]));
+    techniques = std::move(result);
 }
 
 Definitions EffectMacros(const Definitions& definitions, const CompileOptions& options)
@@ -1199,7 +1263,7 @@ void Runtime::ReloadNow()
 
     // Effects the preset uses compile first, so the picture has its effects as soon as possible.
     std::set<std::string> used;
-    for (const std::string& file : PresetEffectFiles(PresetIni(ReadFile(presetPath))))
+    for (const std::string& file : PresetEffectFiles(presetIni))
         used.insert(Lowercase(file));
 
     std::vector<CompileJob> jobs;
@@ -1340,6 +1404,8 @@ void Runtime::AddEffect(Effect&& effect)
         technique.tooltip = AnnotationString(declared.annotations, "ui_tooltip");
         technique.hidden = AnnotationInt(declared.annotations, "hidden", 0) != 0;
         technique.enabledByDefault = AnnotationInt(declared.annotations, "enabled", 0) != 0;
+        technique.enabledInScreenshot = AnnotationInt(declared.annotations, "enabled_in_screenshot", 1) != 0;
+        technique.timeout = std::max(0, AnnotationInt(declared.annotations, "timeout", 0));
         technique.effect = index;
         technique.index = i;
         techniques.push_back(std::move(technique));
@@ -1398,43 +1464,48 @@ void Runtime::ShareTextures(Effect& effect, size_t index)
 
 void Runtime::SortTechniques()
 {
-    const auto rank = [this](const Technique& technique) {
-        const std::string key = TechniqueKey(technique, effects[technique.effect]);
-        auto it = std::find(sorting.begin(), sorting.end(), key);
-        if (it == sorting.end())
-            it = std::find(sorting.begin(), sorting.end(), technique.name);
-        return static_cast<size_t>(it - sorting.begin());
-    };
-    std::stable_sort(techniques.begin(), techniques.end(), [&](const Technique& a, const Technique& b) {
-        const size_t left = rank(a), right = rank(b);
-        if (left != right)
-            return left < right;
-        if (a.effect == b.effect)
-            return a.index < b.index;
-        return Lowercase(a.label.empty() ? a.name : a.label) < Lowercase(b.label.empty() ? b.name : b.label);
-    });
+    OrderTechniques(techniques, effects, sorting);
+}
+
+void Runtime::Enable(Technique& technique, bool enabled)
+{
+    technique.enabled = enabled;
+    technique.timeLeft = enabled ? static_cast<float>(technique.timeout) : 0.0f;
 }
 
 void Runtime::ApplyPreset(Effect& effect, size_t effectIndex)
 {
-    const PresetIni preset(ReadFile(presetPath));
     std::string value;
     std::vector<std::string> enabled;
-    if (preset.Get("", "Techniques", value))
+    if (presetIni.Get("", "Techniques", value))
         enabled = PresetIni::Split(value);
     for (Technique& technique : techniques)
         if (technique.effect == effectIndex)
         {
             const std::string key = TechniqueKey(technique, effect);
-            technique.enabled = std::find(enabled.begin(), enabled.end(), key) != enabled.end() ||
-                                std::find(enabled.begin(), enabled.end(), technique.name) != enabled.end() ||
-                                (technique.hidden && technique.enabledByDefault);
+            Enable(technique, std::find(enabled.begin(), enabled.end(), key) != enabled.end() ||
+                                  std::find(enabled.begin(), enabled.end(), technique.name) != enabled.end() ||
+                                  (technique.hidden && technique.enabledByDefault));
+            // The preset's shortcut, as ReShade writes it, or the one the effect suggests in older ReShade's way.
+            technique.toggleKeyInPreset = presetIni.Get("", "Key" + key, value) || presetIni.Get("", "Key" + technique.name, value);
+            if (technique.toggleKeyInPreset)
+                technique.toggleKey = ParseKey(value);
+            else
+            {
+                const auto& annotations = effect.module.techniques[technique.index].annotations;
+                technique.toggleKey = { static_cast<unsigned>(std::max(0, AnnotationInt(annotations, "toggle", 0))),
+                                        AnnotationInt(annotations, "togglectrl", 0) != 0, AnnotationInt(annotations, "toggleshift", 0) != 0,
+                                        AnnotationInt(annotations, "togglealt", 0) != 0 };
+            }
         }
 
     for (const Uniform& uniform : effect.uniforms)
     {
+        // Values the host sets keep theirs, such as a key's toggle state.
+        if (!uniform.source.empty())
+            continue;
         ResetValue(effect, uniform);
-        if (!uniform.source.empty() || !preset.Get(effect.file, uniform.name, value))
+        if (!presetIni.Get(effect.file, uniform.name, value))
             continue;
         const std::vector<std::string> items = PresetIni::Split(value);
         const size_t count = std::min(items.size(), ComponentCount(uniform));
@@ -1459,20 +1530,20 @@ bool Runtime::LoadPreset(const fs::path& path)
 {
     presetPath = path;
     dirty = false;
-    const PresetIni preset(ReadFile(path));
+    presetIni = PresetIni(ReadFile(path));
     PresetDefinitions definitions;
     std::string value;
-    if (preset.Get("", "PreprocessorDefinitions", value))
+    if (presetIni.Get("", "PreprocessorDefinitions", value))
         definitions.global = ParseDefinitions(value);
     std::vector<std::string> sortingList;
-    if (preset.Get("", "TechniqueSorting", value))
+    if (presetIni.Get("", "TechniqueSorting", value))
         sortingList = PresetIni::Split(value);
-    if (sortingList.empty() && preset.Get("", "Techniques", value))
+    if (sortingList.empty() && presetIni.Get("", "Techniques", value))
         sortingList = PresetIni::Split(value);
     sorting = sortingList;
 
-    for (const std::string& file : preset.SectionNames())
-        if (preset.Get(file, "PreprocessorDefinitions", value))
+    for (const std::string& file : presetIni.SectionNames())
+        if (presetIni.Get(file, "PreprocessorDefinitions", value))
             definitions.effects[file] = ParseDefinitions(value);
 
     if (definitions != presetDefinitions || effects.empty())
@@ -1492,7 +1563,12 @@ bool Runtime::SavePreset()
 {
     if (presetPath.empty())
         return false;
-    PresetIni preset(ReadFile(presetPath));
+    // The file as it is now, so only what the effects change in it changes.
+    return WritePreset(presetPath, PresetIni(ReadFile(presetPath)));
+}
+
+bool Runtime::WritePreset(const fs::path& path, PresetIni preset)
+{
     std::vector<std::string> enabled, order;
     std::set<size_t> used;
     for (const Technique& technique : techniques)
@@ -1504,6 +1580,8 @@ bool Runtime::SavePreset()
             enabled.push_back(key);
             used.insert(technique.effect);
         }
+        if (technique.toggleKeyInPreset)
+            preset.Set("", "Key" + key, FormatKey(technique.toggleKey));
     }
     // Techniques whose effect did not load stay in the preset, so it still works where they are installed.
     std::string value;
@@ -1513,7 +1591,6 @@ bool Runtime::SavePreset()
                 enabled.push_back(key);
     preset.Set("", "Techniques", PresetIni::Join(enabled));
     preset.Set("", "TechniqueSorting", PresetIni::Join(order));
-    sorting = order;
 
     for (size_t index = 0; index < effects.size(); ++index)
     {
@@ -1543,31 +1620,31 @@ bool Runtime::SavePreset()
             preset.Set(effect.file, uniform.name, text);
         }
     }
-    if (!WriteFile(presetPath, preset.Text()))
+    if (!WriteFile(path, preset.Text()))
     {
-        Log(LogLevel::Warning, "Could not save the preset %s.", presetPath.c_str());
+        Log(LogLevel::Warning, "Could not save the preset %s.", path.c_str());
         return false;
     }
+    sorting = order;
+    presetIni = std::move(preset);
     dirty = false;
     return true;
 }
 
 bool Runtime::SavePresetAs(const fs::path& path)
 {
-    const fs::path previous = presetPath;
+    // The current preset with the effects as they are, so its definitions and shortcuts come along.
+    if (!WritePreset(path, presetIni))
+        return false;
     presetPath = path;
-    if (SavePreset())
-        return true;
-    presetPath = previous;
-    return false;
+    return true;
 }
 
 std::vector<std::string> Runtime::MissingTechniques() const
 {
-    const PresetIni preset(ReadFile(presetPath));
     std::string value;
     std::vector<std::string> missing;
-    if (!preset.Get("", "Techniques", value))
+    if (!presetIni.Get("", "Techniques", value))
         return missing;
     for (const std::string& key : PresetIni::Split(value))
     {
@@ -1586,7 +1663,7 @@ void Runtime::SetEnabled(size_t index, bool enabled)
 {
     if (index < techniques.size() && techniques[index].enabled != enabled)
     {
-        techniques[index].enabled = enabled;
+        Enable(techniques[index], enabled);
         dirty = true;
     }
 }
@@ -1710,10 +1787,38 @@ void Runtime::ResetValue(Effect& effect, const Uniform& uniform)
     }
 }
 
-// Values the host sets every frame, named by the source annotation.
+// Technique shortcuts. As in ReShade, they wait while effects load and need the modifiers exactly.
+void Runtime::HandleToggleKeys()
+{
+    if (Loading())
+        return;
+    const auto down = [this](std::initializer_list<int> keys) {
+        return std::any_of(keys.begin(), keys.end(), [this](int key) { return input.keysDown[key]; });
+    };
+    const bool ctrl = down({ 0x11, 0xA2, 0xA3 }), shift = down({ 0x10, 0xA0, 0xA1 }), alt = down({ 0x12, 0xA4, 0xA5 });
+    for (Technique& technique : techniques)
+    {
+        const std::array<unsigned, 4>& key = technique.toggleKey;
+        if (key[0] == 0 || key[0] >= input.keysPressed.size() || !input.keysPressed[key[0]] || (key[1] != 0) != ctrl || (key[2] != 0) != shift ||
+            (key[3] != 0) != alt)
+            continue;
+        Enable(technique, !technique.enabled);
+        dirty = true;
+    }
+}
+
+// Values the host sets every frame, named by the source annotation, as ReShade 6.8 sets them.
 void Runtime::UpdateSpecialUniforms(Effect& effect)
 {
     static std::mt19937 random(std::random_device{}());
+    // overlay_active and overlay_hovered: 1 + the index of the effect's own variable whose control is in use or
+    // under the cursor, or 0. When the menu does not say which, any control counts as the first.
+    const auto control = [&effect](const Uniform* uniform, bool any) {
+        for (size_t i = 0; i < effect.uniforms.size(); ++i)
+            if (&effect.uniforms[i] == uniform)
+                return static_cast<int>(i + 1);
+        return !uniform && any ? 1 : 0;
+    };
     for (const Uniform& uniform : effect.uniforms)
     {
         if (uniform.source.empty())
@@ -1733,7 +1838,7 @@ void Runtime::UpdateSpecialUniforms(Effect& effect)
             }
             else
             {
-                const int value = static_cast<int>(frameCount);
+                const int value = uniform.type.is_boolean() ? frameCount % 2 == 0 : static_cast<int>(frameCount);
                 SetValue(effect, uniform, &value, 1);
             }
         }
@@ -1753,13 +1858,13 @@ void Runtime::UpdateSpecialUniforms(Effect& effect)
         else if (source == "random")
         {
             const int low = AnnotationInt(annotations, "min", 0), high = AnnotationInt(annotations, "max", 32767);
-            const int value = low + static_cast<int>(random() % static_cast<unsigned>(std::max(high - low + 1, 1)));
+            const int value = low + static_cast<int>(random() % static_cast<unsigned>(std::abs(high - low) + 1));
             SetValue(effect, uniform, &value, 1);
         }
         else if (source == "pingpong")
         {
             const float low = AnnotationFloat(annotations, "min", 0.0f), high = AnnotationFloat(annotations, "max", 1.0f);
-            const float stepLow = AnnotationFloat(annotations, "step", 1.0f, 0), stepHigh = AnnotationFloat(annotations, "step", 0.0f, 1);
+            const float stepLow = AnnotationFloat(annotations, "step", 0.0f, 0), stepHigh = AnnotationFloat(annotations, "step", 0.0f, 1);
             const float smoothing = AnnotationFloat(annotations, "smoothing", 0.0f);
             float value[2];
             GetValue(effect, uniform, value, 2);
@@ -1779,9 +1884,25 @@ void Runtime::UpdateSpecialUniforms(Effect& effect)
             }
             SetValue(effect, uniform, value, 2);
         }
-        else if (source == "overlay_open")
+        else if (source == "key" || source == "mousebutton")
         {
-            const int value = menuOpen;
+            // A Windows virtual-key code, or a mouse button from 0 to 4. ReShade leaves the first codes, which are
+            // the mouse's, to mousebutton.
+            const bool key = source == "key";
+            const int code = AnnotationInt(annotations, "keycode", 0);
+            if (key ? code <= 7 || code >= 256 : code < 0 || code >= 5)
+                continue;
+            const bool isDown = key ? input.keysDown[code] : input.buttonsDown[code];
+            const bool pressed = key ? input.keysPressed[code] : input.buttonsPressed[code];
+            const std::string mode = AnnotationString(annotations, "mode");
+            int value = isDown;
+            if (mode == "toggle" || AnnotationInt(annotations, "toggle", 0) != 0)
+            {
+                GetValue(effect, uniform, &value, 1);
+                value = pressed ? !value : value != 0;
+            }
+            else if (mode == "press")
+                value = pressed;
             SetValue(effect, uniform, &value, 1);
         }
         else if (source == "mousepoint")
@@ -1789,11 +1910,46 @@ void Runtime::UpdateSpecialUniforms(Effect& effect)
             const float value[2] = { mouseX, mouseY };
             SetValue(effect, uniform, value, 2);
         }
-        else
+        else if (source == "mousedelta")
         {
-            // Keys, the mouse buttons and wheel, and depth, which the host cannot provide, stay zero.
-            ResetValue(effect, uniform);
+            const float value[2] = { input.cursorDeltaX, input.cursorDeltaY };
+            SetValue(effect, uniform, value, 2);
         }
+        else if (source == "mousewheel")
+        {
+            const float low = AnnotationFloat(annotations, "min", 0.0f), high = AnnotationFloat(annotations, "max", 0.0f);
+            float step = AnnotationFloat(annotations, "step", 0.0f);
+            if (step == 0.0f)
+                step = 1.0f;
+            float value[2];
+            GetValue(effect, uniform, value, 2);
+            value[1] = input.wheelDelta;
+            value[0] += value[1] * step;
+            if (low != high)
+                value[0] = std::clamp(value[0], std::min(low, high), std::max(low, high));
+            SetValue(effect, uniform, value, 2);
+        }
+        else if (source == "overlay_open" || source == "ui_open")
+        {
+            const int value = menuOpen;
+            SetValue(effect, uniform, &value, 1);
+        }
+        else if (source == "overlay_active" || source == "ui_active")
+        {
+            const int value = menuOpen ? control(input.activeUniform, input.overlayActive) : 0;
+            SetValue(effect, uniform, &value, 1);
+        }
+        else if (source == "overlay_hovered" || source == "ui_hovered")
+        {
+            const int value = menuOpen ? control(input.hoveredUniform, input.overlayHovered) : 0;
+            SetValue(effect, uniform, &value, 1);
+        }
+        else if (source == "screenshot")
+        {
+            const int value = input.screenshot;
+            SetValue(effect, uniform, &value, 1);
+        }
+        // Others, such as depth the host cannot provide, stay zero.
     }
 }
 
@@ -2543,10 +2699,11 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
     // Effects compiled for another size wait for the new one.
     if (!enabled || resizePending)
         return;
+    HandleToggleKeys();
 
     const auto runs = [this](const Technique& technique) {
         const Effect& effect = effects[technique.effect];
-        return technique.enabled && effect.compiled && !effect.gpuFailed;
+        return technique.enabled && !(input.screenshot && !technique.enabledInScreenshot) && effect.compiled && !effect.gpuFailed;
     };
     // Every effect that runs is prepared before any pass is recorded, since preparing one can make a texture it
     // shares again, and with it the effects that already use it.
@@ -2562,7 +2719,7 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
     SubmitSetup();
 
     bool colorStale = true;
-    for (const Technique& technique : techniques)
+    for (Technique& technique : techniques)
     {
         if (!runs(technique))
             continue;
@@ -2616,6 +2773,9 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
                 for (const GpuImage* image : p.written)
                     GenerateMipmaps(commands, *image);
         }
+        // A technique with a timeout turns itself off once it has run that long.
+        if (technique.timeout > 0 && (technique.timeLeft -= frameTime) <= 0)
+            Enable(technique, false);
     }
 }
 
