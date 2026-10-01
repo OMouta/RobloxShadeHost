@@ -1650,21 +1650,23 @@ std::vector<uint8_t> Runtime::ReadSource(const Source& source)
     return source.image ? ReadImage(source.image, source.x, source.y, source.foreign) : std::vector<uint8_t>();
 }
 
-// Copies width by height pixels at (x, y) of a BGRA image into memory, as RGBA. Waits for the graphics card.
+// Copies width by height pixels at (x, y) of a BGRA image into memory, as RGBA. Waits for this copy only: the
+// barrier before it orders it after the frames submitted before.
 std::vector<uint8_t> Runtime::ReadImage(VkImage image, uint32_t x, uint32_t y, bool foreign)
 {
     std::vector<uint8_t> pixels;
-    if (!width || !height)
+    if (!width || !height || !image)
         return pixels;
     const VkDeviceSize size = VkDeviceSize(width) * height * 4;
     if (readback.size != size)
     {
         gpu.DestroyBuffer(readback);
-        if (!gpu.CreateBuffer(readback, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true))
+        if (!gpu.CreateBuffer(readback, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, true))
             return pixels;
     }
-    vkDeviceWaitIdle(gpu.device);
     VkCommandBuffer commands = gpu.BeginCommands();
+    if (!commands)
+        return pixels;
     FullBarrier(commands);
     if (foreign)
         TransferForeign(commands, image, true);
@@ -1675,14 +1677,18 @@ std::vector<uint8_t> Runtime::ReadImage(VkImage image, uint32_t x, uint32_t y, b
     vkCmdCopyImageToBuffer(commands, image, VK_IMAGE_LAYOUT_GENERAL, readback.buffer, 1, &copy);
     if (foreign)
         TransferForeign(commands, image, false);
-    gpu.SubmitAndWait(commands);
+    VkMemoryBarrier toHost{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
+    if (!gpu.SubmitAndWait(commands))
+        return pixels;
+    gpu.Invalidate(readback);
     pixels.resize(size);
-    const uint8_t* source = static_cast<const uint8_t*>(readback.mapped);
+    std::memcpy(pixels.data(), readback.mapped, size);
     for (size_t i = 0; i < size; i += 4)
     {
-        pixels[i] = source[i + 2];
-        pixels[i + 1] = source[i + 1];
-        pixels[i + 2] = source[i];
+        std::swap(pixels[i], pixels[i + 2]);
         pixels[i + 3] = 255;
     }
     return pixels;

@@ -384,7 +384,7 @@ void Gpu::DestroyImage(GpuImage& image)
     image = {};
 }
 
-bool Gpu::CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible)
+bool Gpu::CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, bool readback)
 {
     buffer = {};
     buffer.size = size;
@@ -397,8 +397,13 @@ bool Gpu::CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags 
     vkGetBufferMemoryRequirements(device, buffer.buffer, &requirements);
     VkMemoryAllocateInfo allocation{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     allocation.allocationSize = requirements.size;
-    allocation.memoryTypeIndex = MemoryType(requirements.memoryTypeBits, hostVisible ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-                                                                                      : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    // Memory the graphics card writes and the processor reads is fastest cached, which is not always coherent.
+    allocation.memoryTypeIndex = UINT32_MAX;
+    if (readback)
+        allocation.memoryTypeIndex = MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (allocation.memoryTypeIndex == UINT32_MAX)
+        allocation.memoryTypeIndex = MemoryType(requirements.memoryTypeBits, hostVisible ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                                                                                          : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (allocation.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(device, &allocation, nullptr, &buffer.memory) != VK_SUCCESS ||
         vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0) != VK_SUCCESS ||
         (hostVisible && vkMapMemory(device, buffer.memory, 0, VK_WHOLE_SIZE, 0, &buffer.mapped) != VK_SUCCESS))
@@ -406,7 +411,18 @@ bool Gpu::CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags 
         DestroyBuffer(buffer);
         return false;
     }
+    buffer.coherent = memoryProperties.memoryTypes[allocation.memoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     return true;
+}
+
+void Gpu::Invalidate(const GpuBuffer& buffer)
+{
+    if (buffer.coherent || !buffer.memory)
+        return;
+    VkMappedMemoryRange range{ VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE };
+    range.memory = buffer.memory;
+    range.size = VK_WHOLE_SIZE;
+    vkInvalidateMappedMemoryRanges(device, 1, &range);
 }
 
 void Gpu::DestroyBuffer(GpuBuffer& buffer)

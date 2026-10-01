@@ -32,6 +32,7 @@ struct GpuBuffer
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize size = 0;
     void* mapped = nullptr; // host-visible buffers stay mapped
+    bool coherent = true;   // otherwise the graphics card's writes need Gpu::Invalidate before reading
 };
 
 class Gpu
@@ -45,8 +46,11 @@ public:
     bool CreateImage(GpuImage& image, uint32_t width, uint32_t height, uint32_t levels, VkFormat format, VkImageUsageFlags usage,
                      VkImageType type = VK_IMAGE_TYPE_2D, uint32_t depth = 1);
     void DestroyImage(GpuImage& image);
-    bool CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible);
+    // Host-visible buffers are mapped. readback prefers memory the processor reads quickly, for results read back.
+    bool CreateBuffer(GpuBuffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, bool readback = false);
     void DestroyBuffer(GpuBuffer& buffer);
+    // Makes what the graphics card wrote to a mapped buffer visible to the processor.
+    void Invalidate(const GpuBuffer& buffer);
 
     // Records commands and waits for them to finish. For uploads outside a frame. BeginCommands returns
     // VK_NULL_HANDLE when the graphics card is out of memory.
