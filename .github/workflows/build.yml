@@ -25,6 +25,22 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Build installer
         run: cmake --build build --config Release --target installer
+      # Installs into fresh folders under build/installer-tests with --portable, so nothing is registered on the runner.
+      # It downloads ReShade and every effect package, and the presets from this commit, so a pull request that changes
+      # a preset is tested with it.
+      - name: Test installer
+        timeout-minutes: 40
+        shell: pwsh
+        env:
+          PRESETS_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/presets
+        run: ./tests/installer_tests.ps1 -Setup (Get-Item build/installer/Unishade-Setup-*.exe).FullName -PresetsBaseUrl $env:PRESETS_URL
+      - name: Upload the installer test logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-test-logs
+          path: build/installer-tests/**/*.log
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Unishade-windows-x64
