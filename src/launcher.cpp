@@ -338,6 +338,8 @@ fs::path Executable(DWORD processId)
 // Games saved by filename, like Roblox, move with every update, so their icon comes from a running copy.
 void LocateGames()
 {
+    // Found again when the copy found is gone, such as after an update.
+    std::erase_if(l.located, [](const auto& entry) { return GetFileAttributesW(entry.second.c_str()) == INVALID_FILE_ATTRIBUTES; });
     const auto unlocated = [](const AutoGame& game) {
         return !game.executable.has_parent_path() && !l.located.contains(game.executable.wstring());
     };
