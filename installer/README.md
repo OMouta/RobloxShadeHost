@@ -25,6 +25,8 @@ The DLSS5 component reads `downloads.ini` from the `dlss5-assets` release, and d
 
 DLSS5 and depth estimation do not work together, so the add-ons page allows only one. Once the selected add-on is installed, Setup removes the files of the other one. When the selected add-on is skipped, the add-on that was installed before stays. Picking neither removes both.
 
+Downloads use HTTPS and check certificates for revocation. When the revocation check cannot be completed, for example because the network blocks the revocation servers, Setup repeats the download without it, as browsers do, rather than failing every installation on such networks; a certificate Windows reports as revoked still fails. A proxy that asks to sign in with Windows authentication gets the user's Windows account.
+
 Downloads have size limits, so a broken or hostile server cannot fill the memory or the disk: 16 MB for download lists, presets and the license, 256 MB for an effect package or ReShade's installer, and 1 GB for an add-on file. Before unpacking, an effect package may hold at most 20,000 files, 128 MB per file and 1 GB in total.
 
 Reinstalling keeps `ReShade.ini`, presets, `RobloxShadeHost.ini` and the saved game list in `games.ini`. The configuration and `RobloxShadeHost-Setup.files` manifest retain their original filenames to preserve existing install state without conversion. The host writes `RobloxShadeHost.ini` on its first start and when shortcuts change in its menu.

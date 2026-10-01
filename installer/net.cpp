@@ -101,14 +101,16 @@ public:
 private:
     void Watch()
     {
-        std::unique_lock lock(mutex);
-        while (!done && !cancel)
-            wake.wait_for(lock, std::chrono::milliseconds(100));
-        if (!done)
         {
-            WinHttpCloseHandle(request);
-            closed = true;
+            std::unique_lock lock(mutex);
+            while (!done && !cancel)
+                wake.wait_for(lock, std::chrono::milliseconds(100));
+            if (done)
+                return;
         }
+        // The destructor reads closed only after joining this thread, so closing needs no lock.
+        WinHttpCloseHandle(request);
+        closed = true;
     }
 
     HINTERNET request;
@@ -186,8 +188,9 @@ void Get(const std::wstring& url, const std::function<void(const char*, size_t)>
         fail(ErrorText(GetLastError()));
 
     // Certificates are checked for revocation. Networks that block the revocation servers would make every download
-    // fail, so when the check cannot be completed, the request is repeated without it, as browsers do. A certificate
-    // that is known to be revoked still fails.
+    // fail, so when the check cannot be completed, the request is repeated without it, as browsers do. That is also
+    // the case when Windows does not say why it refused the certificate. A certificate Windows reports as revoked
+    // still fails, and the repeated request still checks everything else about the certificate.
     for (bool checkRevocation = true;; checkRevocation = false)
     {
         const HINTERNET handle = WinHttpOpenRequest(connection.get(), L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
@@ -212,9 +215,10 @@ void Get(const std::wstring& url, const std::function<void(const char*, size_t)>
             const DWORD error = GetLastError();
             if (cancel)
                 throw Cancelled{};
-            if (checkRevocation && error == ERROR_WINHTTP_SECURE_FAILURE && certificateFailure == WINHTTP_CALLBACK_STATUS_FLAG_CERT_REV_FAILED)
+            const bool secure = error == ERROR_WINHTTP_SECURE_FAILURE || error == ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
+            if (checkRevocation && secure && (certificateFailure == 0 || certificateFailure == WINHTTP_CALLBACK_STATUS_FLAG_CERT_REV_FAILED))
                 continue;
-            if (error == ERROR_WINHTTP_SECURE_FAILURE && (certificateFailure & WINHTTP_CALLBACK_STATUS_FLAG_CERT_REVOKED))
+            if (secure && (certificateFailure & WINHTTP_CALLBACK_STATUS_FLAG_CERT_REVOKED))
                 fail("the server's certificate was revoked");
             fail(ErrorText(error));
         }
