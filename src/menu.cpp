@@ -164,6 +164,12 @@ enum class NameAction
     NewFolder,
 };
 
+struct MenuNotice
+{
+    LogLevel level;
+    std::string text;
+};
+
 // A preset ReShade saved into its cache, which it writes to disk from its present once a second has passed since.
 constexpr ULONGLONG kReShadeWriteDelay = 1100;
 
@@ -302,6 +308,13 @@ struct Menu
 
     int capturing = -1;
     std::wstring shortcutError;
+
+    // Read once a frame while the menu shows, and the notices only when they change.
+    Update update;
+    bool noticesRead = false;
+    unsigned noticeVersion = 0;
+    std::vector<MenuNotice> notices;
+    bool problems = false;
 
     Pixels logoPixels;
     Texture logo;
@@ -972,10 +985,18 @@ void NoticeIcon(ImDrawList* draw, ImVec2 center, LogLevel level)
     }
 }
 
-bool HasProblems()
+// Notices are copied from the log only when they change.
+void UpdateNotices()
 {
-    const auto notices = Notices();
-    return std::any_of(notices.begin(), notices.end(), [](const Notice& notice) { return notice.level >= LogLevel::Warning; });
+    const unsigned version = NoticeVersion();
+    if (m.noticesRead && version == m.noticeVersion)
+        return;
+    m.noticesRead = true;
+    m.noticeVersion = version;
+    m.notices.clear();
+    for (const Notice& notice : Notices())
+        m.notices.push_back({ notice.level, Utf8(notice.text) });
+    m.problems = std::any_of(m.notices.begin(), m.notices.end(), [](const MenuNotice& notice) { return notice.level >= LogLevel::Warning; });
 }
 
 void ShowToast(std::string text, std::string key = {}, ULONGLONG duration = kToastDuration)
@@ -2790,7 +2811,7 @@ void SettingsTab()
 
 void StatusTab()
 {
-    const Update update = AvailableUpdate();
+    const Update& update = m.update;
     if (!update.version.empty())
     {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, Color(theme::kAccent, 30));
@@ -2810,14 +2831,13 @@ void StatusTab()
     Heading("STATUS");
     ImDrawList* draw = ImGui::GetWindowDrawList();
     PushSize(13.5f);
-    for (const Notice& notice : Notices())
+    for (const MenuNotice& notice : m.notices)
     {
         const ImVec2 start = ImGui::GetCursorScreenPos();
         NoticeIcon(draw, start + ImVec2(S(8), ImGui::GetFontSize() / 2 + S(1)), notice.level);
         ImGui::SetCursorScreenPos(start + ImVec2(S(26), 0));
         ImGui::PushTextWrapPos(0.0f);
-        const std::string text = Utf8(notice.text);
-        ImGui::TextUnformatted(text.c_str(), text.c_str() + text.size());
+        ImGui::TextUnformatted(notice.text.c_str(), notice.text.c_str() + notice.text.size());
         ImGui::PopTextWrapPos();
     }
     ImGui::PopFont();
@@ -2883,8 +2903,7 @@ void Header(ImVec2 origin, float width)
         SaveIcon(draw, start + saveSize * 0.5f, S(14), m.unsaved ? kAccentHover : kBorderStrong);
     }
 
-    const Update update = AvailableUpdate();
-    if (!update.version.empty())
+    if (!m.update.version.empty())
     {
         PushSize(11.5f);
         const char* tag = "UPDATE";
@@ -2932,7 +2951,7 @@ void Tabs(ImVec2 origin, float width)
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const float tabWidth = (width - S(kPadding) * 2) / count;
-    const bool problems = HasProblems();
+    const bool problems = m.problems;
     PushSize(14);
     for (int i = 0; i < count; ++i)
     {
@@ -3055,6 +3074,8 @@ void Footer(ImVec2 origin, ImVec2 size)
 
 void DrawMenu()
 {
+    m.update = AvailableUpdate();
+    UpdateNotices();
     const ImGuiIO& io = ImGui::GetIO();
     const float width = std::min(S(kWidth), io.DisplaySize.x - S(kMargin) * 2);
     const float available = std::max(io.DisplaySize.y - S(kMargin) * 2, 1.0f);
