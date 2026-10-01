@@ -253,6 +253,8 @@ struct Menu
     PendingWrite unwritten;
     PendingWrite leftBehind;
     ULONGLONG lastFrame = 0;
+    // Loads the active preset again once ReShade tried to write the one left behind, which clears its error.
+    bool reloadAfterWrite = false;
 
     // The active preset, read from ReShade at the start of every frame and after every switch.
     fs::path current;
@@ -270,6 +272,8 @@ struct Menu
     // The saved game being played, by its folder's name. Empty for a window picked for this session only.
     DWORD gameProcess = 0;
     std::wstring game;
+    // The game as saved, to notice when the launcher renames it.
+    fs::path gameExecutable;
     fs::path gamePreset;
     // The game's preset, when switching to it waits for the changes to the preset in followFrom.
     fs::path followPreset;
@@ -1206,7 +1210,13 @@ bool SetPreset(const fs::path& preset)
     m.current = CurrentPreset();
     m.foldersDirty = true;
     if (!SamePath(m.current, left))
+    {
         m.leftBehind = { left, GetTickCount64() };
+        // ReShade cannot write the preset it left when its folder is gone, such as after the launcher renamed the
+        // game, and reports that until it loads a preset again.
+        std::error_code error;
+        m.reloadAfterWrite = !left.empty() && !fs::is_directory(left.parent_path(), error);
+    }
     return SamePath(m.current, preset);
 }
 
@@ -1276,13 +1286,47 @@ SwitchResult SwitchNow(const fs::path& target)
     return switched ? SwitchResult::Switched : SwitchResult::Failed;
 }
 
+// Whether the launcher renamed or removed the saved game being played since the menu followed it.
+bool GameRenamed()
+{
+    if (m.game.empty())
+        return false;
+    const auto game = std::find_if(g.autoGames.begin(), g.autoGames.end(), [](const AutoGame& saved) { return saved.executable == m.gameExecutable; });
+    return game == g.autoGames.end() || FolderName(game->name) != m.game;
+}
+
+// Renaming a game in the launcher renames its folder. When the active preset was in it, ReShade moves to the same
+// preset in the new folder, so it does not write the preset back to the old one.
+void FollowRenamedFolder(const std::wstring& previous)
+{
+    if (!SamePath(m.current.parent_path(), PresetsRoot() / previous))
+        return;
+    const fs::path moved = PresetsRoot() / m.game / m.current.filename();
+    std::error_code error;
+    if (SamePath(moved, m.current) || !fs::exists(moved, error))
+        return;
+    // With auto-save on, the values on screen are the saved ones, including any ReShade had yet to write. Unsaved
+    // changes cannot come along, since switching loads the preset from its file.
+    if (m.autoSave && EffectsLoaded())
+        m.runtime->export_current_preset(Utf8(moved.wstring()).c_str());
+    else if (m.unsaved || m.presetChanged)
+        ShowToast("Unsaved changes to " + Utf8(moved.stem().wstring()) + " were dropped, since its game was renamed");
+    m.unsaved = false;
+    m.presetChanged = false;
+    m.unwritten = {};
+    m.active.clear();
+    ReadPresetEffects(moved);
+    SetPreset(moved);
+}
+
 // Switching to a game switches to the preset last used in it, and switching presets while playing a saved game
 // is remembered for it. Only presets in the presets folder are remembered.
 void FollowGame()
 {
     const fs::path current = m.current;
     const DWORD process = g.activeGame ? g.activeGame->processId : 0;
-    if (process == m.gameProcess)
+    const bool renamed = process == m.gameProcess && GameRenamed();
+    if (process == m.gameProcess && !renamed)
     {
         if (!m.game.empty() && !SamePath(current, m.gamePreset))
         {
@@ -1302,8 +1346,11 @@ void FollowGame()
         return;
     }
 
+    // A renamed game is followed again under its new name, in its renamed folder.
+    const std::wstring renamedFrom = renamed ? m.game : std::wstring();
     m.gameProcess = process;
     m.game.clear();
+    m.gameExecutable.clear();
     m.followPreset.clear();
     m.foldersDirty = true;
     fs::path executable;
@@ -1319,25 +1366,29 @@ void FollowGame()
         if (MatchesExecutable(game, executable))
         {
             m.game = FolderName(game.name);
+            m.gameExecutable = game.executable;
             break;
         }
     if (m.game.empty())
         return;
+    if (!renamedFrom.empty())
+        FollowRenamedFolder(renamedFrom);
 
     // Games saved by filename, like Roblox, move with every update, so their icon is kept while they run.
     RequestScan(executable, PresetsRoot() / m.game / L"logo.png");
 
     const fs::path preset = RememberedPreset(m.game);
+    const fs::path active = m.current;
     if (preset.empty())
     {
-        if (const std::wstring relative = LibraryPath(current); !relative.empty())
+        if (const std::wstring relative = LibraryPath(active); !relative.empty())
             SetGamePreset(m.game, relative);
     }
-    else if (std::error_code error; !SamePath(preset, current) && fs::exists(preset, error) && SwitchNow(preset) == SwitchResult::Unsaved)
+    else if (std::error_code error; !SamePath(preset, active) && fs::exists(preset, error) && SwitchNow(preset) == SwitchResult::Unsaved)
     {
-        ShowToast("Save or discard the changes to " + Utf8(current.stem().wstring()) + " to switch to " + Utf8(preset.stem().wstring()));
+        ShowToast("Save or discard the changes to " + Utf8(active.stem().wstring()) + " to switch to " + Utf8(preset.stem().wstring()));
         m.followPreset = preset;
-        m.followFrom = current;
+        m.followFrom = active;
     }
     m.gamePreset = m.current;
 }
@@ -3328,6 +3379,12 @@ void UpdateFrame(bool menu)
     for (PendingWrite* write : { &m.unwritten, &m.leftBehind })
         if (!write->preset.empty() && m.lastFrame > write->since + kReShadeWriteDelay)
             *write = {};
+    // The values on screen are the ones loading gives, unless there are changes the reload would drop.
+    if (m.reloadAfterWrite && m.leftBehind.preset.empty() && !m.unsaved && !m.presetChanged)
+    {
+        m.reloadAfterWrite = false;
+        m.runtime->set_current_preset_path(Utf8(m.current.wstring()).c_str());
+    }
     m.lastFrame = GetTickCount64();
     // ReShade's own menu and shortcuts can switch presets too, saving the one they leave.
     if (const fs::path current = CurrentPreset(); !SamePath(current, m.current))
