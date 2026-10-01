@@ -1164,6 +1164,11 @@ std::wstring ReadShortcut(const fs::path& directory, const wchar_t* name, const 
     return value;
 }
 
+bool WriteShortcut(const fs::path& directory, const wchar_t* name, const std::wstring& value)
+{
+    return WritePrivateProfileStringW(L"Input", name, value.c_str(), (directory / L"RobloxShadeHost.ini").c_str()) != FALSE;
+}
+
 bool HostRunning(const fs::path& directory)
 {
     bool running = false;

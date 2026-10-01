@@ -103,7 +103,9 @@ std::optional<Installation> FindInstallation();
 // The add-on whose files are in the folder, to preselect it.
 Addon InstalledAddon(const std::filesystem::path& directory);
 
+// A shortcut in the folder's RobloxShadeHost.ini, which the host reads when it starts.
 std::wstring ReadShortcut(const std::filesystem::path& directory, const wchar_t* name, const wchar_t* fallback);
+bool WriteShortcut(const std::filesystem::path& directory, const wchar_t* name, const std::wstring& value);
 
 bool HostRunning(const std::filesystem::path& directory);
 void LaunchHost(const std::filesystem::path& directory);

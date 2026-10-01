@@ -14,7 +14,7 @@ Unishade is an open-source project for universal post-processing without injecti
 
 ## Getting started
 
-1. [Download Setup](https://unishade.me/download/) and run it. You get ReShade, every official effect and a set of presets.
+1. [Download Setup](https://unishade.me/download/) and run it.
 2. Open your game, click **Add game** in Unishade and pick its window.
 3. Press **Home** in the game and pick a preset.
 
