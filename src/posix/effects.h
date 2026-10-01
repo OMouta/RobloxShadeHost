@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -61,6 +62,7 @@ struct Effect
     std::filesystem::path path;
     std::string file; // the filename, which presets use as the section name
     bool compiled = false;
+    bool cached = false; // taken from the compile cache
     std::string errors; // the compiler's errors and warnings
     reshadefx::effect_module module;
     std::unordered_map<std::string, std::vector<uint32_t>> spirv; // SPIR-V code by entry point
@@ -77,11 +79,17 @@ struct Effect
 
 using Definitions = std::vector<std::pair<std::string, std::string>>;
 
+// Effect files and preset sections compare without case, as on Windows.
+struct NoCase
+{
+    bool operator()(const std::string& a, const std::string& b) const { return Lowercase(a) < Lowercase(b); }
+};
+
 // A preset's preprocessor definitions: the ones for every effect and the ones in each effect's section.
 struct PresetDefinitions
 {
     Definitions global;
-    std::map<std::string, Definitions> effects;
+    std::map<std::string, Definitions, NoCase> effects;
     bool operator==(const PresetDefinitions&) const = default;
 };
 
@@ -104,13 +112,37 @@ struct EffectInput
 // "Name@File.fx", as presets list techniques.
 std::string TechniqueKey(const Technique& technique, const Effect& effect);
 
+// Compiling, which needs no graphics card.
+struct CompileOptions
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t vendor = 0;
+    uint32_t device = 0;
+    std::vector<fs::path> includePaths;
+    fs::path cacheDirectory; // empty to compile without the cache
+};
+
+// The macros an effect is compiled with: ReShade's own, such as BUFFER_WIDTH, then the given definitions.
+Definitions EffectMacros(const Definitions& definitions, const CompileOptions& options);
+// What the compiled effect depends on: the compiler, the macros it starts with and the text of the effect and of
+// every file it includes. The cache keeps an effect for as long as this stays the same.
+uint64_t CompileKey(const Definitions& macros, const std::vector<std::string>& files);
+// Compiles an effect into SPIR-V, or reads it from the cache. cancelled is checked between steps, so a compile
+// nobody waits for anymore stops early.
+bool CompileEffect(Effect& effect, const fs::path& path, const Definitions& definitions, const CompileOptions& options,
+                   const std::function<bool()>& cancelled = {});
+
 class Runtime
 {
 public:
+    ~Runtime();
+
     bool Init(const Settings& settings);
     void Shutdown();
 
-    // The size of the game's picture. Effects are compiled for it, so a new size compiles them again.
+    // The size of the game's picture. Effects are compiled for it, so a new size compiles them again once it
+    // has stayed the same for a moment. Until then the picture is shown without effects.
     void SetSize(uint32_t width, uint32_t height);
     uint32_t Width() const { return width; }
     uint32_t Height() const { return height; }
@@ -118,7 +150,7 @@ public:
     // Finds the effects again and compiles them on worker threads, starting at the next Update, since the frame
     // being recorded may still use the current ones. Effects the current preset uses come first.
     void Reload() { reloadRequested = true; }
-    bool Loading() const { return loaderRunning || reloadRequested; }
+    bool Loading() const { return loaderRunning || reloadRequested || resizePending; }
     // How many effect files are compiled out of how many were found.
     std::pair<size_t, size_t> LoadingProgress() const { return { loadedCount.load(), totalCount.load() }; }
     // Takes in compiled effects. Call once per frame on the main thread.
@@ -182,7 +214,14 @@ private:
         reshadefx::texture_desc desc;
     };
 
+    struct Loader
+    {
+        std::thread thread;
+        std::atomic<bool> done = false;
+    };
+
     void StopLoader();
+    void JoinLoaders(bool wait);
     void ReloadNow();
     void AddEffect(Effect&& effect);
     void SortTechniques();
@@ -196,11 +235,17 @@ private:
     GpuImage* Texture(const reshadefx::texture& texture, Effect& effect);
     fs::path FindTexture(const std::string& source);
     void GenerateMipmaps(VkCommandBuffer commands, const GpuImage& image);
+    void SavePipelineCache();
     std::vector<uint8_t> ReadImage(VkImage image, uint32_t x, uint32_t y, bool foreign);
 
     Settings settings;
     uint32_t width = 0;
     uint32_t height = 0;
+    // Effects are compiled for one size. When the picture changes size they wait until it has settled.
+    uint32_t compiledWidth = 0;
+    uint32_t compiledHeight = 0;
+    bool resizePending = false;
+    std::chrono::steady_clock::time_point resizeTime;
 
     GpuImage backbuffer; // what passes without a render target write to
     GpuImage color;      // a copy of backbuffer, which effects read as COLOR
@@ -208,6 +253,7 @@ private:
     GpuImage blank;      // bound where an effect reads a texture it is writing in the same pass
     GpuBuffer staging;
     GpuBuffer readback;
+    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
     std::map<std::string, SharedTexture> sharedTextures;
     std::vector<std::pair<std::vector<uint8_t>, VkSampler>> samplers;
     std::vector<std::pair<std::string, fs::path>> textureFiles; // lowercase relative path, full path
@@ -221,11 +267,13 @@ private:
     bool dirty = false;
 
     // Compiling happens on a loader thread with workers of its own. Compiled effects wait in finished until
-    // Update takes them.
-    std::thread loader;
-    std::atomic<bool> cancel = false;
+    // Update takes them. A new load does not wait for the one before: that one stops after its current step,
+    // and what it still finishes is dropped, since it belongs to an older generation.
+    std::vector<std::unique_ptr<Loader>> loaders;
+    std::atomic<uint64_t> generation = 0;
     std::atomic<bool> loaderRunning = false;
     bool reloadRequested = false;
+    bool summaryPending = false;
     std::atomic<size_t> loadedCount = 0;
     std::atomic<size_t> totalCount = 0;
     std::mutex finishedMutex;

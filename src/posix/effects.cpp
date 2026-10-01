@@ -8,14 +8,23 @@
 
 #include <stb_image.h>
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <limits>
 #include <random>
 #include <set>
+#include <tuple>
+
+// A hash of ReShade's compiler sources, from posix.cmake, so a new or changed compiler starts a new cache.
+#ifndef UNISHADE_COMPILER_ID
+#define UNISHADE_COMPILER_ID "unknown"
+#endif
 
 namespace fx
 {
@@ -65,6 +74,11 @@ constexpr const char* kCompatibilityMacros =
     "#define tex2Dgather1 tex2DgatherG\n"
     "#define tex2Dgather2 tex2DgatherB\n"
     "#define tex2Dgather3 tex2DgatherA\n";
+
+// A new size waits this long for the next before effects are compiled for it.
+constexpr auto kResizeDelay = std::chrono::milliseconds(250);
+// The compile cache drops the entries used longest ago beyond this.
+constexpr uintmax_t kCacheLimit = 256 * 1024 * 1024;
 
 const reshadefx::annotation* FindAnnotation(const std::vector<reshadefx::annotation>& annotations, std::string_view name)
 {
@@ -193,17 +207,9 @@ struct CompileJob
     Definitions definitions;
 };
 
-struct CompileOptions
-{
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t vendor = 0;
-    uint32_t device = 0;
-    std::vector<fs::path> includePaths;
-};
-
 void BuildUniforms(Effect& effect)
 {
+    effect.uniforms.clear();
     effect.uniformData.assign((effect.module.total_uniform_size + 15) & ~15u, 0);
     for (size_t i = 0; i < effect.module.uniforms.size(); ++i)
     {
@@ -241,65 +247,455 @@ void BuildUniforms(Effect& effect)
     }
 }
 
-bool Compile(Effect& effect, const CompileJob& job, const CompileOptions& options)
+// The compile cache
+
+uint64_t Hash(std::string_view data, uint64_t hash = 0xcbf29ce484222325)
 {
-    effect.path = job.path;
-    effect.file = job.path.filename().string();
+    for (const unsigned char c : data)
+        hash = (hash ^ c) * 0x100000001b3;
+    return hash;
+}
 
-    reshadefx::preprocessor pp;
-    // ReShade 6.8, running on Vulkan.
-    pp.add_macro_definition("__RESHADE__", "60800");
-    pp.add_macro_definition("__RESHADE_PERMUTATION__", "0");
-    pp.add_macro_definition("__RESHADE_PERFORMANCE_MODE__", "0");
-    pp.add_macro_definition("__VENDOR__", std::to_string(options.vendor));
-    pp.add_macro_definition("__DEVICE__", std::to_string(options.device));
-    pp.add_macro_definition("__RENDERER__", "131072"); // 0x20000, Vulkan
-    pp.add_macro_definition("__APPLICATION__", "0");
-    pp.add_macro_definition("BUFFER_WIDTH", std::to_string(options.width));
-    pp.add_macro_definition("BUFFER_HEIGHT", std::to_string(options.height));
-    pp.add_macro_definition("BUFFER_RCP_WIDTH", "(1.0 / BUFFER_WIDTH)");
-    pp.add_macro_definition("BUFFER_RCP_HEIGHT", "(1.0 / BUFFER_HEIGHT)");
-    pp.add_macro_definition("BUFFER_COLOR_SPACE", "1"); // sRGB
-    pp.add_macro_definition("BUFFER_COLOR_FORMAT", "87"); // B8G8R8A8_UNORM, in ReShade's numbering
-    pp.add_macro_definition("BUFFER_COLOR_BIT_DEPTH", "8");
-    // The first definition of a name wins, so the effect's own come first.
-    for (const auto& [name, value] : job.definitions)
-        if (!name.empty())
-            pp.add_macro_definition(name, value.empty() ? "1" : value);
-    pp.add_include_path(job.path.parent_path());
-    for (const fs::path& include : options.includePaths)
-        pp.add_include_path(include);
-    pp.append_string(kCompatibilityMacros);
+// Also hashes where each piece ends, so "ab" + "c" and "a" + "bc" differ.
+uint64_t HashPiece(std::string_view data, uint64_t hash)
+{
+    const uint64_t size = data.size();
+    return Hash(data, Hash(std::string_view(reinterpret_cast<const char*>(&size), sizeof(size)), hash));
+}
 
-    const bool preprocessed = pp.append_file(job.path);
-    effect.errors = pp.errors();
-    if (!preprocessed)
+// Bump when what the cache stores changes.
+constexpr uint32_t kCacheFormat = 1;
+constexpr char kCacheMagic[8] = "UNIFXC1";
+
+bool ReadText(const fs::path& path, std::string& text)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
         return false;
+    text.assign(std::istreambuf_iterator<char>(input), {});
+    return !input.bad();
+}
 
-    // Vulkan's clip space is upside down compared to Direct3D's, which effects are written for.
-    std::unique_ptr<reshadefx::codegen> codegen(reshadefx::create_codegen_spirv(true, false, false, false, true));
-    reshadefx::parser parser;
-    const bool parsed = parser.parse(pp.output(), codegen.get());
-    effect.errors += parser.errors();
-    if (!parsed)
-        return false;
-    effect.module = codegen->module();
-
-    for (const auto& [name, type] : effect.module.entry_points)
+// Writes through a file of its own, so two processes or threads writing the same entry cannot mix their data.
+bool WriteCacheFile(const fs::path& path, const std::string& contents)
+{
+    std::error_code error;
+    fs::create_directories(path.parent_path(), error);
+    const fs::path temporary = path.string() + "." + std::to_string(getpid()) + "-" +
+                               std::to_string(std::hash<std::thread::id>()(std::this_thread::get_id())) + ".tmp";
     {
-        std::string binary, assembly, errors;
-        if (!codegen->assemble_code_for_entry_point(name, binary, assembly, errors))
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output << contents;
+        if (!output.flush())
         {
-            effect.errors += errors;
+            output.close();
+            fs::remove(temporary, error);
             return false;
         }
-        std::vector<uint32_t>& code = effect.spirv[name];
-        code.resize(binary.size() / 4);
-        std::memcpy(code.data(), binary.data(), code.size() * 4);
     }
-    BuildUniforms(effect);
-    effect.compiled = true;
+    fs::rename(temporary, path, error);
+    if (error)
+        fs::remove(temporary, error);
+    return !error;
+}
+
+// Writes an effect for the cache and reads it back with the same Visit functions, so the two cannot drift apart.
+struct Writer
+{
+    std::string data;
+    template <class T>
+    void Raw(T& value) { data.append(reinterpret_cast<const char*>(&value), sizeof(T)); }
+    void Text(std::string& value)
+    {
+        uint64_t size = value.size();
+        Raw(size);
+        data += value;
+    }
+    void Bytes(const void* bytes, size_t size) { data.append(static_cast<const char*>(bytes), size); }
+    template <class T>
+    bool Count(std::vector<T>& values, size_t = 1)
+    {
+        uint64_t size = values.size();
+        Raw(size);
+        return true;
+    }
+};
+
+struct Reader
+{
+    std::string_view data;
+    size_t at = 0;
+    bool ok = true;
+
+    template <class T>
+    void Raw(T& value)
+    {
+        if (!ok || data.size() - at < sizeof(T))
+        {
+            ok = false;
+            value = T();
+            return;
+        }
+        std::memcpy(&value, data.data() + at, sizeof(T));
+        at += sizeof(T);
+    }
+    void Text(std::string& value)
+    {
+        uint64_t size = 0;
+        Raw(size);
+        if (!ok || data.size() - at < size)
+        {
+            ok = false;
+            return;
+        }
+        value.assign(data.substr(at, size));
+        at += size;
+    }
+    void Bytes(void* bytes, size_t size)
+    {
+        if (!ok || data.size() - at < size)
+        {
+            ok = false;
+            return;
+        }
+        std::memcpy(bytes, data.data() + at, size);
+        at += size;
+    }
+    // Every element takes at least a byte, which stops a damaged count from asking for too much memory.
+    template <class T>
+    bool Count(std::vector<T>& values, size_t elementSize = 1)
+    {
+        uint64_t size = 0;
+        Raw(size);
+        if (!ok || size > (data.size() - at) / elementSize)
+            return ok = false;
+        values.resize(size);
+        return true;
+    }
+};
+
+template <class A, class T>
+    requires std::is_arithmetic_v<T> || std::is_enum_v<T>
+void Visit(A& archive, T& value)
+{
+    archive.Raw(value);
+}
+
+template <class A>
+void Visit(A& archive, std::string& value)
+{
+    archive.Text(value);
+}
+
+template <class A, class T, size_t N>
+void Visit(A& archive, T (&values)[N])
+{
+    for (T& value : values)
+        Visit(archive, value);
+}
+
+template <class A, class T, class U>
+void Visit(A& archive, std::pair<T, U>& value)
+{
+    Visit(archive, value.first);
+    Visit(archive, value.second);
+}
+
+template <class A, class T>
+void Visit(A& archive, std::vector<T>& values)
+{
+    if (archive.Count(values))
+        for (T& value : values)
+            Visit(archive, value);
+}
+
+// Numbers in one piece, which SPIR-V is mostly made of.
+template <class A, class T>
+    requires std::is_arithmetic_v<T>
+void Visit(A& archive, std::vector<T>& values)
+{
+    if (archive.Count(values, sizeof(T)))
+        archive.Bytes(values.data(), values.size() * sizeof(T));
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::type& type)
+{
+    uint32_t base = type.base, rows = type.rows, cols = type.cols, qualifiers = type.qualifiers;
+    Visit(archive, base);
+    Visit(archive, rows);
+    Visit(archive, cols);
+    Visit(archive, qualifiers);
+    type.base = static_cast<reshadefx::type::datatype>(base);
+    type.rows = rows;
+    type.cols = cols;
+    type.qualifiers = qualifiers;
+    Visit(archive, type.array_length);
+    Visit(archive, type.struct_definition);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::constant& value)
+{
+    Visit(archive, value.as_uint);
+    Visit(archive, value.string_data);
+    Visit(archive, value.array_data);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::annotation& annotation)
+{
+    Visit(archive, annotation.type);
+    Visit(archive, annotation.name);
+    Visit(archive, annotation.value);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::texture& texture)
+{
+    Visit(archive, texture.width);
+    Visit(archive, texture.height);
+    Visit(archive, texture.depth);
+    Visit(archive, texture.levels);
+    Visit(archive, texture.type);
+    Visit(archive, texture.format);
+    Visit(archive, texture.id);
+    Visit(archive, texture.name);
+    Visit(archive, texture.unique_name);
+    Visit(archive, texture.semantic);
+    Visit(archive, texture.annotations);
+    Visit(archive, texture.render_target);
+    Visit(archive, texture.storage_access);
+    Visit(archive, texture.semantic_binding);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::sampler& sampler)
+{
+    Visit(archive, sampler.filter);
+    Visit(archive, sampler.address_u);
+    Visit(archive, sampler.address_v);
+    Visit(archive, sampler.address_w);
+    Visit(archive, sampler.min_lod);
+    Visit(archive, sampler.max_lod);
+    Visit(archive, sampler.lod_bias);
+    Visit(archive, sampler.type);
+    Visit(archive, sampler.id);
+    Visit(archive, sampler.name);
+    Visit(archive, sampler.unique_name);
+    Visit(archive, sampler.texture_name);
+    Visit(archive, sampler.annotations);
+    Visit(archive, sampler.srgb);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::storage& storage)
+{
+    Visit(archive, storage.level);
+    Visit(archive, storage.type);
+    Visit(archive, storage.id);
+    Visit(archive, storage.name);
+    Visit(archive, storage.unique_name);
+    Visit(archive, storage.texture_name);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::uniform& uniform)
+{
+    Visit(archive, uniform.type);
+    Visit(archive, uniform.name);
+    Visit(archive, uniform.unique_name);
+    Visit(archive, uniform.size);
+    Visit(archive, uniform.offset);
+    Visit(archive, uniform.annotations);
+    Visit(archive, uniform.has_initializer_value);
+    Visit(archive, uniform.initializer_value);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::texture_binding& binding)
+{
+    Visit(archive, binding.index);
+    Visit(archive, binding.entry_point_binding);
+    Visit(archive, binding.srgb);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::sampler_binding& binding)
+{
+    Visit(archive, binding.index);
+    Visit(archive, binding.entry_point_binding);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::storage_binding& binding)
+{
+    Visit(archive, binding.index);
+    Visit(archive, binding.entry_point_binding);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::pass& pass)
+{
+    Visit(archive, pass.name);
+    Visit(archive, pass.render_target_names);
+    Visit(archive, pass.vs_entry_point);
+    Visit(archive, pass.ps_entry_point);
+    Visit(archive, pass.cs_entry_point);
+    Visit(archive, pass.generate_mipmaps);
+    Visit(archive, pass.clear_render_targets);
+    Visit(archive, pass.blend_enable);
+    Visit(archive, pass.source_color_blend_factor);
+    Visit(archive, pass.dest_color_blend_factor);
+    Visit(archive, pass.color_blend_op);
+    Visit(archive, pass.source_alpha_blend_factor);
+    Visit(archive, pass.dest_alpha_blend_factor);
+    Visit(archive, pass.alpha_blend_op);
+    Visit(archive, pass.srgb_write_enable);
+    Visit(archive, pass.render_target_write_mask);
+    Visit(archive, pass.stencil_enable);
+    Visit(archive, pass.stencil_read_mask);
+    Visit(archive, pass.stencil_write_mask);
+    Visit(archive, pass.stencil_reference_value);
+    Visit(archive, pass.stencil_comparison_func);
+    Visit(archive, pass.stencil_pass_op);
+    Visit(archive, pass.stencil_fail_op);
+    Visit(archive, pass.stencil_depth_fail_op);
+    Visit(archive, pass.topology);
+    Visit(archive, pass.num_vertices);
+    Visit(archive, pass.viewport_width);
+    Visit(archive, pass.viewport_height);
+    Visit(archive, pass.viewport_dispatch_z);
+    Visit(archive, pass.texture_bindings);
+    Visit(archive, pass.sampler_bindings);
+    Visit(archive, pass.storage_bindings);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::technique& technique)
+{
+    Visit(archive, technique.name);
+    Visit(archive, technique.passes);
+    Visit(archive, technique.annotations);
+}
+
+template <class A>
+void Visit(A& archive, reshadefx::effect_module& module)
+{
+    Visit(archive, module.textures);
+    Visit(archive, module.samplers);
+    Visit(archive, module.storages);
+    Visit(archive, module.uniforms);
+    Visit(archive, module.spec_constants);
+    Visit(archive, module.total_uniform_size);
+    Visit(archive, module.techniques);
+    Visit(archive, module.entry_points);
+}
+
+// The compiled part of an effect: its module, SPIR-V and warnings.
+template <class A>
+void VisitCompiled(A& archive, Effect& effect)
+{
+    Visit(archive, effect.module);
+    std::vector<std::pair<std::string, std::vector<uint32_t>>> spirv(effect.spirv.begin(), effect.spirv.end());
+    Visit(archive, spirv);
+    effect.spirv = { spirv.begin(), spirv.end() };
+    Visit(archive, effect.errors);
+}
+
+// One entry per effect, set of macros and include folders. It lists the files the effect was compiled from,
+// which must still have the text they had then.
+fs::path CacheEntry(const CompileOptions& options, const fs::path& path, const Definitions& macros)
+{
+    uint64_t hash = HashPiece(UNISHADE_COMPILER_ID, Hash({}));
+    hash = HashPiece(path.string(), hash);
+    for (const auto& [name, value] : macros)
+        hash = HashPiece(value, HashPiece(name, hash));
+    for (const fs::path& include : options.includePaths)
+        hash = HashPiece(include.string(), hash);
+    char name[32];
+    std::snprintf(name, sizeof(name), "%016llx.bin", static_cast<unsigned long long>(hash));
+    return options.cacheDirectory / (path.stem().string() + "-" + name);
+}
+
+bool ReadCache(Effect& effect, const fs::path& entry, const Definitions& macros)
+{
+    std::string data;
+    if (!ReadText(entry, data))
+        return false;
+    Reader in{ data };
+    char magic[sizeof(kCacheMagic)]{};
+    uint32_t format = 0;
+    uint64_t key = 0, checksum = 0;
+    std::vector<std::string> paths;
+    Visit(in, magic);
+    Visit(in, format);
+    Visit(in, key);
+    Visit(in, paths);
+    Visit(in, checksum);
+    if (!in.ok || std::memcmp(magic, kCacheMagic, sizeof(magic)) != 0 || format != kCacheFormat || paths.empty() ||
+        Hash(std::string_view(data).substr(in.at)) != checksum)
+        return false;
+    std::vector<std::string> files(paths.size());
+    for (size_t i = 0; i < paths.size(); ++i)
+        if (!ReadText(paths[i], files[i]))
+            return false;
+    if (CompileKey(macros, files) != key)
+        return false;
+    VisitCompiled(in, effect);
+    if (!in.ok || in.at != data.size())
+        return false;
+    // The entry was used now, which keeps it when the cache is pruned.
+    std::error_code error;
+    fs::last_write_time(entry, fs::file_time_type::clock::now(), error);
     return true;
+}
+
+void WriteCache(Effect& effect, const fs::path& entry, const Definitions& macros, std::vector<std::string> paths)
+{
+    std::vector<std::string> files(paths.size());
+    for (size_t i = 0; i < paths.size(); ++i)
+        if (!ReadText(paths[i], files[i]))
+            return;
+    Writer payload;
+    VisitCompiled(payload, effect);
+    Writer out;
+    char magic[sizeof(kCacheMagic)];
+    std::memcpy(magic, kCacheMagic, sizeof(magic));
+    uint32_t format = kCacheFormat;
+    uint64_t key = CompileKey(macros, files), checksum = Hash(payload.data);
+    Visit(out, magic);
+    Visit(out, format);
+    Visit(out, key);
+    Visit(out, paths);
+    Visit(out, checksum);
+    WriteCacheFile(entry, out.data + payload.data);
+}
+
+// Keeps the compile cache under its limit, dropping the entries used longest ago.
+void PruneCache(const fs::path& directory)
+{
+    std::vector<std::tuple<fs::file_time_type, uintmax_t, fs::path>> entries;
+    uintmax_t total = 0;
+    std::error_code error;
+    for (const fs::directory_entry& entry : fs::directory_iterator(directory, error))
+    {
+        if (!entry.is_regular_file(error) || entry.path().extension() != ".bin")
+            continue;
+        const uintmax_t size = entry.file_size(error);
+        entries.emplace_back(entry.last_write_time(error), size, entry.path());
+        total += size;
+    }
+    if (total <= kCacheLimit)
+        return;
+    std::sort(entries.begin(), entries.end());
+    for (const auto& [time, size, path] : entries)
+    {
+        if (total <= kCacheLimit / 4 * 3)
+            break;
+        if (fs::remove(path, error))
+            total -= size;
+    }
 }
 
 // Reads the values of a uniform in ReShade's layout: every array element and every matrix row starts on
@@ -326,6 +722,11 @@ std::string FormatFloat(float value)
 {
     return std::to_string(value);
 }
+
+fs::path CacheDirectory()
+{
+    return DataDirectory() / "cache";
+}
 } // namespace
 
 std::string TechniqueKey(const Technique& technique, const Effect& effect)
@@ -333,13 +734,145 @@ std::string TechniqueKey(const Technique& technique, const Effect& effect)
     return technique.name + "@" + effect.file;
 }
 
+Definitions EffectMacros(const Definitions& definitions, const CompileOptions& options)
+{
+    // ReShade 6.8, running on Vulkan. The first definition of a name wins, so these cannot be replaced.
+    Definitions macros = {
+        { "__RESHADE__", "60800" },
+        { "__RESHADE_PERMUTATION__", "0" },
+        { "__RESHADE_PERFORMANCE_MODE__", "0" },
+        { "__VENDOR__", std::to_string(options.vendor) },
+        { "__DEVICE__", std::to_string(options.device) },
+        { "__RENDERER__", "131072" }, // 0x20000, Vulkan
+        { "__APPLICATION__", "0" },
+        { "BUFFER_WIDTH", std::to_string(options.width) },
+        { "BUFFER_HEIGHT", std::to_string(options.height) },
+        { "BUFFER_RCP_WIDTH", "(1.0 / BUFFER_WIDTH)" },
+        { "BUFFER_RCP_HEIGHT", "(1.0 / BUFFER_HEIGHT)" },
+        { "BUFFER_COLOR_SPACE", "1" },   // sRGB
+        { "BUFFER_COLOR_FORMAT", "87" }, // B8G8R8A8_UNORM, in ReShade's numbering
+        { "BUFFER_COLOR_BIT_DEPTH", "8" },
+    };
+    for (const auto& [name, value] : definitions)
+        if (!name.empty())
+            macros.emplace_back(name, value.empty() ? "1" : value);
+    return macros;
+}
+
+uint64_t CompileKey(const Definitions& macros, const std::vector<std::string>& files)
+{
+    uint64_t hash = HashPiece(UNISHADE_COMPILER_ID, Hash({}));
+    const uint32_t format = kCacheFormat;
+    hash = Hash(std::string_view(reinterpret_cast<const char*>(&format), sizeof(format)), hash);
+    for (const auto& [name, value] : macros)
+        hash = HashPiece(value, HashPiece(name, hash));
+    for (const std::string& file : files)
+        hash = HashPiece(file, hash);
+    return hash;
+}
+
+bool CompileEffect(Effect& effect, const fs::path& path, const Definitions& definitions, const CompileOptions& options,
+                   const std::function<bool()>& cancelled)
+{
+    effect.path = path;
+    effect.file = path.filename().string();
+    const Definitions macros = EffectMacros(definitions, options);
+    fs::path entry;
+    if (!options.cacheDirectory.empty())
+    {
+        entry = CacheEntry(options, path, macros);
+        if (ReadCache(effect, entry, macros))
+        {
+            BuildUniforms(effect);
+            effect.compiled = effect.cached = true;
+            return true;
+        }
+        effect = {};
+        effect.path = path;
+        effect.file = path.filename().string();
+    }
+
+    reshadefx::preprocessor pp;
+    for (const auto& [name, value] : macros)
+        pp.add_macro_definition(name, value);
+    pp.add_include_path(path.parent_path());
+    for (const fs::path& include : options.includePaths)
+        pp.add_include_path(include);
+    pp.append_string(kCompatibilityMacros);
+
+    const bool preprocessed = pp.append_file(path);
+    effect.errors = pp.errors();
+    if (!preprocessed || (cancelled && cancelled()))
+        return false;
+
+    // Vulkan's clip space is upside down compared to Direct3D's, which effects are written for.
+    std::unique_ptr<reshadefx::codegen> codegen(reshadefx::create_codegen_spirv(true, false, false, false, true));
+    reshadefx::parser parser;
+    const bool parsed = parser.parse(pp.output(), codegen.get());
+    effect.errors += parser.errors();
+    if (!parsed)
+        return false;
+    effect.module = codegen->module();
+
+    for (const auto& [name, type] : effect.module.entry_points)
+    {
+        if (cancelled && cancelled())
+            return false;
+        std::string binary, assembly, errors;
+        if (!codegen->assemble_code_for_entry_point(name, binary, assembly, errors))
+        {
+            effect.errors += errors;
+            return false;
+        }
+        std::vector<uint32_t>& code = effect.spirv[name];
+        code.resize(binary.size() / 4);
+        std::memcpy(code.data(), binary.data(), code.size() * 4);
+    }
+    BuildUniforms(effect);
+    effect.compiled = true;
+
+    if (!entry.empty())
+    {
+        std::vector<std::string> paths{ path.string() };
+        for (const fs::path& included : pp.included_files())
+            paths.push_back(included.string());
+        std::sort(paths.begin() + 1, paths.end());
+        WriteCache(effect, entry, macros, std::move(paths));
+    }
+    return true;
+}
+
+Runtime::~Runtime()
+{
+    StopLoader();
+    JoinLoaders(true);
+}
+
 bool Runtime::Init(const Settings& initial)
 {
     settings = initial;
+    // Pipelines made before, so effects start faster. Data from another driver or graphics card is left out:
+    // drivers should ignore it, but not all do.
+    std::string data;
+    ReadText(CacheDirectory() / "pipelines.bin", data);
+    uint32_t header[4]{};
+    if (data.size() >= sizeof(header) + VK_UUID_SIZE)
+        std::memcpy(header, data.data(), sizeof(header));
+    if (header[1] != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || header[2] != gpu.properties.vendorID || header[3] != gpu.properties.deviceID ||
+        std::memcmp(data.data() + sizeof(header), gpu.properties.pipelineCacheUUID, VK_UUID_SIZE) != 0)
+        data.clear();
+    VkPipelineCacheCreateInfo cacheInfo{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+    cacheInfo.initialDataSize = data.size();
+    cacheInfo.pInitialData = data.data();
+    if (vkCreatePipelineCache(gpu.device, &cacheInfo, nullptr, &pipelineCache) != VK_SUCCESS)
+        pipelineCache = VK_NULL_HANDLE;
+
     if (!gpu.CreateImage(depth, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
         !gpu.CreateImage(blank, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
     VkCommandBuffer commands = gpu.BeginCommands();
+    if (!commands)
+        return false;
     const VkClearColorValue zero{};
     const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     for (const GpuImage* image : { &depth, &blank })
@@ -347,17 +880,21 @@ bool Runtime::Init(const Settings& initial)
         InitLayout(commands, *image);
         vkCmdClearColorImage(commands, image->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
     }
-    gpu.SubmitAndWait(commands);
-    return true;
+    return gpu.SubmitAndWait(commands);
 }
 
 void Runtime::Shutdown()
 {
     StopLoader();
+    JoinLoaders(true);
     if (!gpu.device)
         return;
     vkDeviceWaitIdle(gpu.device);
     DestroyAllGpu();
+    SavePipelineCache();
+    if (pipelineCache)
+        vkDestroyPipelineCache(gpu.device, pipelineCache, nullptr);
+    pipelineCache = VK_NULL_HANDLE;
     for (auto& [desc, sampler] : samplers)
         vkDestroySampler(gpu.device, sampler, nullptr);
     samplers.clear();
@@ -367,15 +904,34 @@ void Runtime::Shutdown()
     gpu.DestroyBuffer(readback);
 }
 
+void Runtime::SavePipelineCache()
+{
+    size_t size = 0;
+    if (!pipelineCache || vkGetPipelineCacheData(gpu.device, pipelineCache, &size, nullptr) != VK_SUCCESS || !size)
+        return;
+    std::string data(size, '\0');
+    if (vkGetPipelineCacheData(gpu.device, pipelineCache, &size, data.data()) == VK_SUCCESS)
+        WriteCacheFile(CacheDirectory() / "pipelines.bin", data.substr(0, size));
+}
+
+// Does not wait for the loader: it stops after the step it is on, and Update joins it once it has.
 void Runtime::StopLoader()
 {
-    cancel = true;
-    if (loader.joinable())
-        loader.join();
-    cancel = false;
-    loaderRunning = false;
     std::lock_guard lock(finishedMutex);
+    ++generation;
+    loaderRunning = false;
+    summaryPending = false;
     finished.clear();
+}
+
+void Runtime::JoinLoaders(bool wait)
+{
+    std::erase_if(loaders, [wait](const std::unique_ptr<Loader>& loader) {
+        if (!wait && !loader->done)
+            return false;
+        loader->thread.join();
+        return true;
+    });
 }
 
 bool Runtime::CreateTargets()
@@ -393,49 +949,78 @@ bool Runtime::CreateTargets()
         return false;
     }
     VkCommandBuffer commands = gpu.BeginCommands();
+    if (!commands)
+        return false;
     InitLayout(commands, backbuffer);
     InitLayout(commands, color);
-    gpu.SubmitAndWait(commands);
-    return true;
+    return gpu.SubmitAndWait(commands);
 }
 
 void Runtime::SetSize(uint32_t newWidth, uint32_t newHeight)
 {
+    const auto now = std::chrono::steady_clock::now();
     if (newWidth == width && newHeight == height)
+    {
+        if (resizePending && now - resizeTime >= kResizeDelay)
+            ReloadNow();
         return;
-    StopLoader();
+    }
+    // The first size applies right away. After that the picture goes on without effects until the size has
+    // stayed the same for a moment, so dragging a window's corner does not compile every effect for every size
+    // on the way.
+    const bool first = !width || !height;
     DestroyAllGpu();
     width = newWidth;
     height = newHeight;
     if (!CreateTargets())
     {
-        width = height = 0;
+        StopLoader();
+        width = height = compiledWidth = compiledHeight = 0;
+        resizePending = false;
         return;
     }
-    // Right away: the size changes before the frame records any pass, so nothing uses the old effects yet.
-    ReloadNow();
+    if (first)
+        ReloadNow();
+    else if (width == compiledWidth && height == compiledHeight)
+    {
+        // Back at the size the effects have.
+        resizePending = false;
+        loadedCount = totalCount.load();
+    }
+    else
+    {
+        // A load for the old size is no use anymore, and the effects it left out make that size need a new one.
+        if (loaderRunning)
+        {
+            StopLoader();
+            compiledWidth = compiledHeight = 0;
+        }
+        resizePending = true;
+        resizeTime = now;
+        loadedCount = 0;
+    }
 }
 
 void Runtime::ReloadNow()
 {
     reloadRequested = false;
+    resizePending = false;
     StopLoader();
     if (!width || !height)
         return;
     vkDeviceWaitIdle(gpu.device);
     DestroyAllGpu();
+    SavePipelineCache();
     effects.clear();
     techniques.clear();
     textureFilesScanned = false;
+    compiledWidth = width;
+    compiledHeight = height;
 
     // Effects the preset uses compile first, so the picture has its effects as soon as possible.
-    const PresetIni preset(ReadFile(presetPath));
-    std::string value;
     std::set<std::string> used;
-    if (preset.Get("", "Techniques", value))
-        for (const std::string& technique : PresetIni::Split(value))
-            if (const size_t at = technique.find('@'); at != std::string::npos)
-                used.insert(Lowercase(technique.substr(at + 1)));
+    for (const std::string& file : PresetEffectFiles(PresetIni(ReadFile(presetPath))))
+        used.insert(Lowercase(file));
 
     std::vector<CompileJob> jobs;
     std::set<std::string> seen;
@@ -448,11 +1033,12 @@ void Runtime::ReloadNow()
                 break;
             if (!it->is_regular_file(error) || Lowercase(it->path().extension().string()) != ".fx")
                 continue;
+            const std::string file = it->path().filename().string();
             // Presets name effects by file, so the first file of a name wins, as in ReShade.
-            if (!seen.insert(Lowercase(it->path().filename().string())).second)
+            if (!seen.insert(Lowercase(file)).second)
                 continue;
             CompileJob job{ it->path(), {} };
-            const std::string file = it->path().filename().string();
+            // The first definition of a name wins, so the effect's own come first.
             if (const auto found = presetDefinitions.effects.find(file); found != presetDefinitions.effects.end())
                 job.definitions = found->second;
             job.definitions.insert(job.definitions.end(), presetDefinitions.global.begin(), presetDefinitions.global.end());
@@ -470,6 +1056,7 @@ void Runtime::ReloadNow()
     options.vendor = gpu.properties.vendorID;
     options.device = gpu.properties.deviceID;
     options.includePaths = settings.effectPaths;
+    options.cacheDirectory = CacheDirectory() / "effects";
 
     loadedCount = 0;
     totalCount = jobs.size();
@@ -479,54 +1066,72 @@ void Runtime::ReloadNow()
         return;
     }
     Log(LogLevel::Info, "Compiling %zu effects for %ux%u...", jobs.size(), width, height);
+    const uint64_t current = generation;
     loaderRunning = true;
-    loader = std::thread([this, jobs = std::move(jobs), options] {
+    summaryPending = true;
+    Loader& loader = *loaders.emplace_back(std::make_unique<Loader>());
+    loader.thread = std::thread([this, &loader, jobs = std::move(jobs), options, current] {
+        const auto cancelled = [this, current] { return generation != current; };
         std::atomic<size_t> next = 0;
         std::vector<std::thread> workers;
         const unsigned count = std::max(1u, std::min(std::thread::hardware_concurrency(), 8u));
         for (unsigned i = 0; i < count; ++i)
             workers.emplace_back([&] {
-                for (size_t index; !cancel && (index = next++) < jobs.size();)
+                for (size_t index; !cancelled() && (index = next++) < jobs.size();)
                 {
                     Effect effect;
-                    Compile(effect, jobs[index], options);
-                    ++loadedCount;
+                    CompileEffect(effect, jobs[index].path, jobs[index].definitions, options, cancelled);
                     std::lock_guard lock(finishedMutex);
+                    if (cancelled())
+                        return;
+                    ++loadedCount;
                     finished.push_back(std::move(effect));
                 }
             });
         for (std::thread& worker : workers)
             worker.join();
-        loaderRunning = false;
+        if (!cancelled())
+            PruneCache(options.cacheDirectory);
+        {
+            std::lock_guard lock(finishedMutex);
+            if (!cancelled())
+                loaderRunning = false;
+        }
+        loader.done = true;
     });
 }
 
 void Runtime::Update()
 {
+    JoinLoaders(false);
+    if (resizePending && std::chrono::steady_clock::now() - resizeTime >= kResizeDelay)
+        ReloadNow();
     if (reloadRequested)
         ReloadNow();
     std::deque<Effect> arrived;
+    bool running;
     {
         std::lock_guard lock(finishedMutex);
         arrived.swap(finished);
+        running = loaderRunning;
     }
-    if (arrived.empty())
-        return;
     for (Effect& effect : arrived)
         AddEffect(std::move(effect));
-    SortTechniques();
-    if (!loaderRunning)
+    if (!arrived.empty())
+        SortTechniques();
+    // The loader is done once it stops running and everything it finished has been taken.
+    if (summaryPending && !running)
     {
-        std::lock_guard lock(finishedMutex);
-        if (finished.empty())
+        summaryPending = false;
+        size_t failed = 0, cached = 0;
+        for (const Effect& effect : effects)
         {
-            size_t failed = 0;
-            for (const Effect& effect : effects)
-                failed += !effect.compiled;
-            Log(LogLevel::Info, "Effects loaded: %zu compiled, %zu failed.", effects.size() - failed, failed);
-            for (const std::string& missing : MissingTechniques())
-                Report(LogLevel::Warning, "The preset uses %s, which is not installed.", missing.c_str());
+            failed += !effect.compiled;
+            cached += effect.cached;
         }
+        Log(LogLevel::Info, "Effects loaded: %zu compiled (%zu from the cache), %zu failed.", effects.size() - failed, cached, failed);
+        for (const std::string& missing : MissingTechniques())
+            Report(LogLevel::Warning, "The preset uses %s, which is not installed.", missing.c_str());
     }
 }
 
@@ -1354,7 +1959,7 @@ bool Runtime::CreateGpu(Effect& effect)
                 info.stage.module = shader->second;
                 info.stage.pName = pass.cs_entry_point.c_str();
                 info.layout = p.layout;
-                if (vkCreateComputePipelines(gpu.device, VK_NULL_HANDLE, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
+                if (vkCreateComputePipelines(gpu.device, pipelineCache, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
                     return fail("the graphics card rejected a compute shader", where);
                 p.dispatch[0] = std::max(1u, pass.viewport_width);
                 p.dispatch[1] = std::max(1u, pass.viewport_height);
@@ -1471,7 +2076,7 @@ bool Runtime::CreateGpu(Effect& effect)
             info.pColorBlendState = &blend;
             info.layout = p.layout;
             info.renderPass = p.renderPass;
-            if (vkCreateGraphicsPipelines(gpu.device, VK_NULL_HANDLE, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
+            if (vkCreateGraphicsPipelines(gpu.device, pipelineCache, 1, &info, nullptr, &p.pipeline) != VK_SUCCESS)
                 return fail("the graphics card rejected a shader", where);
         }
 
@@ -1578,7 +2183,8 @@ void Runtime::Render(VkCommandBuffer commands, const Source& source, bool enable
     frameTime = std::chrono::duration<float, std::milli>(now - lastFrame).count();
     lastFrame = now;
     ++frameCount;
-    if (!enabled)
+    // Effects compiled for another size wait for the new one.
+    if (!enabled || resizePending)
         return;
 
     bool colorStale = true;

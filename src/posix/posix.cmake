@@ -86,6 +86,15 @@ add_library(reshadefx STATIC
 target_include_directories(reshadefx PUBLIC "${RESHADEFX_DIR}" PRIVATE "${RESHADEFX_DIR}/spirv")
 # Third-party code: its warnings are not ours to fix.
 target_compile_options(reshadefx PRIVATE -w)
+# Compiled effects are cached for the compiler that made them, so a hash of its files names it.
+get_target_property(RESHADEFX_SOURCES reshadefx SOURCES)
+file(GLOB RESHADEFX_HEADERS "${RESHADEFX_DIR}/*.hpp" "${RESHADEFX_DIR}/*.inl" "${RESHADEFX_DIR}/spirv/*")
+set(RESHADEFX_ID "")
+foreach(source IN LISTS RESHADEFX_SOURCES RESHADEFX_HEADERS)
+    file(SHA256 "${source}" hash)
+    string(APPEND RESHADEFX_ID "${hash}")
+endforeach()
+string(SHA256 RESHADEFX_ID "${RESHADEFX_ID}")
 
 # Dear ImGui's GLFW and Vulkan backends, from the same version as the core.
 fetch_file("${IMGUI_URL}/backends/imgui_impl_glfw.h" ec95fe696c025dbf5fe6d24b958d7531d8cfbac0cb306a5435899d3526f64c4e "${IMGUI_DIR}/backends/imgui_impl_glfw.h")
@@ -175,6 +184,7 @@ add_library(unishade_core STATIC ${POSIX_SOURCES})
 target_include_directories(unishade_core PUBLIC "${POSIX_DIR}" "${CMAKE_CURRENT_LIST_DIR}/..")
 target_compile_definitions(unishade_core PUBLIC UNISHADE_VERSION="${PROJECT_VERSION}")
 target_compile_options(unishade_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+set_source_files_properties("${POSIX_DIR}/effects.cpp" PROPERTIES COMPILE_DEFINITIONS UNISHADE_COMPILER_ID="${RESHADEFX_ID}")
 target_link_libraries(unishade_core PUBLIC reshadefx posix_libraries Threads::Threads)
 if(APPLE)
     target_compile_options(unishade_core PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
@@ -216,7 +226,8 @@ if(APPLE)
 else()
     add_executable(unishade "${POSIX_DIR}/main.cpp")
     set_target_properties(unishade PROPERTIES OUTPUT_NAME unishade)
-    # The effects and presets folders are found beside the executable when installed as a portable folder.
+    # Run paths into the build folder are relative to the executable, so the folder can move. Effects and presets
+    # are always in the data folder from config.h, never beside the executable.
     set_target_properties(unishade PROPERTIES BUILD_RPATH_USE_ORIGIN ON)
 endif()
 if(APPLE)
