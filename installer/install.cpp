@@ -1,5 +1,4 @@
 #include "install.h"
-#include "pinned.h"
 #include "resource.h"
 #include "../src/package_files.h"
 #include "../src/preset_ini.h"
@@ -48,32 +47,19 @@ constexpr const wchar_t* kLogs[] = { L"Unishade.log", L"Unishade.old.log", L"Rob
 constexpr const wchar_t* kUserFiles[] = { L"ReShade.ini", L"ReShadePreset.ini", L"RobloxShadeHost.ini", L"games.ini", L"games.ini.tmp" };
 constexpr const wchar_t* kUserFolders[] = { L"presets", L"reshade-shaders" };
 
-// The add-on files and hashes come from the manifests in vendor/ when Setup is built. A downloaded manifest only says
-// where to get them.
-struct PinnedFile
-{
-    const wchar_t* name;
-    const char* sha256;
-};
-
+// The files of each add-on, under the names the host loads them by. Where each one comes from and its SHA-256 are in
+// the add-on's downloaded manifest, so they can change without a new Setup.
 struct AddonInfo
 {
     Addon addon;
     const char* name;
     const wchar_t* section;
-    std::vector<PinnedFile> files;
+    std::vector<const wchar_t*> files;
 };
 const AddonInfo kAddons[] = {
-    { Addon::Depth, "Depth estimation", L"depth", { DEPTH_FILES } },
-    { Addon::DLSS5, "DLSS5", L"dlss5", { DLSS5_FILES } },
+    { Addon::Depth, "Depth estimation", L"depth", { L"onnxruntime.dll", L"DirectML.dll", L"depth-anything-v2-small.onnx" } },
+    { Addon::DLSS5, "DLSS5", L"dlss5", { L"nvngx_dlssnr.dll", L"renodx-dlss.addon64" } },
 };
-
-// The GitHub release and Hugging Face repository the manifests in vendor/ download from.
-const struct
-{
-    const wchar_t* host;
-    const wchar_t* path;
-} kAddonSources[] = { ADDON_SOURCES };
 
 const struct
 {
@@ -185,6 +171,20 @@ std::wstring RandomName(const wchar_t* prefix)
 bool IsSha256(const std::string& text)
 {
     return text.size() == 64 && text.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
+
+// A version such as 6.8.0: three numbers of one to nine digits, separated by dots.
+bool IsVersion(const std::string& text)
+{
+    size_t start = 0;
+    for (int part = 0; part < 3; ++part)
+    {
+        const size_t end = part < 2 ? text.find('.', start) : text.size();
+        if (end == std::string::npos || end == start || end - start > 9 || text.find_first_not_of("0123456789", start) < end)
+            return false;
+        start = end + 1;
+    }
+    return true;
 }
 
 std::wstring IniString(const fs::path& file, const std::wstring& section, const wchar_t* key, const wchar_t* fallback = L"")
@@ -309,23 +309,19 @@ std::string FetchList(const std::wstring& location, const std::atomic<bool>& can
 
 void InstallReShade(const fs::path& work, const fs::path& files, const ReShadeRelease& release, bool presets, Progress& progress)
 {
-    // The hash comes from vendor/reshade/reshade.ini when Setup is built. CMake does not build Setup without it.
-    const std::string sha256 = RESHADE_SETUP_SHA256;
-    if (!IsSha256(sha256))
-        throw std::runtime_error("This Setup was built without the checksum of ReShade's installer, so it cannot install ReShade.");
     progress.Status("Downloading ReShade " + release.version);
     const fs::path setup = work / L"ReShade-Setup.exe";
-    Download(L"https://reshade.me/downloads/ReShade_Setup_" + Wide(release.version) + L"_Addon.exe", setup, sha256, kPackageLimit, progress.cancel,
-             ByteProgress(progress, 0.0f, 0.05f));
+    const std::string sha256 = Download(L"https://reshade.me/downloads/ReShade_Setup_" + Wide(release.version) + L"_Addon.exe", setup, "",
+                                        kPackageLimit, progress.cancel, ByteProgress(progress, 0.0f, 0.05f));
 
-    // Checked again through a handle that keeps anyone from changing, renaming or deleting the file until ReShade's
-    // installer has started from it.
+    // Opened through a handle that keeps anyone from changing, renaming or deleting the file until ReShade's installer
+    // has started from it. Checking it against what was downloaded covers the moment before it was opened.
     const HANDLE opened = CreateFileW(setup.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (opened == INVALID_HANDLE_VALUE)
         throw std::runtime_error("Could not open the ReShade installer: " + SystemError(GetLastError()) + ".");
     Handle verified(opened);
     if (Sha256(verified.get()) != sha256)
-        throw std::runtime_error("The ReShade installer does not match its checksum.");
+        throw std::runtime_error("The ReShade installer changed after it was downloaded.");
 
     // ReShade's installer also leaves an empty preset and a log next to the exe, which must not replace
     // the user's files, so it runs in a folder of its own and only its DLL and settings are kept.
@@ -480,16 +476,17 @@ bool InstallPresets(const fs::path& work, const fs::path& files, Progress& progr
     return skipped.empty();
 }
 
-// The address to download an add-on file from, when the manifest's url points into a GitHub release or Hugging Face
-// repository the manifests in vendor/ use. Addresses from before the repository was renamed move to the new name.
+// The address to download an add-on file from, when the manifest's url points into this repository's GitHub releases
+// or anywhere on Hugging Face. Addresses from before the repository was renamed move to the new name.
 std::optional<std::wstring> AddonUrl(const std::wstring& url)
 {
     std::wstring host, path;
     if (!SplitHttpsUrl(url, host, path))
         return std::nullopt;
     constexpr std::wstring_view legacy = L"/OMouta/RobloxShadeHost/releases/download/";
+    constexpr std::wstring_view releases = L"/OMouta/Unishade/releases/download/";
     if (_wcsicmp(host.c_str(), L"github.com") == 0 && path.rfind(legacy, 0) == 0)
-        path.replace(0, legacy.size(), L"/OMouta/Unishade/releases/download/");
+        path.replace(0, legacy.size(), releases);
 
     // Escapes and dot segments could lead the server somewhere other than the path reads.
     if (path.find_first_of(L"%\\") != std::wstring::npos)
@@ -502,15 +499,16 @@ std::optional<std::wstring> AddonUrl(const std::wstring& url)
             return std::nullopt;
         start = end + 1;
     }
-    for (const auto& source : kAddonSources)
-        if (_wcsicmp(host.c_str(), source.host) == 0 && path.size() > wcslen(source.path) && path.rfind(source.path, 0) == 0)
-            return L"https://" + host + path;
-    return std::nullopt;
+    const bool release = _wcsicmp(host.c_str(), L"github.com") == 0 && path.size() > releases.size() && path.rfind(releases, 0) == 0;
+    const bool huggingFace = _wcsicmp(host.c_str(), L"huggingface.co") == 0 && path.size() > 1;
+    if (!release && !huggingFace)
+        return std::nullopt;
+    return L"https://" + host + path;
 }
 
 // Returns false and leaves a note when the add-on cannot be installed, so the rest still installs: when its manifest
-// cannot be downloaded or turns it off, when the manifest's files or hashes differ from the ones built into Setup,
-// or when a download fails or does not match.
+// cannot be downloaded, turns it off or lacks a valid address or SHA-256 for a file, or when a download fails or does
+// not match the manifest's SHA-256.
 bool DownloadAddon(const fs::path& work, const fs::path& files, const AddonInfo& addon, Progress& progress)
 {
     constexpr float kBegin = 0.8f, kEnd = 0.95f;
@@ -521,35 +519,35 @@ bool DownloadAddon(const fs::path& work, const fs::path& files, const AddonInfo&
         WriteFile(manifest, FetchList(addon.addon == Addon::Depth ? sources.depth : sources.dlss5, progress.cancel));
         if (IniString(manifest, addon.section, L"enabled", L"0") != L"1")
             throw std::runtime_error(std::string(addon.name) + " downloads are turned off for now.");
+        // Every entry is checked before the first download, so an invalid manifest downloads nothing.
         const std::string invalid = std::string("The ") + addon.name + " download list ";
-        for (const std::wstring& section : IniSections(manifest))
-            if (_wcsicmp(section.c_str(), addon.section) != 0 &&
-                std::none_of(addon.files.begin(), addon.files.end(), [&](const PinnedFile& file) { return _wcsicmp(file.name, section.c_str()) == 0; }))
-                throw std::runtime_error(invalid + "names a file this Setup does not know: " + Utf8(section) + ".");
         std::vector<std::wstring> urls;
-        for (const PinnedFile& file : addon.files)
+        std::vector<std::string> hashes;
+        for (const wchar_t* file : addon.files)
         {
-            if (Lowercase(Utf8(IniString(manifest, file.name, L"sha256"))) != file.sha256)
-                throw std::runtime_error(invalid + "has a different checksum for " + Utf8(file.name) + " than this Setup. A newer Setup may be needed.");
-            const auto url = AddonUrl(IniString(manifest, file.name, L"url"));
+            const auto url = AddonUrl(IniString(manifest, file, L"url"));
             if (!url)
-                throw std::runtime_error(invalid + "points " + Utf8(file.name) + " somewhere Setup does not download add-ons from.");
+                throw std::runtime_error(invalid + "points " + Utf8(file) + " somewhere Setup does not download add-ons from.");
+            const std::string hash = Lowercase(Utf8(IniString(manifest, file, L"sha256")));
+            if (!IsSha256(hash))
+                throw std::runtime_error(invalid + "has no valid checksum for " + Utf8(file) + ".");
             urls.push_back(*url);
+            hashes.push_back(hash);
         }
         for (size_t index = 0; index < addon.files.size(); ++index)
         {
-            const PinnedFile& file = addon.files[index];
+            const wchar_t* file = addon.files[index];
             const float begin = kBegin + (kEnd - kBegin) * index / addon.files.size();
             const float end = kBegin + (kEnd - kBegin) * (index + 1) / addon.files.size();
-            Download(urls[index], files / file.name, file.sha256, kAddonLimit, progress.cancel, ByteProgress(progress, begin, end, Utf8(file.name) + ": "));
+            Download(urls[index], files / file, hashes[index], kAddonLimit, progress.cancel, ByteProgress(progress, begin, end, Utf8(file) + ": "));
         }
         return true;
     }
     catch (const std::exception& e)
     {
         std::error_code ignored;
-        for (const PinnedFile& file : addon.files)
-            fs::remove(files / file.name, ignored);
+        for (const wchar_t* file : addon.files)
+            fs::remove(files / file, ignored);
         SetupLog(std::string(addon.name) + " skipped: " + e.what());
         progress.Note(std::string(addon.name) + " was not installed because its download failed or could not be verified. Run Setup again "
                                                 "later to add it.");
@@ -843,8 +841,8 @@ void Commit(const fs::path& files, const InstallOptions& options, bool addonInst
         if (options.reshade && (options.addon == Addon::None || addonInstalled))
             for (const auto& addon : kAddons)
                 if (addon.addon != options.addon)
-                    for (const PinnedFile& file : addon.files)
-                        RemoveFile(directory / file.name);
+                    for (const wchar_t* file : addon.files)
+                        RemoveFile(directory / file);
         // Repairs the search paths in a ReShade.ini written by an earlier version of Setup.
         if (options.reshade && hadReShadeIni)
             FixReShadeIni(directory / L"ReShade.ini", false);
@@ -958,12 +956,21 @@ std::string_view Resource(int id)
 
 ReShadeRelease FetchReShadeRelease(const std::atomic<bool>& cancel)
 {
+    // The download button on reshade.me links ReShade_Setup_<version>_Addon.exe of the newest version.
+    const std::string page = Fetch(L"https://reshade.me/", cancel, kListLimit);
+    const size_t end = page.find("_Addon.exe");
+    const size_t start = end == std::string::npos || end == 0 ? std::string::npos : page.rfind('_', end - 1);
+    if (start == std::string::npos)
+        throw std::runtime_error("Could not find ReShade's download on reshade.me.");
     ReShadeRelease release;
-    release.version = RESHADE_VERSION;
-    release.license = Fetch(L"https://raw.githubusercontent.com/crosire/reshade/v" + Wide(release.version) + L"/LICENSE.md", cancel);
+    release.version = page.substr(start + 1, end - start - 1);
+    // The version becomes part of the download and license addresses.
+    if (!IsVersion(release.version))
+        throw std::runtime_error("reshade.me lists an unexpected ReShade version.");
+    release.license = Fetch(L"https://raw.githubusercontent.com/crosire/reshade/v" + Wide(release.version) + L"/LICENSE.md", cancel, kListLimit);
     if (release.license.find("Redistribution and use") == std::string::npos)
         throw std::runtime_error("Could not load the ReShade license.");
-    SetupLog("Loaded the license of ReShade " + release.version);
+    SetupLog("Newest ReShade: " + release.version);
     return release;
 }
 
@@ -1144,8 +1151,8 @@ Addon InstalledAddon(const fs::path& directory)
 {
     std::error_code ignored;
     for (const auto& addon : kAddons)
-        for (const PinnedFile& file : addon.files)
-            if (fs::exists(directory / file.name, ignored))
+        for (const wchar_t* file : addon.files)
+            if (fs::exists(directory / file, ignored))
                 return addon.addon;
     return Addon::None;
 }

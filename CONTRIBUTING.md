@@ -34,8 +34,6 @@ ctest --test-dir build -C Release --output-on-failure
 
 The EXE is at `build\Release\Unishade.exe`. See `installer/README.md` for building and testing the installer, and [src/posix](src/posix/README.md) for macOS and Linux.
 
-Setup installs one fixed ReShade version, and checks the installer it downloads against a SHA-256 committed in the repository. To move to another ReShade version, change the version and leave its SHA-256 empty: CMake then prints the SHA-256 of that version's installer in a warning, and you commit that value.
-
 GitHub Actions builds and tests the Windows, Linux and macOS versions for pushes and pull requests, and runs `tests/installer_tests.ps1` against the new Setup. You can also run **Build and release** manually from the Actions tab. Successful builds provide `Unishade-windows-x64` (the EXE and Setup), `Unishade-linux-x64` and `Unishade-macOS` artifacts.
 
 To publish a release, push a tag `vX.Y.Z` that matches `project(Unishade VERSION X.Y.Z)` in `CMakeLists.txt`; the workflow refuses any other. After the builds and tests pass, it creates a GitHub release with Setup, the EXE, the macOS and Linux archives, `LICENSE` and `SHA256SUMS.txt`, which lists the SHA-256 of each file, and then rebuilds the website. Branch pushes and manual builds do not publish releases.

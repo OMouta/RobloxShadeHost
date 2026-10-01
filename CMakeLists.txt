@@ -53,10 +53,8 @@ if(NOT WIN32)
     return()
 endif()
 
-# Setup installs the ReShade version these headers come from, so the menu matches the ReShade it runs in.
-include(installer/pins.cmake)
 set(RESHADE_INCLUDE "${CMAKE_BINARY_DIR}/reshade/include")
-set(RESHADE_HEADERS_URL "https://raw.githubusercontent.com/crosire/reshade/v${RESHADE_VERSION}/include")
+set(RESHADE_HEADERS_URL "https://raw.githubusercontent.com/crosire/reshade/v6.8.0/include")
 fetch_file("${RESHADE_HEADERS_URL}/reshade.hpp" cf3cd150920ea310b4b1e2e4f11ab8d7221a9fc18755f4891a026563311b524c "${RESHADE_INCLUDE}/reshade.hpp")
 fetch_file("${RESHADE_HEADERS_URL}/reshade_api.hpp" 8d83ec8a620c48da7a20d975bd27b3345b24d3f0d5b78ae4c4fe633d61b804eb "${RESHADE_INCLUDE}/reshade_api.hpp")
 fetch_file("${RESHADE_HEADERS_URL}/reshade_api_device.hpp" a716c44b6fbb064dbbb0826687728f21aa71ed45e13564e4dc1cdf36da5bdfa0 "${RESHADE_INCLUDE}/reshade_api_device.hpp")
@@ -129,8 +127,8 @@ add_executable(installer WIN32 EXCLUDE_FROM_ALL
     installer/install.cpp
     src/net.cpp
     installer/setup.rc)
-# setup.rc embeds Unishade.exe, found through the include path. pinned.h comes from installer/pins.cmake.
-target_include_directories(installer PRIVATE "$<TARGET_FILE_DIR:Unishade>" "${SETUP_GENERATED_DIR}")
+# setup.rc embeds Unishade.exe, found through the include path.
+target_include_directories(installer PRIVATE "$<TARGET_FILE_DIR:Unishade>")
 target_compile_definitions(installer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(installer PRIVATE UNISHADE_VERSION="${PROJECT_VERSION}")
 target_compile_definitions(installer PRIVATE UNISHADE_USER_AGENT="Unishade-Setup/${PROJECT_VERSION}")
@@ -143,13 +141,6 @@ target_link_libraries(installer PRIVATE setup_libraries d3d11 dxgi d3dcompiler d
 target_link_options(installer PRIVATE /DEPENDENTLOADFLAG:0x800 /DELAYLOAD:d3d11.dll /DELAYLOAD:d3dcompiler_47.dll
     /DELAYLOAD:dwmapi.dll /DELAYLOAD:winhttp.dll /DELAYLOAD:bcrypt.dll)
 add_dependencies(installer Unishade)
-# Setup refuses to run a ReShade installer it cannot verify, so it is not built without the hash.
-if(NOT RESHADE_SETUP_SHA256)
-    add_custom_target(reshade_checksum
-        COMMAND "${CMAKE_COMMAND}" -E echo "Add the SHA-256 of ReShade_Setup_${RESHADE_VERSION}_Addon.exe to vendor/reshade/reshade.ini, see installer/README.md."
-        COMMAND "${CMAKE_COMMAND}" -E false)
-    add_dependencies(installer reshade_checksum)
-endif()
 # The generator expression keeps multi-config generators from adding a Release folder.
 set_target_properties(installer PROPERTIES
     OUTPUT_NAME "Unishade-Setup-${PROJECT_VERSION}"

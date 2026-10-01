@@ -262,15 +262,17 @@ if ((Get-Content "$testRoot/missing-depth.log" -Raw) -notmatch 'Depth estimation
     throw 'Missing depth estimation downloads were not reported.'
 }
 
-# Add-on files and their hashes are built into Setup. A download list with another hash skips the add-on before
-# anything is downloaded. A local effect list with only the standard effects keeps this quick.
+# Each add-on file must match the SHA-256 in the download list. This list points nvngx_dlssnr.dll at a small file of
+# the depth model's repository, which does not match, so DLSS5 is skipped without downloading its real files. A local
+# effect list with only the standard effects keeps this quick.
 $standardEffects = Join-Path $testRoot 'standard-effects.ini'
 Set-Content $standardEffects -Encoding Ascii -Value @(
     '[00]', 'Required=1', 'PackageName=Standard effects', 'InstallPath=.\reshade-shaders\Shaders',
     'TextureInstallPath=.\reshade-shaders\Textures', 'DownloadUrl=https://github.com/crosire/reshade-shaders/archive/slim.zip')
+$otherFile = 'https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/config.json'
 $dlss5List = Get-Content "$repo/vendor/dlss5/downloads.ini" -Raw
-$wrongDlss5List = $dlss5List -replace '(?ms)(^\[nvngx_dlssnr\.dll\]\r?\n.*?^sha256=)[0-9a-f]{64}', "`${1}$('0' * 64)"
-if ($wrongDlss5List -eq $dlss5List) { throw 'Could not change the hash in the DLSS5 download list.' }
+$wrongDlss5List = $dlss5List -replace '(?m)^url=.*/nvngx_dlssnr\.dll(?=\r?$)', "url=$otherFile"
+if ($wrongDlss5List -eq $dlss5List) { throw 'Could not change the address in the DLSS5 download list.' }
 Set-Content "$testRoot/wrong-dlss5.ini" -Encoding Ascii -Value $wrongDlss5List
 $mismatched = Invoke-TestInstaller 'mismatched-dlss5' 'reshade,dlss5' -ExpectExitCode 2 -Extra @(
     '--effects-url', "`"$standardEffects`"", '--dlss5-manifest', "`"$testRoot/wrong-dlss5.ini`"")
@@ -278,8 +280,8 @@ Assert-File $mismatched 'dxgi.dll'
 Assert-File $mismatched 'reshade-shaders/Shaders/ReShade.fxh'
 Assert-File $mismatched 'nvngx_dlssnr.dll' $false
 Assert-File $mismatched 'renodx-dlss.addon64' $false
-if ((Get-Content "$testRoot/mismatched-dlss5.log" -Raw) -notmatch 'DLSS5 skipped:.*different checksum') {
-    throw 'DLSS5 was not skipped although its download list has another hash.'
+if ((Get-Content "$testRoot/mismatched-dlss5.log" -Raw) -notmatch 'DLSS5 skipped:.*does not match its checksum') {
+    throw 'DLSS5 was not skipped although a download does not match the SHA-256 in its download list.'
 }
 
 if ($DownloadDLSS) {
@@ -304,7 +306,6 @@ if ($DownloadDepth) {
     # A download that does not match its hash also skips the add-on. This one points onnxruntime.dll at another
     # file of the model's repository.
     $depthList = Get-Content "$repo/vendor/depth/downloads.ini" -Raw
-    $otherFile = 'https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/config.json'
     $tamperedList = $depthList -replace '(?m)^url=.*/onnxruntime\.dll(?=\r?$)', "url=$otherFile"
     if ($tamperedList -eq $depthList) { throw 'Could not change the address in the depth download list.' }
     Set-Content "$testRoot/tampered-depth.ini" -Encoding Ascii -Value $tamperedList
