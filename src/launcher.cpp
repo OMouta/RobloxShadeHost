@@ -111,17 +111,25 @@ enum class Picker
     Session,
 };
 
-struct Launcher
+// A window's scaling and its fonts at that scaling.
+struct Scaling
 {
-    ULONG_PTR gdiplus = 0;
-    winrt::com_ptr<IStream> logoStream;
-    std::unique_ptr<Gdiplus::Bitmap> logo;
     float scale = 1;
     HFONT title = nullptr;
     HFONT semibold = nullptr;
     HFONT strong = nullptr;
     HFONT body = nullptr;
     HFONT note = nullptr;
+};
+
+struct Launcher
+{
+    ULONG_PTR gdiplus = 0;
+    winrt::com_ptr<IStream> logoStream;
+    std::unique_ptr<Gdiplus::Bitmap> logo;
+    // The picker has its own, since it can be on a monitor with another scaling.
+    Scaling launcherScaling;
+    Scaling pickerScaling;
     // By pixel size and executable. nullptr when the executable has no icon.
     std::map<std::wstring, HICON> icons;
     // Where games saved by filename were found running.
@@ -171,16 +179,32 @@ struct Launcher
     bool pickerTracking = false;
 };
 Launcher l;
+// The scaling of the window being laid out or painted, which P, F and the fonts follow.
+Scaling* ui = &l.launcherScaling;
+
+// Uses the picker's scaling until the end of the scope.
+struct PickerScaling
+{
+    Scaling* previous = ui;
+    PickerScaling()
+    {
+        ui = &l.pickerScaling;
+    }
+    ~PickerScaling()
+    {
+        ui = previous;
+    }
+};
 
 // Pixels at the window's scaling, whole for GDI and fractional for GDI+.
 int P(float value)
 {
-    return static_cast<int>(std::lround(value * l.scale));
+    return static_cast<int>(std::lround(value * ui->scale));
 }
 
 float F(float value)
 {
-    return value * l.scale;
+    return value * ui->scale;
 }
 
 float F(LONG pixels)
@@ -198,27 +222,33 @@ Gdiplus::Color Plus(unsigned rgb, BYTE alpha = 255)
     return Gdiplus::Color(alpha, (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
 }
 
-HFONT Font(float size, bool semibold)
+HFONT Font(const Scaling& scaling, float size, bool semibold)
 {
-    return CreateFontW(-P(size), 0, 0, 0, semibold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, semibold ? L"Segoe UI Semibold" : L"Segoe UI");
+    return CreateFontW(-static_cast<int>(std::lround(size * scaling.scale)), 0, 0, 0, semibold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE,
+                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
+                       semibold ? L"Segoe UI Semibold" : L"Segoe UI");
 }
 
-void DeleteFonts()
+void DeleteFonts(Scaling& scaling)
 {
-    for (HFONT font : { l.title, l.semibold, l.strong, l.body, l.note })
-        if (font)
-            DeleteObject(font);
+    for (HFONT* font : { &scaling.title, &scaling.semibold, &scaling.strong, &scaling.body, &scaling.note })
+    {
+        if (*font)
+            DeleteObject(*font);
+        *font = nullptr;
+    }
 }
 
-void CreateFonts()
+// Sets a window's scaling from its DPI and creates its fonts at it.
+void Scale(Scaling& scaling, UINT dpi)
 {
-    DeleteFonts();
-    l.title = Font(19, true);
-    l.semibold = Font(15, true);
-    l.strong = Font(13.5f, true);
-    l.body = Font(13.5f, false);
-    l.note = Font(12, false);
+    DeleteFonts(scaling);
+    scaling.scale = static_cast<float>(dpi) / 96.0f;
+    scaling.title = Font(scaling, 19, true);
+    scaling.semibold = Font(scaling, 15, true);
+    scaling.strong = Font(scaling, 13.5f, true);
+    scaling.body = Font(scaling, 13.5f, false);
+    scaling.note = Font(scaling, 12, false);
 }
 
 int TextHeight(HDC dc, HFONT font, const std::wstring& text, int width)
@@ -379,11 +409,11 @@ void Layout(HDC dc)
     const int iconSize = P(40);
     const Action statusAction = g.selectedGame ? Action::DetectAutomatically : Action::PickWindow;
     const wchar_t* statusLabel = g.selectedGame ? L"Detect automatically" : L"Pick a window";
-    const int buttonWidth = ButtonWidth(dc, l.body, statusLabel);
+    const int buttonWidth = ButtonWidth(dc, ui->body, statusLabel);
     const int textLeft = pad + inner + iconSize + P(14);
     const int textRight = right - inner - buttonWidth - P(16);
-    const int titleHeight = TextHeight(dc, l.semibold, l.statusTitle, textRight - textLeft);
-    const int detailHeight = l.statusDetail.empty() ? 0 : TextHeight(dc, l.body, l.statusDetail, textRight - textLeft);
+    const int titleHeight = TextHeight(dc, ui->semibold, l.statusTitle, textRight - textLeft);
+    const int detailHeight = l.statusDetail.empty() ? 0 : TextHeight(dc, ui->body, l.statusDetail, textRight - textLeft);
     const int textHeight = titleHeight + (detailHeight ? P(3) + detailHeight : 0);
     l.statusCard = { pad, y, right, y + std::max(iconSize, textHeight) + inner * 2 };
     int middle = (l.statusCard.top + l.statusCard.bottom) / 2;
@@ -398,7 +428,7 @@ void Layout(HDC dc)
     {
         l.updateCard = { pad, y, right, y + P(44) };
         const std::wstring download = L"Download";
-        const int downloadWidth = TextWidth(dc, l.semibold, download);
+        const int downloadWidth = TextWidth(dc, ui->semibold, download);
         const RECT downloadRect{ right - inner - downloadWidth, y, right - inner, l.updateCard.bottom };
         l.targets.push_back({ downloadRect, Action::Download, Look::Link, 0, download });
         l.updateText = { pad + inner, y, downloadRect.left - P(8), l.updateCard.bottom };
@@ -406,7 +436,7 @@ void Layout(HDC dc)
     }
 
     y += P(12);
-    const int addWidth = ButtonWidth(dc, l.strong, L"Add game");
+    const int addWidth = ButtonWidth(dc, ui->strong, L"Add game");
     l.gamesTitle = { pad, y, right - addWidth - P(12), y + P(30) };
     l.targets.push_back({ { right - addWidth, y, right, y + P(30) }, Action::AddGame, Look::PrimaryButton, 0, L"Add game" });
     y += P(30) + P(12);
@@ -426,7 +456,7 @@ void Layout(HDC dc)
         entry.badge = {};
         if (entry.running)
         {
-            entry.badge = { nameRight - TextWidth(dc, l.note, L"Running") - P(18), middle - P(11), nameRight, middle + P(11) };
+            entry.badge = { nameRight - TextWidth(dc, ui->note, L"Running") - P(18), middle - P(11), nameRight, middle + P(11) };
             nameRight = entry.badge.left - P(12);
         }
         PlaceEntry(entry, { pad, top, right, top + rowHeight }, P(32), nameRight);
@@ -443,7 +473,7 @@ void Layout(HDC dc)
         for (const Notice& notice : notices)
         {
             const int left = pad + P(26);
-            const int height = std::max(TextHeight(dc, l.body, notice.text, right - left), P(18));
+            const int height = std::max(TextHeight(dc, ui->body, notice.text, right - left), P(18));
             l.rows.push_back({ { left, y, right, y + height }, notice.level, notice.text });
             y += height + P(8);
         }
@@ -455,7 +485,7 @@ void Layout(HDC dc)
     int linkY = l.footer + P(15);
     int x = pad;
     const auto link = [&](Action action, const wchar_t* label) {
-        const int linkWidth = TextWidth(dc, l.body, label);
+        const int linkWidth = TextWidth(dc, ui->body, label);
         if (x + linkWidth > right)
         {
             x = pad;
@@ -626,7 +656,7 @@ void RemoveIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
         Gdiplus::SolidBrush background(Plus(theme::kError, 0x24));
         graphics.FillEllipse(&background, center.X - r, center.Y - r, r * 2, r * 2);
     }
-    Gdiplus::Pen pen(Plus(hovered ? theme::kError : theme::kDim), 1.6f * l.scale);
+    Gdiplus::Pen pen(Plus(hovered ? theme::kError : theme::kDim), 1.6f * ui->scale);
     pen.SetStartCap(Gdiplus::LineCapRound);
     pen.SetEndCap(Gdiplus::LineCapRound);
     const float s = F(4.5f);
@@ -639,7 +669,7 @@ void Icon(Gdiplus::Graphics& graphics, Gdiplus::PointF center, LogLevel level)
     const unsigned color = level == LogLevel::Ok ? theme::kSuccess : level == LogLevel::Warning ? theme::kWarning
                          : level == LogLevel::Error ? theme::kError : theme::kDim;
     const float r = F(8.0f);
-    const float s = l.scale;
+    const float s = ui->scale;
     Gdiplus::SolidBrush tint(Plus(color, 0x30));
     Gdiplus::SolidBrush solid(Plus(color));
     Gdiplus::Pen pen(Plus(color), 1.6f * s);
@@ -712,9 +742,9 @@ void EntryText(HDC dc, const Entry& entry)
 {
     const unsigned color = entry.enabled ? theme::kText : theme::kDim;
     if (!ExecutableIcon(entry.icon, entry.iconRect.right - entry.iconRect.left))
-        PaintText(dc, l.semibold, color, Initial(entry.name), entry.iconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-    PaintText(dc, l.strong, color, entry.name, entry.nameRect, DT_SINGLELINE | (entry.detail.empty() ? DT_VCENTER : DT_BOTTOM) | DT_END_ELLIPSIS);
-    PaintText(dc, l.note, theme::kDim, entry.detail, entry.detailRect, DT_SINGLELINE | DT_PATH_ELLIPSIS);
+        PaintText(dc, ui->semibold, color, Initial(entry.name), entry.iconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    PaintText(dc, ui->strong, color, entry.name, entry.nameRect, DT_SINGLELINE | (entry.detail.empty() ? DT_VCENTER : DT_BOTTOM) | DT_END_ELLIPSIS);
+    PaintText(dc, ui->note, theme::kDim, entry.detail, entry.detailRect, DT_SINGLELINE | DT_PATH_ELLIPSIS);
 }
 
 void Paint(HDC output)
@@ -727,7 +757,7 @@ void Paint(HDC output)
     const HDC dc = CreateCompatibleDC(output);
     const HBITMAP bitmap = CreateCompatibleBitmap(output, width, height);
     const HGDIOBJ previousBitmap = SelectObject(dc, bitmap);
-    const HGDIOBJ previousFont = SelectObject(dc, l.body);
+    const HGDIOBJ previousFont = SelectObject(dc, ui->body);
     Layout(dc);
 
     {
@@ -798,34 +828,34 @@ void Paint(HDC output)
     }
 
     SetBkMode(dc, TRANSPARENT);
-    PaintText(dc, l.title, theme::kText, L"Unishade",
+    PaintText(dc, ui->title, theme::kText, L"Unishade",
              { l.logoRect.right + P(14), l.logoRect.top + P(1), width, l.logoRect.top + P(26) }, DT_SINGLELINE);
-    PaintText(dc, l.body, theme::kDim, L"Version " UNISHADE_VERSION,
+    PaintText(dc, ui->body, theme::kDim, L"Version " UNISHADE_VERSION,
              { l.logoRect.right + P(14), l.logoRect.top + P(26), width, l.logoRect.bottom }, DT_SINGLELINE);
 
     if (!l.statusName.empty() && !ExecutableIcon(l.statusIcon, l.statusIconRect.right - l.statusIconRect.left))
-        PaintText(dc, l.title, theme::kText, Initial(l.statusName), l.statusIconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-    PaintText(dc, l.semibold, theme::kText, l.statusTitle, l.statusTitleRect);
-    PaintText(dc, l.body, theme::kDim, l.statusDetail, l.statusDetailRect);
+        PaintText(dc, ui->title, theme::kText, Initial(l.statusName), l.statusIconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    PaintText(dc, ui->semibold, theme::kText, l.statusTitle, l.statusTitleRect);
+    PaintText(dc, ui->body, theme::kDim, l.statusDetail, l.statusDetailRect);
     if (!l.update.version.empty())
-        PaintText(dc, l.body, theme::kText, L"Unishade " + l.update.version + L" is available.", l.updateText,
+        PaintText(dc, ui->body, theme::kText, L"Unishade " + l.update.version + L" is available.", l.updateText,
                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
-    PaintText(dc, l.semibold, theme::kText, L"Games", l.gamesTitle, DT_SINGLELINE | DT_VCENTER);
+    PaintText(dc, ui->semibold, theme::kText, L"Games", l.gamesTitle, DT_SINGLELINE | DT_VCENTER);
     for (const Entry& entry : l.entries)
     {
         EntryText(dc, entry);
         if (entry.running)
-            PaintText(dc, l.note, theme::kSuccess, L"Running", entry.badge, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            PaintText(dc, ui->note, theme::kSuccess, L"Running", entry.badge, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     }
     if (l.entries.empty())
-        PaintText(dc, l.body, theme::kDim, L"No games yet. Open one and click Add game.", Inset(l.list, P(18)),
+        PaintText(dc, ui->body, theme::kDim, L"No games yet. Open one and click Add game.", Inset(l.list, P(18)),
                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
     if (!l.rows.empty())
-        PaintText(dc, l.semibold, theme::kText, L"Setup", l.setupTitle, DT_SINGLELINE | DT_VCENTER);
+        PaintText(dc, ui->semibold, theme::kText, L"Setup", l.setupTitle, DT_SINGLELINE | DT_VCENTER);
     for (const Row& row : l.rows)
-        PaintText(dc, l.body, theme::kText, row.text, row.rect);
+        PaintText(dc, ui->body, theme::kText, row.text, row.rect);
 
     for (size_t i = 0; i < l.targets.size(); ++i)
     {
@@ -835,15 +865,15 @@ void Paint(HDC output)
         {
         case Look::Link:
             if (target.action == Action::Download)
-                PaintText(dc, l.semibold, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE | DT_VCENTER);
+                PaintText(dc, ui->semibold, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE | DT_VCENTER);
             else
-                PaintText(dc, l.body, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE);
+                PaintText(dc, ui->body, hovered ? theme::kText : theme::kAccentHover, target.label, target.rect, DT_SINGLELINE);
             break;
         case Look::Button:
-            PaintText(dc, l.body, theme::kText, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            PaintText(dc, ui->body, theme::kText, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             break;
         case Look::PrimaryButton:
-            PaintText(dc, l.strong, 0xFFFFFF, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            PaintText(dc, ui->strong, 0xFFFFFF, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             break;
         default:
             break;
@@ -888,7 +918,7 @@ void PickerLayout(HDC dc)
     const int pad = P(20);
     const int right = width - pad;
     int y = P(3) + P(16) - l.pickerScroll;
-    l.pickerDetail = { pad, y, right, y + TextHeight(dc, l.body, PickerDetail(), right - pad) };
+    l.pickerDetail = { pad, y, right, y + TextHeight(dc, ui->body, PickerDetail(), right - pad) };
     y = l.pickerDetail.bottom + P(14);
     const int rowHeight = P(52);
     l.pickerList = { pad, y, right, y + std::max<int>(1, static_cast<int>(l.choices.size())) * rowHeight };
@@ -903,6 +933,7 @@ void PickerLayout(HDC dc)
 // Sizes the picker to its content, up to kPickerMaxHeight, keeping it where it is.
 void ResizePicker()
 {
+    const PickerScaling scaling;
     const HDC dc = GetDC(l.pickerWindow);
     PickerLayout(dc);
     ReleaseDC(l.pickerWindow, dc);
@@ -923,6 +954,7 @@ int ChoiceAt(POINT point)
 
 void PaintPicker(HDC output)
 {
+    const PickerScaling scaling;
     RECT client{};
     GetClientRect(l.pickerWindow, &client);
     const int width = client.right;
@@ -931,7 +963,7 @@ void PaintPicker(HDC output)
     const HDC dc = CreateCompatibleDC(output);
     const HBITMAP bitmap = CreateCompatibleBitmap(output, width, height);
     const HGDIOBJ previousBitmap = SelectObject(dc, bitmap);
-    const HGDIOBJ previousFont = SelectObject(dc, l.body);
+    const HGDIOBJ previousFont = SelectObject(dc, ui->body);
     PickerLayout(dc);
 
     {
@@ -954,11 +986,11 @@ void PaintPicker(HDC output)
     }
 
     SetBkMode(dc, TRANSPARENT);
-    PaintText(dc, l.body, theme::kDim, PickerDetail(), l.pickerDetail);
+    PaintText(dc, ui->body, theme::kDim, PickerDetail(), l.pickerDetail);
     for (const Entry& choice : l.choices)
         EntryText(dc, choice);
     if (l.choices.empty())
-        PaintText(dc, l.body, theme::kDim, L"No open windows.", Inset(l.pickerList, P(18)), DT_SINGLELINE | DT_VCENTER);
+        PaintText(dc, ui->body, theme::kDim, L"No open windows.", Inset(l.pickerList, P(18)), DT_SINGLELINE | DT_VCENTER);
 
     Strip(dc, width);
     BitBlt(output, 0, 0, width, height, dc, 0, 0, SRCCOPY);
@@ -985,18 +1017,21 @@ void OpenPicker(Picker picker)
     l.pickerScroll = 0;
     l.pickerHovered = -1;
     ListWindows();
+    // Opened over the launcher, so it starts at the scaling of the launcher's monitor.
+    RECT owner{};
+    GetWindowRect(g.launcher, &owner);
     l.pickerWindow = CreateWindowExW(WS_EX_DLGMODALFRAME, kPickerClass, picker == Picker::Add ? L"Add a game" : L"Pick a window",
-                                     WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 100, 100, g.launcher, nullptr, GetModuleHandleW(nullptr), nullptr);
+                                     WS_POPUP | WS_CAPTION | WS_SYSMENU, owner.left, owner.top, 100, 100, g.launcher, nullptr,
+                                     GetModuleHandleW(nullptr), nullptr);
     if (!l.pickerWindow)
     {
         Log(LogLevel::Error, L"Could not open the window list (error %lu).", GetLastError());
         return;
     }
     DarkFrame(l.pickerWindow);
+    Scale(l.pickerScaling, GetDpiForWindow(l.pickerWindow));
     ResizePicker();
-    RECT owner{};
     RECT own{};
-    GetWindowRect(g.launcher, &owner);
     GetWindowRect(l.pickerWindow, &own);
     SetWindowPos(l.pickerWindow, nullptr, (owner.left + owner.right - (own.right - own.left)) / 2,
                  std::max<int>(owner.top, (owner.top + owner.bottom - (own.bottom - own.top)) / 2), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1148,6 +1183,7 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         return 0;
     case WM_MOUSEWHEEL:
     {
+        const PickerScaling scaling;
         RECT client{};
         GetClientRect(hwnd, &client);
         const int scroll = std::clamp(l.pickerScroll - GET_WHEEL_DELTA_WPARAM(wParam) * P(52) / WHEEL_DELTA, 0,
@@ -1191,6 +1227,17 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if (LOWORD(wParam) == WA_ACTIVE && ListWindows())
             ResizePicker();
         break;
+    // Moved to a monitor with another scaling.
+    case WM_DPICHANGED:
+    {
+        Scale(l.pickerScaling, HIWORD(wParam));
+        ClearIcons();
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        ResizePicker();
+        return 0;
+    }
     case WM_CLOSE:
         ClosePicker();
         return 0;
@@ -1272,8 +1319,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_DPICHANGED:
     {
-        l.scale = HIWORD(wParam) / 96.0f;
-        CreateFonts();
+        Scale(l.launcherScaling, HIWORD(wParam));
         ClearIcons();
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top,
@@ -1326,8 +1372,7 @@ void CreateLauncher()
     winrt::check_bool(g.launcher != nullptr);
     DarkFrame(g.launcher);
 
-    l.scale = GetDpiForWindow(g.launcher) / 96.0f;
-    CreateFonts();
+    Scale(l.launcherScaling, GetDpiForWindow(g.launcher));
     Refresh();
 
     // Centered on the monitor the window opened on.
@@ -1353,7 +1398,8 @@ void DestroyLauncher()
     if (g.launcher)
         DestroyWindow(g.launcher);
     g.launcher = nullptr;
-    DeleteFonts();
+    DeleteFonts(l.launcherScaling);
+    DeleteFonts(l.pickerScaling);
     ClearIcons();
     l.logo.reset();
     l.logoStream = nullptr;
