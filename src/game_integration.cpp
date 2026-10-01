@@ -1,6 +1,6 @@
 #include "game_integration.h"
 #include "game_list.h"
-#include "../installer/text.h"
+#include "text.h"
 
 #include <dwmapi.h>
 #include <tlhelp32.h>

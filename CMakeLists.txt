@@ -94,11 +94,11 @@ add_executable(Unishade WIN32
     src/reshade_config.cpp
     src/setup_check.cpp
     src/update.cpp
-    installer/net.cpp)
+    src/net.cpp)
 target_include_directories(Unishade PRIVATE "${RESHADE_INCLUDE}" "${RESHADE_IMGUI_INCLUDE}" "${ONNXRUNTIME_INCLUDE}")
 target_compile_definitions(Unishade PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(Unishade PRIVATE UNISHADE_VERSION="${PROJECT_VERSION}")
-# installer/net.cpp sends this for the update check.
+# src/net.cpp sends this for the update check.
 target_compile_definitions(Unishade PRIVATE UNISHADE_USER_AGENT="Unishade/${PROJECT_VERSION}")
 target_compile_definitions(Unishade PRIVATE UNISHADE_VERSION_RESOURCE=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0)
 target_compile_options(Unishade PRIVATE /W4 /permissive- /EHsc /bigobj)
@@ -127,7 +127,7 @@ target_compile_definitions(setup_libraries PRIVATE IMGUI_IMPL_WIN32_DISABLE_GAME
 add_executable(installer WIN32 EXCLUDE_FROM_ALL
     installer/main.cpp
     installer/install.cpp
-    installer/net.cpp
+    src/net.cpp
     installer/setup.rc)
 # setup.rc embeds Unishade.exe, found through the include path. pinned.h comes from installer/pins.cmake.
 target_include_directories(installer PRIVATE "$<TARGET_FILE_DIR:Unishade>" "${SETUP_GENERATED_DIR}")

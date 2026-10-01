@@ -5,8 +5,8 @@
 #include "install.h"
 #include "pinned.h"
 #include "resource.h"
-#include "text.h"
 #include "../src/hotkey.h"
+#include "../src/text.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>

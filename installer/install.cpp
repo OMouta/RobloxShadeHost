@@ -1,8 +1,8 @@
 #include "install.h"
 #include "pinned.h"
 #include "resource.h"
-#include "text.h"
 #include "../src/preset_ini.h"
+#include "../src/text.h"
 
 #include <windows.h>
 #include <bcrypt.h>

@@ -2,6 +2,7 @@
 #include "config.h"
 #include "ini_text.h"
 #include "log.h"
+#include "text.h"
 #include "theme.h"
 
 #include <windows.h>
@@ -16,14 +17,6 @@
 
 namespace
 {
-std::string Utf8(const std::wstring& text)
-{
-    const int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    std::string result(size, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), result.data(), size, nullptr, nullptr);
-    return result;
-}
-
 std::string Color(unsigned rgb, float alpha = 1.0f)
 {
     char text[64];

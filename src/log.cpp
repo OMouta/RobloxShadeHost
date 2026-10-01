@@ -1,5 +1,6 @@
 #include "log.h"
 #include "config.h"
+#include "text.h"
 
 #include <windows.h>
 
@@ -32,14 +33,6 @@ Shared& shared = *new Shared;
 HANDLE file = INVALID_HANDLE_VALUE;
 std::wstring path;
 std::atomic<unsigned> noticeVersion = 0;
-
-std::string Utf8(const wchar_t* text)
-{
-    const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
-    std::string result(size > 0 ? size - 1 : 0, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
-    return result;
-}
 
 // Called with the mutex held.
 void WriteToFile(std::string text)
@@ -121,7 +114,7 @@ void InitLog()
              version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber);
     {
         std::lock_guard lock(shared.mutex);
-        WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory().c_str()) + "\r\n\r\n");
+        WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory()) + "\r\n\r\n");
     }
 
     if (file == INVALID_HANDLE_VALUE)

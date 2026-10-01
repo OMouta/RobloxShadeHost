@@ -13,9 +13,9 @@
 #include "resource.h"
 #include "shell.h"
 #include "state.h"
+#include "text.h"
 #include "theme.h"
 #include "update.h"
-#include "../installer/text.h"
 
 #include <shlobj.h>
 #include <shobjidl.h>
