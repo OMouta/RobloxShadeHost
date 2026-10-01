@@ -178,6 +178,7 @@ struct Launcher
     std::wstring statusName;
     fs::path statusIcon;
     unsigned statusColor = 0;
+    bool windowClosed = false; // the picked window, while waiting for it
     fs::path activeExecutable;
     Update update;
     std::wstring setup;
@@ -372,6 +373,7 @@ void Describe()
     const std::optional<GameWindow>& game = g.activeGame ? g.activeGame : g.selectedGame;
     l.statusName = game ? game->name : L"";
     l.statusIcon = g.activeGame ? l.activeExecutable : game ? Executable(game->processId) : fs::path{};
+    l.windowClosed = false;
     if (!g.captureEnabled)
     {
         l.statusTitle = L"Overlay off";
@@ -386,8 +388,9 @@ void Describe()
     }
     else if (g.selectedGame)
     {
+        l.windowClosed = !l.shown.selectedOpen;
         l.statusTitle = L"Waiting for " + g.selectedGame->name;
-        l.statusDetail = GameWindowExists(*g.selectedGame) ? L"Return to the game to see the effects." : L"Its window closed. Pick its new window.";
+        l.statusDetail = l.windowClosed ? L"Its window closed. Pick its new window." : L"Return to the game to see the effects.";
         l.statusColor = theme::kAccent;
     }
     else
@@ -498,22 +501,34 @@ void Layout(HDC dc)
     l.logoRect = { pad, y, pad + P(44), y + P(44) };
     y += P(44) + P(22);
 
-    // The game's icon, what is happening, and switching between detection and a picked window.
+    // The game's icon, what is happening, and switching between detection and a picked window, stacked when the
+    // picked window closed.
     const int iconSize = P(40);
-    const Action statusAction = g.selectedGame ? Action::DetectAutomatically : Action::PickWindow;
-    const wchar_t* statusLabel = g.selectedGame ? L"Detect automatically" : L"Pick a window";
-    const int buttonWidth = ButtonWidth(dc, ui->body, statusLabel);
+    std::vector<std::pair<Action, const wchar_t*>> buttons;
+    if (!g.selectedGame || l.windowClosed)
+        buttons.emplace_back(Action::PickWindow, L"Pick a window");
+    if (g.selectedGame)
+        buttons.emplace_back(Action::DetectAutomatically, L"Detect automatically");
+    int buttonWidth = 0;
+    for (const auto& [action, label] : buttons)
+        buttonWidth = std::max(buttonWidth, ButtonWidth(dc, ui->body, label));
+    const int buttonsHeight = static_cast<int>(buttons.size()) * (P(30) + P(8)) - P(8);
     const int textLeft = pad + inner + iconSize + P(14);
     const int textRight = right - inner - buttonWidth - P(16);
     const int titleHeight = TextHeight(dc, ui->semibold, l.statusTitle, textRight - textLeft);
     const int detailHeight = l.statusDetail.empty() ? 0 : TextHeight(dc, ui->body, l.statusDetail, textRight - textLeft);
     const int textHeight = titleHeight + (detailHeight ? P(3) + detailHeight : 0);
-    l.statusCard = { pad, y, right, y + std::max(iconSize, textHeight) + inner * 2 };
+    l.statusCard = { pad, y, right, y + std::max({ iconSize, textHeight, buttonsHeight }) + inner * 2 };
     int middle = (l.statusCard.top + l.statusCard.bottom) / 2;
     l.statusIconRect = { pad + inner, middle - iconSize / 2, pad + inner + iconSize, middle - iconSize / 2 + iconSize };
     l.statusTitleRect = { textLeft, middle - textHeight / 2, textRight, middle - textHeight / 2 + titleHeight };
     l.statusDetailRect = { textLeft, l.statusTitleRect.bottom + P(3), textRight, l.statusTitleRect.bottom + P(3) + detailHeight };
-    l.targets.push_back({ { right - inner - buttonWidth, middle - P(15), right - inner, middle + P(15) }, statusAction, Look::Button, 0, statusLabel });
+    int buttonTop = middle - buttonsHeight / 2;
+    for (const auto& [action, label] : buttons)
+    {
+        l.targets.push_back({ { right - inner - buttonWidth, buttonTop, right - inner, buttonTop + P(30) }, action, Look::Button, 0, label });
+        buttonTop += P(30) + P(8);
+    }
     y = l.statusCard.bottom + P(14);
 
     l.updateCard = {};
