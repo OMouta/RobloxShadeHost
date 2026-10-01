@@ -3,15 +3,46 @@
 #include "state.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cwchar>
 #include <iterator>
 
 namespace
 {
+// Read from the file once, since the menu and the overlay ask for them every frame. -1, or 0 for the scale, until
+// read. Atomic because the update check may ask from its own thread.
+std::atomic<int> updateChecks = -1;
+std::atomic<int> keepEffectsVisible = -1;
+std::atomic<float> menuScale = 0.0f;
+
 std::wstring IniPath()
 {
     // Keep the existing filename so upgrades retain shortcuts and menu settings.
     return ExeDirectory() + L"RobloxShadeHost.ini";
+}
+
+bool CachedFlag(std::atomic<int>& cached, const wchar_t* name, bool fallback)
+{
+    int value = cached;
+    if (value < 0)
+    {
+        value = GetPrivateProfileIntW(L"Menu", name, fallback, IniPath().c_str()) != 0;
+        cached = value;
+    }
+    return value != 0;
+}
+
+// The new value applies until the host closes even when the file cannot be written.
+bool SaveFlag(std::atomic<int>& cached, const wchar_t* name, bool enabled)
+{
+    cached = enabled;
+    return WritePrivateProfileStringW(L"Menu", name, enabled ? L"1" : L"0", IniPath().c_str()) != FALSE;
+}
+
+// Also turns a scale that is not a number into the default.
+float ValidScale(float scale)
+{
+    return scale > 0 ? std::clamp(scale, 0.75f, 2.0f) : 1.0f;
 }
 
 // A missing entry uses the default. An empty one leaves the shortcut unassigned when allowEmpty is set.
@@ -179,39 +210,49 @@ void SetDebugInfoEnabled(bool enabled)
 
 float MenuScale()
 {
-    wchar_t value[32]{};
-    GetPrivateProfileStringW(L"Menu", L"Scale", L"1", value, static_cast<DWORD>(std::size(value)), IniPath().c_str());
-    const float scale = wcstof(value, nullptr);
-    return scale > 0 ? std::clamp(scale, 0.75f, 2.0f) : 1.0f;
+    float scale = menuScale;
+    if (scale == 0)
+    {
+        wchar_t value[32]{};
+        GetPrivateProfileStringW(L"Menu", L"Scale", L"1", value, static_cast<DWORD>(std::size(value)), IniPath().c_str());
+        scale = ValidScale(wcstof(value, nullptr));
+        menuScale = scale;
+    }
+    return scale;
 }
 
 void SetMenuScale(float scale)
 {
+    scale = ValidScale(scale);
+    // A slider may set it on every frame, and the file only needs writing when it changes.
+    if (scale == MenuScale())
+        return;
+    menuScale = scale;
     wchar_t value[32]{};
-    swprintf_s(value, L"%.2f", std::clamp(scale, 0.75f, 2.0f));
+    swprintf_s(value, L"%.2f", scale);
     if (!WritePrivateProfileStringW(L"Menu", L"Scale", value, IniPath().c_str()))
         Log(LogLevel::Warning, L"Could not save the menu size to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
 bool UpdateChecksEnabled()
 {
-    return GetPrivateProfileIntW(L"Menu", L"CheckForUpdates", 1, IniPath().c_str()) != 0;
+    return CachedFlag(updateChecks, L"CheckForUpdates", true);
 }
 
 void SetUpdateChecksEnabled(bool enabled)
 {
-    if (!WritePrivateProfileStringW(L"Menu", L"CheckForUpdates", enabled ? L"1" : L"0", IniPath().c_str()))
+    if (!SaveFlag(updateChecks, L"CheckForUpdates", enabled))
         Log(LogLevel::Warning, L"Could not save the update check setting to RobloxShadeHost.ini.");
 }
 
 bool KeepEffectsVisible()
 {
-    return GetPrivateProfileIntW(L"Menu", L"KeepEffectsVisible", 0, IniPath().c_str()) != 0;
+    return CachedFlag(keepEffectsVisible, L"KeepEffectsVisible", false);
 }
 
 void SetKeepEffectsVisible(bool enabled)
 {
-    if (!WritePrivateProfileStringW(L"Menu", L"KeepEffectsVisible", enabled ? L"1" : L"0", IniPath().c_str()))
+    if (!SaveFlag(keepEffectsVisible, L"KeepEffectsVisible", enabled))
         Log(LogLevel::Warning, L"Could not save the effects visibility setting to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
