@@ -274,8 +274,12 @@ struct Menu
     char name[128]{};
     std::string nameError;
     bool openDeletePopup = false;
+    bool deleteDialogOpen = false;
     fs::path deleteTarget;
     std::string deleteError;
+    // Set while the preset goes to the Recycle Bin, and when it went, to close the dialog.
+    std::shared_ptr<std::atomic<RecycleResult>> deleting;
+    bool deleteDone = false;
 
     bool comparing = false;
     bool effectsBeforeCompare = true;
@@ -1609,27 +1613,47 @@ void NameDialog(const fs::path& current)
 
 void DeleteDialog()
 {
-    if (!BeginDialog("##delete", m.openDeletePopup, 380))
+    m.deleteDialogOpen = BeginDialog("##delete", m.openDeletePopup, 380);
+    if (!m.deleteDialogOpen)
         return;
     DialogText("Delete " + Utf8(m.deleteTarget.stem().wstring()) + "?", "The preset goes to the Recycle Bin.");
     if (!m.deleteError.empty())
         Text(m.deleteError, kError, 13.5f);
-    const int clicked = DialogButtons({ "Cancel", "Delete" }, !WritePending(m.deleteTarget));
+    const int clicked = DialogButtons({ "Cancel", m.deleting ? "Deleting..." : "Delete" }, !m.deleting && !WritePending(m.deleteTarget));
     if (clicked == 1)
     {
-        if (Recycle(m.deleteTarget.wstring()))
-        {
-            UpdateGamePresets(m.deleteTarget, {});
-            ForgetPreset(m.deleteTarget);
-            RequestScan();
-            ImGui::CloseCurrentPopup();
-        }
-        else
-            m.deleteError = "Windows could not delete the preset.";
+        m.deleteError.clear();
+        // When Windows asks before deleting for good, its question takes focus from the menu, which closes it.
+        m.deleting = Recycle(m.deleteTarget.wstring(), [] { PostMessageW(g.overlay, kOpenMenuMessage, 0, 0); });
     }
-    if (clicked == 0 || ImGui::IsKeyPressed(ImGuiKey_Escape))
+    if (m.deleteDone || clicked == 0 || ImGui::IsKeyPressed(ImGuiKey_Escape))
+    {
+        m.deleteDone = false;
         ImGui::CloseCurrentPopup();
+    }
     EndDialog();
+}
+
+// Picks up the end of a deletion, which runs on a thread of its own.
+void FinishDelete()
+{
+    if (!m.deleting || m.deleting->load() == RecycleResult::Pending)
+        return;
+    const RecycleResult result = m.deleting->load();
+    m.deleting.reset();
+    if (result == RecycleResult::Recycled)
+    {
+        UpdateGamePresets(m.deleteTarget, {});
+        ForgetPreset(m.deleteTarget);
+        RequestScan();
+        m.deleteDone = true;
+    }
+    else if (result == RecycleResult::Failed)
+    {
+        m.deleteError = "Windows could not delete the preset.";
+        if (!m.deleteDialogOpen)
+            ShowToast("Windows could not delete " + Utf8(m.deleteTarget.stem().wstring()));
+    }
 }
 
 // The folders a preset can move to: the ones listed, then saved games that have no presets yet.
@@ -1715,10 +1739,11 @@ void PresetRow(const fs::path& path, bool active)
             MoveMenu(path);
             ImGui::EndMenu();
         }
-        if (ImGui::MenuItem("Delete", nullptr, false, !active && !writing))
+        if (ImGui::MenuItem("Delete", nullptr, false, !active && !writing && !m.deleting))
         {
             m.deleteTarget = path;
             m.deleteError.clear();
+            m.deleteDone = false;
             m.openDeletePopup = true;
         }
         if (active)
@@ -3111,6 +3136,7 @@ void OnOverlay(effect_runtime* runtime)
         m.foldersDirty = true;
     }
     TakeScan();
+    FinishDelete();
     FollowGame();
     CarryOutRequests();
     const bool menu = g.editMode && !ReShadeMenuOpen();
@@ -3286,6 +3312,8 @@ void ResetMenu()
     m.unsavedChoice = UnsavedChoice::Ask;
     m.askingUnsaved = false;
     m.openUnsavedPopup = false;
+    // Hiding the menu closes its dialogs.
+    m.deleteDialogOpen = false;
 }
 
 LPCWSTR MenuCursor()
