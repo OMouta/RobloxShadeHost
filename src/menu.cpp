@@ -240,6 +240,7 @@ struct Menu
     std::string parametersEffect;
     std::vector<Parameter> parameters;
     char search[128]{};
+    char presetSearch[128]{};
     bool showAll = false;
     // Keys of the effects listed under Active since the menu opened or the preset changed.
     std::set<std::string> active;
@@ -2005,7 +2006,7 @@ void FolderIcon(ImDrawList* draw, const PresetFolder& folder, ImVec2 min, float 
 }
 
 // A folder's logo, name and preset count. Clicking it opens or closes the folder.
-bool FolderHeader(const PresetFolder& folder, bool open)
+bool FolderHeader(const PresetFolder& folder, bool open, size_t presets)
 {
     const ImVec2 start = ImGui::GetCursorScreenPos();
     const ImVec2 size(ImGui::GetContentRegionAvail().x, S(34));
@@ -2022,7 +2023,7 @@ bool FolderHeader(const PresetFolder& folder, bool open)
 
     const float chevron = start.x + size.x - S(20);
     PushSize(13);
-    const std::string count = std::to_string(folder.presets.size());
+    const std::string count = std::to_string(presets);
     const ImVec2 countSize = ImGui::CalcTextSize(count.c_str());
     const float countX = chevron - S(16) - countSize.x;
     draw->AddText(ImVec2(countX, start.y + (size.y - countSize.y) / 2), kDim, count.c_str());
@@ -2036,20 +2037,32 @@ bool FolderHeader(const PresetFolder& folder, bool open)
     return clicked;
 }
 
-void FolderSection(const PresetFolder& folder, const fs::path& current)
+// Returns false when searching found nothing in the folder, which is then left out.
+bool FolderSection(const PresetFolder& folder, const fs::path& current, const std::string& filter)
 {
+    // While searching, folders are open and show the presets that match, or all of them when the folder's name does.
+    const bool searching = !filter.empty();
+    const bool folderMatches = searching && Lower(folder.name).find(filter) != std::string::npos;
+    std::vector<const fs::path*> shown;
+    for (const fs::path& preset : folder.presets)
+        if (!searching || folderMatches || Lower(Utf8(preset.stem().wstring())).find(filter) != std::string::npos)
+            shown.push_back(&preset);
+    if (searching && shown.empty())
+        return false;
+
     ImGui::PushID(Utf8(folder.path.wstring()).c_str());
-    const bool open = FolderOpen(folder, current);
-    if (FolderHeader(folder, open))
+    const bool open = searching || FolderOpen(folder, current);
+    if (FolderHeader(folder, open, shown.size()) && !searching)
         m.folderOpen[folder.path.wstring()] = !open;
     if (open)
     {
-        for (const fs::path& preset : folder.presets)
-            PresetRow(preset, SamePath(preset, current));
+        for (const fs::path* preset : shown)
+            PresetRow(*preset, SamePath(*preset, current));
         if (folder.presets.empty() && SamePath(folder.path, NewPresetFolder()))
             Text("New presets and imports go here.", kDim, 13.5f);
     }
     ImGui::PopID();
+    return true;
 }
 
 // Asks what to do with unsaved changes when switching presets. The switch waits for the answer.
@@ -2102,6 +2115,10 @@ void PresetsTab()
             OpenNamePopup(NameAction::SaveAsNew, current);
     }
     ImGui::Dummy(ImVec2(0, S(2)));
+    PushSize(14.5f);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##presetsearch", "Search presets", m.presetSearch, sizeof(m.presetSearch));
+    ImGui::PopFont();
 
     UpdateTechniques();
     const std::vector<std::string> missing = MissingEffects(current);
@@ -2116,8 +2133,13 @@ void PresetsTab()
         ImGui::Dummy(ImVec2(0, S(2)));
     }
 
+    const std::string filter = Lower(m.presetSearch);
+    bool any = false;
     for (const PresetFolder& folder : m.folders)
-        FolderSection(folder, current);
+        if (FolderSection(folder, current, filter))
+            any = true;
+    if (!any && !filter.empty())
+        Text("No presets match.", kDim, 13.5f);
 
     ImGui::Dummy(ImVec2(0, S(4)));
     Text(m.autoSave ? "Changes save to the active preset as you make them."
