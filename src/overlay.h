@@ -9,7 +9,8 @@ void SetEditMode(bool enabled);
 // Leaves edit mode and brings the game back to the front.
 void ReturnToGame();
 
-// Keeps the overlay exactly over the game while the game is the foreground window (or while editing).
+// Keeps the overlay exactly over the game while the game is the foreground window (or while editing). With
+// KeepEffectsVisible, also while another window is in front, then directly above the game instead of above every window.
 void UpdateOverlay();
 
 // Turns capture and the overlay off or on, like the overlay shortcut.
