@@ -606,13 +606,8 @@ int PlaceWords(HDC dc, Row& row, const std::wstring& text, int left, int top, in
         const size_t end = std::min(text.find_first_of(L" \n", start), text.size());
         if (std::wstring word = text.substr(start, end - start); !word.empty())
         {
-            std::wstring link;
-            if (word.starts_with(L"https://"))
-            {
-                // A sentence can end right after an address.
-                link = word.substr(0, word.find_last_not_of(L".,;:!?)") + 1);
-                word.erase(0, link.size());
-            }
+            const std::wstring link = word.substr(0, WebAddressLength(word));
+            word.erase(0, link.size());
             const int linkWidth = link.empty() ? 0 : width(link);
             const int wordWidth = linkWidth + (word.empty() ? 0 : width(word));
             if (x > left && x + wordWidth > right)

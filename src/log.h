@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 enum class LogLevel
@@ -38,6 +39,11 @@ void ClearNotices();
 
 // Changes whenever a notice is added or the notices are cleared.
 unsigned NoticeVersion();
+
+// How much of a word in a notice is a web address, which the launcher and the menu show as a link: all of it but
+// punctuation after the address, such as a full stop, or nothing when the word is not one.
+size_t WebAddressLength(std::string_view word);
+size_t WebAddressLength(std::wstring_view word);
 
 const std::wstring& LogPath();
 

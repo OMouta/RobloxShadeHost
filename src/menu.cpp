@@ -2891,11 +2891,6 @@ void ConfirmDialog()
 
 // Status
 
-bool IsWebAddress(const std::string& word)
-{
-    return word.starts_with("https://") || word.starts_with("http://");
-}
-
 // Wraps a notice at the edge of the window, with the web addresses in it as links. Wrapped lines start where the
 // first one does.
 void NoticeText(const std::string& text)
@@ -2919,18 +2914,17 @@ void NoticeText(const std::string& text)
         start = end + 1;
         if (word.empty())
             continue;
-        // Punctuation after an address, such as a full stop, is not part of it.
+        const size_t address = WebAddressLength(word);
         std::string after;
-        if (IsWebAddress(word))
+        if (address)
         {
-            const size_t cut = word.find_last_not_of(".,;:!?)'\"") + 1;
-            after = word.substr(cut);
-            word.resize(cut);
+            after = word.substr(address);
+            word.resize(address);
         }
         if (!first && ImGui::GetItemRectMax().x + space + ImGui::CalcTextSize((word + after).c_str()).x <= right)
             ImGui::SameLine(0, space);
         first = false;
-        if (IsWebAddress(word))
+        if (address)
         {
             ImGui::PushID(index);
             if (Link(word.c_str()))
