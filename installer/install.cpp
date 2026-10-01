@@ -1,6 +1,7 @@
 #include "install.h"
 #include "pinned.h"
 #include "resource.h"
+#include "../src/package_files.h"
 #include "../src/preset_ini.h"
 #include "../src/text.h"
 
@@ -11,8 +12,6 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <wrl/client.h>
-
-#include <miniz.h>
 
 #include <algorithm>
 #include <cstdarg>
@@ -48,18 +47,6 @@ constexpr const wchar_t* kLogs[] = { L"Unishade.log", L"Unishade.old.log", L"Rob
 // them, including effects the user added to reshade-shaders.
 constexpr const wchar_t* kUserFiles[] = { L"ReShade.ini", L"ReShadePreset.ini", L"RobloxShadeHost.ini", L"games.ini", L"games.ini.tmp" };
 constexpr const wchar_t* kUserFolders[] = { L"presets", L"reshade-shaders" };
-
-// Limits for an effect package's zip, checked before anything is extracted. The largest packages on the list hold
-// about 200 files and 45 MB.
-constexpr mz_uint kZipEntries = 20000;
-constexpr uint64_t kZipEntrySize = 128ull << 20;
-constexpr uint64_t kZipTotalSize = 1ull << 30;
-
-// What effect packages may put into reshade-shaders: effect sources, the textures ReShade loads, and plain-text
-// licenses and readmes. Anything else, such as add-ons, DLLs or programs, stays out.
-constexpr const wchar_t* kPackageExtensions[] = { L".fx",  L".fxh", L".png",  L".jpg", L".jpeg", L".bmp",
-                                                  L".tga", L".dds", L".hdr", L".cube", L".txt", L".md" };
-constexpr const wchar_t* kPackageTextNames[] = { L"LICENSE", L"LICENCE", L"COPYING", L"NOTICE", L"README" };
 
 // The add-on files and hashes come from the manifests in vendor/ when Setup is built. A downloaded manifest only says
 // where to get them.
@@ -179,16 +166,6 @@ struct HandleCloser
     void operator()(HANDLE handle) const { CloseHandle(handle); }
 };
 using Handle = std::unique_ptr<void, HandleCloser>;
-
-bool IsInside(const fs::path& path, const fs::path& folder)
-{
-    std::wstring child = path.lexically_normal().wstring();
-    std::wstring parent = folder.lexically_normal().wstring();
-    while (!parent.empty() && parent.back() == L'\\')
-        parent.pop_back();
-    return child.size() >= parent.size() && _wcsnicmp(child.c_str(), parent.c_str(), parent.size()) == 0 &&
-           (child.size() == parent.size() || child[parent.size()] == L'\\');
-}
 
 // A name nobody can guess and create first.
 std::wstring RandomName(const wchar_t* prefix)
@@ -312,134 +289,6 @@ void FixReShadeIni(const fs::path& path, bool addPresetPath)
         WriteFile(path, result);
 }
 
-bool AllowedPackageFile(const fs::path& name)
-{
-    for (const wchar_t* extension : kPackageExtensions)
-        if (_wcsicmp(name.extension().c_str(), extension) == 0)
-            return true;
-    for (const wchar_t* text : kPackageTextNames)
-        if (_wcsicmp(name.c_str(), text) == 0)
-            return true;
-    return false;
-}
-
-// Extracts the files of the types effect packages may install.
-void ExtractZip(const std::string& data, const fs::path& destination, const std::string& name)
-{
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_mem(&zip, data.data(), data.size(), 0))
-        throw std::runtime_error("The download of " + name + " is not a zip file.");
-    struct Closer
-    {
-        mz_zip_archive* zip;
-        ~Closer() { mz_zip_reader_end(zip); }
-    } closer{ &zip };
-
-    // The sizes in the zip's directory are what extracting allocates and writes, so they are checked first.
-    const mz_uint count = mz_zip_reader_get_num_files(&zip);
-    if (count > kZipEntries)
-        throw std::runtime_error(name + " contains more files than an effect package can.");
-    uint64_t total = 0;
-    for (mz_uint index = 0; index < count; ++index)
-    {
-        mz_zip_archive_file_stat stat{};
-        if (!mz_zip_reader_file_stat(&zip, index, &stat))
-            throw std::runtime_error("Could not read " + name + ".");
-        total += stat.m_uncomp_size;
-        if (stat.m_uncomp_size > kZipEntrySize || total > kZipTotalSize)
-            throw std::runtime_error(name + " unpacks to more data than an effect package can.");
-    }
-
-    for (mz_uint index = 0; index < count; ++index)
-    {
-        mz_zip_archive_file_stat stat{};
-        if (!mz_zip_reader_file_stat(&zip, index, &stat) || stat.m_is_directory)
-            continue;
-        const fs::path target = (destination / Wide(stat.m_filename)).lexically_normal();
-        if (!IsInside(target, destination))
-            throw std::runtime_error(name + " contains a file outside its own folder.");
-        if (!AllowedPackageFile(target.filename()))
-            continue;
-        fs::create_directories(target.parent_path());
-        size_t size = 0;
-        void* bytes = mz_zip_reader_extract_to_heap(&zip, index, &size, 0);
-        if (!bytes)
-            throw std::runtime_error("Could not extract " + name + ".");
-        const std::string_view contents(static_cast<const char*>(bytes), size);
-        try
-        {
-            WriteFile(target, contents);
-        }
-        catch (...)
-        {
-            mz_free(bytes);
-            throw;
-        }
-        mz_free(bytes);
-    }
-}
-
-// Matches ReShade's own installer: folders named Shaders and Textures first, otherwise the shallowest
-// folder with effect or image files.
-void FindPackageFolders(const fs::path& directory, fs::path& shaders, fs::path& textures, fs::path& shaderFallback, fs::path& textureFallback)
-{
-    for (const auto& entry : fs::directory_iterator(directory))
-    {
-        const fs::path& path = entry.path();
-        if (entry.is_directory())
-        {
-            if (shaders.empty() && _wcsicmp(path.filename().c_str(), L"Shaders") == 0)
-                shaders = path;
-            if (textures.empty() && _wcsicmp(path.filename().c_str(), L"Textures") == 0)
-                textures = path;
-            FindPackageFolders(path, shaders, textures, shaderFallback, textureFallback);
-            continue;
-        }
-        const std::wstring extension = path.extension().wstring();
-        const auto shallower = [&](const fs::path& current) { return current.empty() || directory.native().size() < current.native().size(); };
-        if (_wcsicmp(extension.c_str(), L".fx") == 0 && shallower(shaderFallback))
-            shaderFallback = directory;
-        if ((_wcsicmp(extension.c_str(), L".png") == 0 || _wcsicmp(extension.c_str(), L".jpg") == 0 || _wcsicmp(extension.c_str(), L".jpeg") == 0) &&
-            shallower(textureFallback))
-            textureFallback = directory;
-    }
-}
-
-void CopyPackageFiles(const fs::path& source, const fs::path& destination, const std::wstring& denied)
-{
-    fs::create_directories(destination);
-    for (const auto& entry : fs::directory_iterator(source))
-    {
-        const fs::path name = entry.path().filename();
-        if (entry.is_directory())
-        {
-            CopyPackageFiles(entry.path(), destination / name, denied);
-            continue;
-        }
-        bool skip = !AllowedPackageFile(name);
-        for (size_t start = 0; start <= denied.size() && !skip;)
-        {
-            size_t end = denied.find(L',', start);
-            end = end == std::wstring::npos ? denied.size() : end;
-            std::wstring deniedName = denied.substr(start, end - start);
-            deniedName.erase(0, deniedName.find_first_not_of(L' '));
-            deniedName.erase(deniedName.find_last_not_of(L' ') + 1);
-            skip = !deniedName.empty() && _wcsicmp(deniedName.c_str(), name.c_str()) == 0;
-            start = end + 1;
-        }
-        if (!skip)
-            fs::copy_file(entry.path(), destination / name, fs::copy_options::overwrite_existing);
-    }
-}
-
-fs::path PackageDestination(const fs::path& files, const std::wstring& relative, const wchar_t* kind, const std::string& package)
-{
-    const fs::path destination = (files / relative).lexically_normal();
-    if (relative.empty() || !IsInside(destination, files / L"reshade-shaders" / kind))
-        throw std::runtime_error("The effect package " + package + " has an invalid install folder.");
-    return destination;
-}
-
 // "The preset A was not installed." or "The presets A, B and C were not installed.", and what to do about it.
 std::string SkippedNote(const char* one, const char* several, const std::vector<std::string>& names)
 {
@@ -502,21 +351,14 @@ void InstallPackage(const fs::path& catalog, const std::wstring& section, const 
     const std::wstring url = IniString(catalog, section, L"DownloadUrl");
     if (url.rfind(L"https://", 0) != 0)
         throw std::runtime_error("The effect package " + name + " has an invalid download address.");
-    const fs::path shaderDestination = PackageDestination(files, IniString(catalog, section, L"InstallPath"), L"Shaders", name);
+    const fs::path shaderDestination = PackageDestination(files, Utf8(IniString(catalog, section, L"InstallPath")), "Shaders", name);
 
     fs::remove_all(extracted);
     ExtractZip(Fetch(url, cancel, kPackageLimit), extracted, name);
-    fs::path shaders, textures, shaderFallback, textureFallback;
-    FindPackageFolders(extracted, shaders, textures, shaderFallback, textureFallback);
-    if (shaders.empty())
-        shaders = shaderFallback;
-    if (textures.empty())
-        textures = textureFallback;
-    if (shaders.empty())
-        throw std::runtime_error("The effect package " + name + " contains no effects.");
-    CopyPackageFiles(shaders, shaderDestination, IniString(catalog, section, L"DenyEffectFiles"));
-    if (!textures.empty())
-        CopyPackageFiles(textures, PackageDestination(files, IniString(catalog, section, L"TextureInstallPath"), L"Textures", name), L"");
+    const PackageFolders folders = FindPackageFolders(extracted, name);
+    CopyPackageFiles(folders.shaders, shaderDestination, Utf8(IniString(catalog, section, L"DenyEffectFiles")));
+    if (!folders.textures.empty())
+        CopyPackageFiles(folders.textures, PackageDestination(files, Utf8(IniString(catalog, section, L"TextureInstallPath")), "Textures", name), "");
     fs::remove_all(extracted);
     SetupLog("Effect package installed: " + name);
 }

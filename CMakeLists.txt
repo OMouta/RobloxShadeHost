@@ -174,6 +174,12 @@ if(BUILD_TESTING)
     target_compile_options(ini_text_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME ini_text_tests COMMAND ini_text_tests)
 
+    # miniz comes with Setup's other libraries.
+    add_executable(package_files_tests tests/package_files_tests.cpp)
+    target_compile_options(package_files_tests PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(package_files_tests PRIVATE setup_libraries)
+    add_test(NAME package_files_tests COMMAND package_files_tests)
+
     add_executable(game_window_tests tests/game_window_tests.cpp src/game_integration.cpp)
     target_compile_definitions(game_window_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(game_window_tests PRIVATE /W4 /permissive- /EHsc)
