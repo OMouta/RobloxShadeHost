@@ -1732,8 +1732,10 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (wParam == L'\r' || wParam == L'\x1B' || wParam == L'\t')
             return 0;
         break;
+    // Not while CloseRename takes the focus away.
     case WM_KILLFOCUS:
-        PostMessageW(g.launcher, kRenameMessage, kLeaveName, reinterpret_cast<LPARAM>(hwnd));
+        if (hwnd == l.edit)
+            PostMessageW(g.launcher, kRenameMessage, kLeaveName, reinterpret_cast<LPARAM>(hwnd));
         break;
     }
     return CallWindowProcW(l.editProc, hwnd, message, wParam, lParam);
