@@ -179,6 +179,13 @@ struct PendingWrite
     ULONGLONG since = 0;
 };
 
+// What the confirmation dialog asks about.
+enum class Confirmation
+{
+    ResetEffect,
+    ResetShortcuts,
+};
+
 // What to do with unsaved changes before switching presets.
 enum class UnsavedChoice
 {
@@ -309,6 +316,12 @@ struct Menu
 
     int capturing = -1;
     std::wstring shortcutError;
+    bool updateChecks = true;
+    bool keepEffects = false;
+
+    bool openConfirmPopup = false;
+    Confirmation confirm = Confirmation::ResetEffect;
+    std::string confirmEffect;
 
     // Read once a frame while the menu shows, and the notices only when they change.
     Update update;
@@ -2428,6 +2441,16 @@ bool DrawParameter(const Parameter& p)
     return changed;
 }
 
+void ResetEffect(const std::string& effect)
+{
+    if (m.parametersEffect != effect)
+        LoadParameters(effect);
+    for (const Parameter& parameter : m.parameters)
+        if (!parameter.noReset)
+            m.runtime->reset_uniform_value(parameter.handle);
+    m.presetChanged = true;
+}
+
 void DrawParameters(const Technique& technique)
 {
     if (m.parametersEffect != technique.effect)
@@ -2464,10 +2487,9 @@ void DrawParameters(const Technique& technique)
         ImGui::Dummy(ImVec2(0, S(2)));
         if (Link("Reset all", kDim))
         {
-            for (const Parameter& parameter : m.parameters)
-                if (!parameter.noReset)
-                    m.runtime->reset_uniform_value(parameter.handle);
-            m.presetChanged = true;
+            m.confirm = Confirmation::ResetEffect;
+            m.confirmEffect = technique.effect;
+            m.openConfirmPopup = true;
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Right-click a setting to reset only that one.");
@@ -2798,11 +2820,9 @@ void SettingsTab()
     }
     if (Link("Reset to defaults", kDim))
     {
-        InputHotkeys hotkeys;
-        for (const Shortcut& shortcut : kShortcuts)
-            ParseHotkey(shortcut.fallback, hotkeys.*shortcut.member);
         StopCapture();
-        ApplyHotkeys(hotkeys);
+        m.confirm = Confirmation::ResetShortcuts;
+        m.openConfirmPopup = true;
     }
 
     ImGui::Dummy(ImVec2(0, S(14)));
@@ -2817,8 +2837,22 @@ void SettingsTab()
     }
 
     ImGui::Dummy(ImVec2(0, S(14)));
-    Heading("MENU");
+    Heading("DISPLAY");
     MenuSizeRow();
+    if (SwitchRow("keep_effects", m.keepEffects, "Keep effects visible when another window is in front",
+                  "Effects stay over the game while another window, such as a chat or a browser, is in front of it."))
+    {
+        m.keepEffects = !m.keepEffects;
+        SetKeepEffectsVisible(m.keepEffects);
+    }
+
+    ImGui::Dummy(ImVec2(0, S(14)));
+    Heading("UPDATES");
+    if (SwitchRow("update_checks", m.updateChecks, "Check for updates", "Asks GitHub for a newer version when Unishade starts. Applies from the next start."))
+    {
+        m.updateChecks = !m.updateChecks;
+        SetUpdateChecksEnabled(m.updateChecks);
+    }
 
     ImGui::Dummy(ImVec2(0, S(14)));
     Heading("DEBUG");
@@ -2827,6 +2861,37 @@ void SettingsTab()
         m.debugInfo = !m.debugInfo;
         SetDebugInfoEnabled(m.debugInfo);
     }
+}
+
+void ResetShortcuts()
+{
+    InputHotkeys hotkeys;
+    for (const Shortcut& shortcut : kShortcuts)
+        ParseHotkey(shortcut.fallback, hotkeys.*shortcut.member);
+    ApplyHotkeys(hotkeys);
+}
+
+// Asks before resetting what cannot be got back, such as an effect's settings with auto-save on.
+void ConfirmDialog()
+{
+    if (!BeginDialog("##confirm", m.openConfirmPopup, 380))
+        return;
+    if (m.confirm == Confirmation::ResetEffect)
+        DialogText("Reset every setting of " + m.confirmEffect + "?",
+                   m.autoSave ? "They go back to their defaults and the preset is saved." : "They go back to their defaults.");
+    else
+        DialogText("Reset every shortcut?", "They go back to the keys Unishade starts with.");
+    const int clicked = DialogButtons({ "Cancel", "Reset" });
+    if (clicked == 1)
+    {
+        if (m.confirm == Confirmation::ResetEffect)
+            ResetEffect(m.confirmEffect);
+        else
+            ResetShortcuts();
+    }
+    if (clicked >= 0 || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        ImGui::CloseCurrentPopup();
+    EndDialog();
 }
 
 // Status
@@ -3131,6 +3196,7 @@ void DrawMenu()
     NameDialog(m.current);
     DeleteDialog();
     UnsavedDialog(m.current);
+    ConfirmDialog();
     if (scrolls)
     {
         // Lets the window scroll down to the footer.
@@ -3562,6 +3628,8 @@ void InitMenu()
     m.autoSave = AutoSavePresets();
     m.debugInfo = DebugInfoEnabled();
     m.menuScale = MenuScale();
+    m.updateChecks = UpdateChecksEnabled();
+    m.keepEffects = KeepEffectsVisible();
     reshade::register_event<reshade::addon_event::init_effect_runtime>(
         [](effect_runtime* runtime) { Guarded([runtime] { OnInitRuntime(runtime); }); });
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(
