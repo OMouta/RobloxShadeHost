@@ -4,6 +4,8 @@ description: Run Unishade on a Mac or on Linux, where ReShade itself does not ru
 order: 6
 ---
 
+Unishade for macOS and Linux is experimental. It's new, so expect bugs.
+
 ReShade only runs on Windows, so Unishade for macOS and Linux runs ReShade's effects itself. It uses ReShade's own effect compiler with Vulkan, through MoltenVK on a Mac. The same effect packages and presets work, and presets move between Windows, macOS and Linux unchanged.
 
 Like on Windows, Unishade copies the game's window and draws it again with effects in a window of its own on top. It doesn't touch the game.

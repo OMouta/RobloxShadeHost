@@ -27,13 +27,13 @@ const platforms = {
   macos: {
     label: release.macos ? 'Download for macOS' : 'Unishade for macOS',
     href: release.macos?.url ?? '/download/#macos-and-linux',
-    details: details(release.macos, requirements.macosShort),
+    details: `Experimental · ${details(release.macos, requirements.macosShort)}`,
     other: { label: 'Other platforms', href: '/download/' },
   },
   linux: {
     label: release.linux ? 'Download for Linux' : 'Unishade for Linux',
     href: release.linux?.url ?? '/download/#macos-and-linux',
-    details: details(release.linux, requirements.linuxShort),
+    details: `Experimental · ${details(release.linux, requirements.linuxShort)}`,
     other: { label: 'Other platforms', href: '/download/' },
   },
 };
