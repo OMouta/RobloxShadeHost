@@ -8,8 +8,8 @@ import { links } from './src/links.ts';
 const siteLinks = {
   name: 'site-links',
   link(node, context) {
-    const url = node.url.startsWith('links:') && links[node.url.slice('links:'.length)];
-    if (url) context.setProperty(node, 'url', url);
+    const name = node.url.startsWith('links:') && node.url.slice('links:'.length);
+    if (name && Object.hasOwn(links, name)) context.setProperty(node, 'url', links[name]);
   },
 };
 
