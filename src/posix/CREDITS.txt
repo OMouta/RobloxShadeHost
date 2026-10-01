@@ -13,8 +13,10 @@ GLFW, copyright 2002-2006 Marcus Geelnard, 2006-2019 Camilla Löwy. zlib license
 https://www.glfw.org/
 miniz, copyright 2013-2014 RAD Game Tools and Valve Software, 2010-2014 Rich Geldreich and Tenacious Software LLC. MIT license.
 https://github.com/richgel999/miniz
-stb_image and stb_image_write, by Sean Barrett. Public domain or MIT license.
+stb_image, stb_image_write and stb_image_resize2, by Sean Barrett, with Jeff Roberts and Jorge L Rodriguez for stb_image_resize2. Public domain or MIT license.
 https://github.com/nothings/stb
+stb_image_dds (from ReShade 6.8.0), based on SOIL by Jonathan Dummer. Public domain.
+https://github.com/crosire/reshade
 
 The macOS app also includes:
 MoltenVK, copyright 2015-2026 The Brenwill Workshop Ltd. Apache License 2.0.
