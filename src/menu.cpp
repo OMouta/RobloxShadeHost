@@ -26,11 +26,13 @@
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -118,11 +120,15 @@ struct Parameter
     bool noReset = false;
 };
 
+// Decoded once with every mipmap level, largest first, so the GPU can draw it smoothly at any size.
+using Pixels = std::shared_ptr<std::vector<BYTE>>;
+
 struct Texture
 {
     resource image{};
     resource_view view{};
-    int size = 0;
+    // The pixels it was made from. Others, or none after the device was lost, make it again.
+    Pixels source;
 };
 
 // The presets folder holds presets for all games, and one level of folders in it. A folder named after a saved
@@ -137,6 +143,16 @@ struct PresetFolder
     // Outside the presets folder, holding only the active preset.
     bool other = false;
     std::vector<fs::path> presets;
+    // The folder's logo.png, such as the icon saved for a game.
+    Pixels logo;
+};
+
+// A folder as the scanner last read it from disk.
+struct ScannedFolder
+{
+    fs::path path;
+    std::vector<fs::path> presets;
+    Pixels logo;
 };
 
 enum class NameAction
@@ -159,6 +175,8 @@ enum class UnsavedChoice
 struct Menu
 {
     effect_runtime* runtime = nullptr;
+    // The runtime's device, which the logos are made on.
+    reshade::api::device* device = nullptr;
     float scale = 1;
     // The size picked in Settings.
     float menuScale = 1;
@@ -179,6 +197,7 @@ struct Menu
     bool beforeTaken = false;
     ULONGLONG lastScreenshot = 0;
     int presetStep = 0;
+    ULONGLONG presetStepAt = 0;
     // The key that keeps effects off, while the compare shortcut is held.
     UINT compareKey = 0;
 
@@ -211,9 +230,17 @@ struct Menu
     // Set when the changes went into the preset being switched to, so the one left behind is reverted.
     bool pendingKeepsEdits = false;
 
+    // The active preset, read from ReShade at the start of every frame and after every switch.
+    fs::path current;
     // As the Presets tab lists them: the game being played, all games, then every other folder with presets.
     std::vector<PresetFolder> folders;
-    ULONGLONG presetsScanned = 0;
+    // Built again from the latest scan when it, the active preset or the game changes.
+    bool foldersDirty = true;
+    std::vector<ScannedFolder> scan;
+    unsigned scanVersion = 0;
+    // When the scan was asked for that the folders come from, and when one was last asked for.
+    ULONGLONG scannedAt = 0;
+    ULONGLONG scanRequested = 0;
     // Folders opened or closed by hand, by path.
     std::map<std::wstring, bool> folderOpen;
     // The saved game being played, by its folder's name. Empty for a window picked for this session only.
@@ -241,8 +268,9 @@ struct Menu
     int capturing = -1;
     std::wstring shortcutError;
 
+    Pixels logoPixels;
     Texture logo;
-    // By folder. A folder without a logo keeps an empty texture until the presets are scanned again.
+    // By folder.
     std::map<std::wstring, Texture> folderLogos;
 };
 Menu m;
@@ -256,6 +284,27 @@ struct ImportDialog
     std::atomic<bool> open = false;
 };
 ImportDialog& importDialog = *new ImportDialog;
+
+// The presets folder is read on a thread of its own, so the frame never waits for the disk. Never destroyed, since
+// the thread may still be reading when the host exits.
+struct PresetScanner
+{
+    std::mutex mutex;
+    std::condition_variable wake;
+    bool started = false;
+    bool requested = false;
+    ULONGLONG requestedAt = 0;
+    // Icons to save as logos: the game's executable, then the logo's path.
+    std::vector<std::pair<fs::path, fs::path>> icons;
+    // What the last scan found, and when the request was made that it answers.
+    std::vector<ScannedFolder> folders;
+    ULONGLONG scannedAt = 0;
+    unsigned version = 0;
+};
+PresetScanner& scanner = *new PresetScanner;
+
+// Folders are read again this often while the Presets tab shows them.
+constexpr ULONGLONG kScanInterval = 2000;
 
 // Settings lists the shortcuts in the order of kShortcuts.
 constexpr struct
@@ -287,6 +336,10 @@ std::string Lower(std::string text)
 
 // Logos
 
+// Logos are decoded once at these sizes, and the GPU scales them to the size the menu draws them.
+constexpr UINT kHeaderLogoSize = 256;
+constexpr UINT kFolderLogoSize = 128;
+
 // Scales with premultiplied alpha, which keeps the transparent edge from darkening.
 std::vector<BYTE> ScaledPixels(IWICImagingFactory* factory, IWICBitmapDecoder* decoder, UINT size)
 {
@@ -306,31 +359,43 @@ std::vector<BYTE> ScaledPixels(IWICImagingFactory* factory, IWICBitmapDecoder* d
     return pixels;
 }
 
-std::vector<BYTE> LogoPixels(UINT size)
+// Every mipmap level from size down to one pixel, one after the other. size is a power of two.
+Pixels MipmapPixels(IWICImagingFactory* factory, IWICBitmapDecoder* decoder, UINT size)
+{
+    auto pixels = std::make_shared<std::vector<BYTE>>();
+    for (UINT level = size; level; level /= 2)
+    {
+        const std::vector<BYTE> scaled = ScaledPixels(factory, decoder, level);
+        if (scaled.empty())
+            return std::make_shared<std::vector<BYTE>>();
+        pixels->insert(pixels->end(), scaled.begin(), scaled.end());
+    }
+    return pixels;
+}
+
+Pixels LogoPixels(UINT size)
 {
     const HRSRC info = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_LOGO), RT_RCDATA);
     const HGLOBAL resource = info ? LoadResource(nullptr, info) : nullptr;
-    if (!resource)
-        return {};
     winrt::com_ptr<IWICImagingFactory> factory;
     winrt::com_ptr<IWICStream> stream;
     winrt::com_ptr<IWICBitmapDecoder> decoder;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()))) ||
+    if (!resource || FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()))) ||
         FAILED(factory->CreateStream(stream.put())) ||
         FAILED(stream->InitializeFromMemory(static_cast<BYTE*>(LockResource(resource)), SizeofResource(nullptr, info))) ||
         FAILED(factory->CreateDecoderFromStream(stream.get(), nullptr, WICDecodeMetadataCacheOnLoad, decoder.put())))
-        return {};
-    return ScaledPixels(factory.get(), decoder.get(), size);
+        return std::make_shared<std::vector<BYTE>>();
+    return MipmapPixels(factory.get(), decoder.get(), size);
 }
 
-std::vector<BYTE> ImagePixels(const fs::path& file, UINT size)
+Pixels ImagePixels(const fs::path& file, UINT size)
 {
     winrt::com_ptr<IWICImagingFactory> factory;
     winrt::com_ptr<IWICBitmapDecoder> decoder;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.put()))) ||
         FAILED(factory->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, decoder.put())))
-        return {};
-    return ScaledPixels(factory.get(), decoder.get(), size);
+        return std::make_shared<std::vector<BYTE>>();
+    return MipmapPixels(factory.get(), decoder.get(), size);
 }
 
 // Saves an executable's icon as a PNG.
@@ -362,41 +427,197 @@ void SaveExecutableIcon(const fs::path& executable, const fs::path& file)
 
 void DestroyTexture(Texture& texture)
 {
-    if (m.runtime && texture.view.handle)
-        m.runtime->get_device()->destroy_resource_view(texture.view);
-    if (m.runtime && texture.image.handle)
-        m.runtime->get_device()->destroy_resource(texture.image);
+    if (m.device && texture.view.handle)
+        m.device->destroy_resource_view(texture.view);
+    if (m.device && texture.image.handle)
+        m.device->destroy_resource(texture.image);
     texture = {};
 }
 
-// Made at the size it is drawn, since ImGui draws textures without mipmaps. Without pixels the texture stays
-// empty at that size, so it is not tried again every frame.
-void CreateTexture(Texture& texture, int size, std::vector<BYTE> pixels)
+// Without pixels, or when the device cannot make it, the texture stays empty until it gets other pixels.
+void CreateTexture(Texture& texture, const Pixels& pixels, UINT size)
 {
     DestroyTexture(texture);
-    texture.size = size;
-    if (pixels.empty())
+    texture.source = pixels;
+    if (!m.device || !pixels || pixels->empty())
         return;
-    device* device = m.runtime->get_device();
-    const subresource_data data{ pixels.data(), static_cast<uint32_t>(size * 4), 0 };
-    const resource_desc desc(size, size, 1, 1, format::r8g8b8a8_unorm, 1, memory_heap::default_, resource_usage::shader_resource);
-    if (device->create_resource(desc, &data, resource_usage::shader_resource, &texture.image))
-        device->create_resource_view(texture.image, resource_usage::shader_resource, resource_view_desc(format::r8g8b8a8_unorm), &texture.view);
+    std::vector<subresource_data> levels;
+    size_t offset = 0;
+    for (UINT level = size; level; level /= 2)
+    {
+        levels.push_back({ pixels->data() + offset, level * 4, level * level * 4 });
+        offset += static_cast<size_t>(level) * level * 4;
+    }
+    if (offset != pixels->size())
+        return;
+    const uint16_t count = static_cast<uint16_t>(levels.size());
+    const resource_desc desc(size, size, 1, count, format::r8g8b8a8_unorm, 1, memory_heap::default_, resource_usage::shader_resource);
+    if (m.device->create_resource(desc, levels.data(), resource_usage::shader_resource, &texture.image))
+        m.device->create_resource_view(texture.image, resource_usage::shader_resource, resource_view_desc(format::r8g8b8a8_unorm, 0, count, 0, 1),
+                                       &texture.view);
 }
 
-void UpdateLogo(int size)
+void DestroyTextures()
 {
-    if (size != m.logo.size)
-        CreateTexture(m.logo, size, LogoPixels(size));
+    DestroyTexture(m.logo);
+    for (auto& [folder, texture] : m.folderLogos)
+        DestroyTexture(texture);
+    m.folderLogos.clear();
+}
+
+uint64_t HeaderLogo()
+{
+    if (!m.logoPixels)
+        m.logoPixels = LogoPixels(kHeaderLogoSize);
+    if (m.logo.source != m.logoPixels)
+        CreateTexture(m.logo, m.logoPixels, kHeaderLogoSize);
+    return m.logo.view.handle;
 }
 
 // A folder's logo.png, such as the icon saved for a game. 0 when it has none.
-uint64_t FolderLogo(const fs::path& folder, int size)
+uint64_t FolderLogo(const PresetFolder& folder)
 {
-    Texture& texture = m.folderLogos[folder.wstring()];
-    if (size != texture.size)
-        CreateTexture(texture, size, ImagePixels(folder / L"logo.png", size));
+    if (!folder.logo || folder.logo->empty())
+        return 0;
+    Texture& texture = m.folderLogos[folder.path.wstring()];
+    if (texture.source != folder.logo)
+        CreateTexture(texture, folder.logo, kFolderLogoSize);
     return texture.view.handle;
+}
+
+// Scanning
+
+// What the scanner knows about a file, so it only reads the file again when it changes.
+struct ScannedFile
+{
+    fs::file_time_type time{};
+    uintmax_t size = 0;
+    unsigned seen = 0;
+    bool preset = false;
+    Pixels logo;
+};
+using ScanCache = std::map<std::wstring, ScannedFile>;
+
+bool IsPreset(const fs::path& path);
+bool LoadablePreset(const fs::path& path);
+const fs::path& PresetsRoot();
+
+ScannedFolder ScanFolder(const fs::path& folder, ScanCache& cache, unsigned generation)
+{
+    ScannedFolder scanned{ .path = folder };
+    std::error_code error;
+    for (fs::directory_iterator entry(folder, error), end; !error && entry != end; entry.increment(error))
+    {
+        std::error_code ignored;
+        const fs::path& path = entry->path();
+        const bool logo = _wcsicmp(path.filename().c_str(), L"logo.png") == 0;
+        if (!entry->is_regular_file(ignored) || !(logo || LoadablePreset(path)))
+            continue;
+        // Directory listings carry the time and size, so files that did not change are not opened.
+        const fs::file_time_type time = entry->last_write_time(ignored);
+        const uintmax_t size = entry->file_size(ignored);
+        ScannedFile& file = cache[path.native()];
+        if (!file.seen || file.time != time || file.size != size)
+        {
+            file = { .time = time, .size = size };
+            if (logo)
+                file.logo = ImagePixels(path, kFolderLogoSize);
+            else
+                file.preset = IsPreset(path);
+        }
+        file.seen = generation;
+        if (logo)
+            scanned.logo = file.logo;
+        else if (file.preset)
+            scanned.presets.push_back(path);
+    }
+    std::sort(scanned.presets.begin(), scanned.presets.end(),
+              [](const fs::path& a, const fs::path& b) { return _wcsicmp(a.stem().c_str(), b.stem().c_str()) < 0; });
+    return scanned;
+}
+
+// The presets folder itself, then each folder in it.
+std::vector<ScannedFolder> ScanLibrary(ScanCache& cache, unsigned generation)
+{
+    const fs::path& root = PresetsRoot();
+    std::vector<ScannedFolder> folders{ ScanFolder(root, cache, generation) };
+    std::error_code error;
+    for (fs::directory_iterator entry(root, error), end; !error && entry != end; entry.increment(error))
+        if (std::error_code ignored; entry->is_directory(ignored))
+            folders.push_back(ScanFolder(entry->path(), cache, generation));
+    std::erase_if(cache, [generation](const auto& file) { return file.second.seen != generation; });
+    return folders;
+}
+
+void ScanThread()
+{
+    // WIC and the shell's icon extraction both work in a single-threaded apartment.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    ScanCache cache;
+    for (unsigned generation = 1;; ++generation)
+    {
+        std::vector<std::pair<fs::path, fs::path>> icons;
+        ULONGLONG requestedAt = 0;
+        {
+            std::unique_lock lock(scanner.mutex);
+            scanner.wake.wait(lock, [] { return scanner.requested; });
+            scanner.requested = false;
+            requestedAt = scanner.requestedAt;
+            icons.swap(scanner.icons);
+        }
+        try
+        {
+            for (const auto& [executable, logo] : icons)
+            {
+                std::error_code error;
+                if (fs::exists(logo, error))
+                    continue;
+                fs::create_directories(logo.parent_path(), error);
+                SaveExecutableIcon(executable, logo);
+            }
+            std::vector<ScannedFolder> folders = ScanLibrary(cache, generation);
+            std::lock_guard lock(scanner.mutex);
+            scanner.folders = std::move(folders);
+            scanner.scannedAt = requestedAt;
+            ++scanner.version;
+        }
+        catch (const std::exception& e)
+        {
+            Log(LogLevel::Warning, L"Could not read the presets folder: %hs", e.what());
+        }
+    }
+}
+
+// Asks the scanner to read the presets folder again, and to save a game's icon first when given one.
+void RequestScan(const fs::path& executable = {}, const fs::path& logo = {})
+{
+    {
+        std::lock_guard lock(scanner.mutex);
+        if (!logo.empty())
+            scanner.icons.emplace_back(executable, logo);
+        scanner.requested = true;
+        scanner.requestedAt = GetTickCount64();
+        if (!scanner.started)
+        {
+            std::thread(ScanThread).detach();
+            scanner.started = true;
+        }
+    }
+    scanner.wake.notify_one();
+    m.scanRequested = GetTickCount64();
+}
+
+// Takes what the scanner found since the last frame.
+void TakeScan()
+{
+    std::lock_guard lock(scanner.mutex);
+    if (scanner.version == m.scanVersion)
+        return;
+    m.scan = std::move(scanner.folders);
+    scanner.folders.clear();
+    m.scanVersion = scanner.version;
+    m.scannedAt = scanner.scannedAt;
+    m.foldersDirty = true;
 }
 
 // Drawing helpers
@@ -813,14 +1034,16 @@ void SavePreset()
 bool SetPreset(const fs::path& preset)
 {
     m.runtime->set_current_preset_path(Utf8(preset.wstring()).c_str());
-    return SamePath(CurrentPreset(), preset);
+    m.current = CurrentPreset();
+    m.foldersDirty = true;
+    return SamePath(m.current, preset);
 }
 
 // Loads the active preset again as it was last saved. ReShade only saves the preset it leaves when switching to
 // a different one, so switching to the same one discards the changes.
 void DiscardChanges()
 {
-    SetPreset(CurrentPreset());
+    SetPreset(m.current);
     m.presetChanged = false;
     m.unsaved = false;
     m.active.clear();
@@ -878,7 +1101,6 @@ SwitchResult SwitchNow(const fs::path& target)
         SavePreset();
     ReadPresetEffects(target);
     const bool switched = SetPreset(target);
-    m.presetsScanned = 0;
     m.active.clear();
     return switched ? SwitchResult::Switched : SwitchResult::Failed;
 }
@@ -887,7 +1109,7 @@ SwitchResult SwitchNow(const fs::path& target)
 // is remembered for it. Only presets in the presets folder are remembered.
 void FollowGame()
 {
-    const fs::path current = CurrentPreset();
+    const fs::path& current = m.current;
     const DWORD process = g.activeGame ? g.activeGame->processId : 0;
     if (process == m.gameProcess)
     {
@@ -902,7 +1124,7 @@ void FollowGame()
 
     m.gameProcess = process;
     m.game.clear();
-    m.presetsScanned = 0;
+    m.foldersDirty = true;
     fs::path executable;
     try
     {
@@ -922,13 +1144,7 @@ void FollowGame()
         return;
 
     // Games saved by filename, like Roblox, move with every update, so their icon is kept while they run.
-    const fs::path logo = PresetsRoot() / m.game / L"logo.png";
-    std::error_code error;
-    if (!fs::exists(logo, error))
-    {
-        fs::create_directories(logo.parent_path(), error);
-        SaveExecutableIcon(executable, logo);
-    }
+    RequestScan(executable, PresetsRoot() / m.game / L"logo.png");
 
     const fs::path preset = RememberedPreset(m.game);
     if (preset.empty())
@@ -936,9 +1152,17 @@ void FollowGame()
         if (const std::wstring relative = LibraryPath(current); !relative.empty())
             SetGamePreset(m.game, relative);
     }
-    else if (!SamePath(preset, current) && fs::exists(preset, error) && SwitchNow(preset) == SwitchResult::Unsaved)
+    else if (std::error_code error; !SamePath(preset, current) && fs::exists(preset, error) && SwitchNow(preset) == SwitchResult::Unsaved)
         ShowToast("Save or discard the changes to " + Utf8(current.stem().wstring()) + " to switch to " + Utf8(preset.stem().wstring()));
-    m.gamePreset = CurrentPreset();
+    m.gamePreset = m.current;
+}
+
+// Drops a preset that was renamed, moved or deleted from the list until the next scan, so it cannot be clicked.
+void ForgetPreset(const fs::path& preset)
+{
+    for (ScannedFolder& folder : m.scan)
+        std::erase_if(folder.presets, [&](const fs::path& listed) { return SamePath(listed, preset); });
+    m.foldersDirty = true;
 }
 
 // Moves a preset into a folder, creating it. Returns what went wrong, if anything.
@@ -954,7 +1178,8 @@ std::string MovePreset(const fs::path& preset, const fs::path& folder)
     if (error)
         return "Windows could not move " + Utf8(preset.stem().wstring()) + ".";
     UpdateGamePresets(preset, target);
-    m.presetsScanned = 0;
+    ForgetPreset(preset);
+    RequestScan();
     return {};
 }
 
@@ -962,7 +1187,7 @@ std::string MovePreset(const fs::path& preset, const fs::path& folder)
 // about unsaved changes like any other switch.
 void ImportPresets(const std::vector<fs::path>& files)
 {
-    const fs::path current = CurrentPreset();
+    const fs::path& current = m.current;
     const fs::path folder = NewPresetFolder();
     std::error_code error;
     fs::create_directories(folder, error);
@@ -991,7 +1216,7 @@ void ImportPresets(const std::vector<fs::path>& files)
             m.pendingPreset = target;
     }
     m.tab = Tab::Presets;
-    m.presetsScanned = 0;
+    RequestScan();
 }
 
 std::vector<fs::path> PickPresets()
@@ -1039,42 +1264,39 @@ void OpenImportDialog()
     }).detach();
 }
 
-std::vector<fs::path> PresetsIn(const fs::path& folder)
+// Lists the latest scan the way the Presets tab shows it.
+void BuildFolders()
 {
-    std::vector<fs::path> presets;
-    std::error_code error;
-    for (fs::directory_iterator entry(folder, error), end; !error && entry != end; entry.increment(error))
-        if (entry->is_regular_file(error) && LoadablePreset(entry->path()) && IsPreset(entry->path()))
-            presets.push_back(entry->path());
-    std::sort(presets.begin(), presets.end(), [](const fs::path& a, const fs::path& b) { return _wcsicmp(a.stem().c_str(), b.stem().c_str()) < 0; });
-    return presets;
-}
-
-void ScanPresets(const fs::path& current)
-{
+    m.foldersDirty = false;
     const fs::path& root = PresetsRoot();
+    const fs::path& current = m.current;
     // The game being played is listed even before it has presets, since new ones go there.
     PresetFolder playing{ .path = root / m.game, .name = Utf8(m.game), .game = true, .playing = true };
-    PresetFolder all{ .path = root, .name = "All games", .all = true, .presets = PresetsIn(root) };
+    PresetFolder all{ .path = root, .name = "All games", .all = true };
     std::vector<PresetFolder> others;
-    std::error_code error;
-    for (fs::directory_iterator entry(root, error), end; !error && entry != end; entry.increment(error))
+    for (const ScannedFolder& scanned : m.scan)
     {
-        if (!entry->is_directory(error))
-            continue;
-        const std::wstring name = entry->path().filename().wstring();
-        if (!m.game.empty() && _wcsicmp(name.c_str(), m.game.c_str()) == 0)
+        if (SamePath(scanned.path, root))
         {
-            playing.path = entry->path();
-            playing.name = Utf8(name);
-            playing.presets = PresetsIn(entry->path());
+            all.presets = scanned.presets;
+            all.logo = scanned.logo;
             continue;
         }
-        PresetFolder folder{ .path = entry->path(), .name = Utf8(name), .presets = PresetsIn(entry->path()) };
+        const std::wstring name = scanned.path.filename().wstring();
+        if (!m.game.empty() && _wcsicmp(name.c_str(), m.game.c_str()) == 0)
+        {
+            playing.path = scanned.path;
+            playing.name = Utf8(name);
+            playing.presets = scanned.presets;
+            playing.logo = scanned.logo;
+            continue;
+        }
+        if (scanned.presets.empty())
+            continue;
+        PresetFolder folder{ .path = scanned.path, .name = Utf8(name), .presets = scanned.presets, .logo = scanned.logo };
         folder.game = std::any_of(g.autoGames.begin(), g.autoGames.end(),
                                   [&](const AutoGame& game) { return _wcsicmp(FolderName(game.name).c_str(), name.c_str()) == 0; });
-        if (!folder.presets.empty())
-            others.push_back(std::move(folder));
+        others.push_back(std::move(folder));
     }
     std::sort(others.begin(), others.end(), [](const PresetFolder& a, const PresetFolder& b) { return _stricmp(a.name.c_str(), b.name.c_str()) < 0; });
 
@@ -1086,20 +1308,37 @@ void ScanPresets(const fs::path& current)
     const auto listed = [&](const PresetFolder& folder) {
         return std::any_of(folder.presets.begin(), folder.presets.end(), [&](const fs::path& preset) { return SamePath(preset, current); });
     };
-    if (std::none_of(m.folders.begin(), m.folders.end(), listed))
+    if (!current.empty() && std::none_of(m.folders.begin(), m.folders.end(), listed))
     {
         // ReShade writes a new preset a moment after switching to it.
         const auto parent = std::find_if(m.folders.begin(), m.folders.end(), [&](const PresetFolder& folder) { return SamePath(folder.path, current.parent_path()); });
         if (parent != m.folders.end() || InPresets(current))
             (parent != m.folders.end() ? *parent : m.folders.front()).presets.push_back(current);
-        // A preset picked elsewhere in ReShade's menu is shown, but nothing is created next to it.
+        // A preset picked elsewhere in ReShade's menu is shown, but nothing is created or read next to it.
         else
             m.folders.push_back({ .path = current.parent_path(), .name = "Other location", .other = true, .presets = { current } });
     }
 
-    // A logo saved since, such as the icon of a game that just started, shows on the next scan.
-    std::erase_if(m.folderLogos, [](const auto& entry) { return !entry.second.view.handle; });
-    m.presetsScanned = GetTickCount64();
+    // Logos of folders no longer listed, or replaced since.
+    for (auto texture = m.folderLogos.begin(); texture != m.folderLogos.end();)
+    {
+        const bool used = std::any_of(m.folders.begin(), m.folders.end(), [&](const PresetFolder& folder) {
+            return folder.logo && folder.logo == texture->second.source && SamePath(folder.path, texture->first);
+        });
+        if (used)
+            ++texture;
+        else
+        {
+            DestroyTexture(texture->second);
+            texture = m.folderLogos.erase(texture);
+        }
+    }
+}
+
+void RefreshFolders()
+{
+    if (m.foldersDirty)
+        BuildFolders();
 }
 
 // Other games' folders start closed, unless the active preset is in one. Folders opened or closed by hand stay
@@ -1173,7 +1412,10 @@ bool ApplyName(const fs::path& current)
     case NameAction::Rename:
         fs::rename(m.nameTarget, path, error);
         if (!error)
+        {
             UpdateGamePresets(m.nameTarget, path);
+            ForgetPreset(m.nameTarget);
+        }
         break;
     case NameAction::NewFolder:
         break;
@@ -1184,7 +1426,7 @@ bool ApplyName(const fs::path& current)
         m.pendingPreset.clear();
         return false;
     }
-    m.presetsScanned = 0;
+    RequestScan();
     return true;
 }
 
@@ -1276,7 +1518,8 @@ void DeleteDialog()
         if (Recycle(m.deleteTarget.wstring()))
         {
             UpdateGamePresets(m.deleteTarget, {});
-            m.presetsScanned = 0;
+            ForgetPreset(m.deleteTarget);
+            RequestScan();
             ImGui::CloseCurrentPopup();
         }
         else
@@ -1396,7 +1639,7 @@ void FolderIcon(ImDrawList* draw, const PresetFolder& folder, ImVec2 min, float 
 {
     const ImVec2 max = min + ImVec2(size, size);
     // A folder outside the presets folder is not searched for a logo.
-    if (const uint64_t logo = folder.other ? 0 : FolderLogo(folder.path, static_cast<int>(size)))
+    if (const uint64_t logo = FolderLogo(folder))
     {
         draw->AddImageRounded(ImTextureRef(logo), min, max, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, S(4));
         return;
@@ -1512,9 +1755,9 @@ void LoadTechniques();
 
 void PresetsTab()
 {
-    const fs::path current = CurrentPreset();
-    if (GetTickCount64() - m.presetsScanned > 2000)
-        ScanPresets(current);
+    const fs::path& current = m.current;
+    if (GetTickCount64() - m.scanRequested > kScanInterval)
+        RequestScan();
 
     if (Button("New preset", ImVec2(S(130), S(32)), true))
         OpenNamePopup(NameAction::New, {});
@@ -2222,10 +2465,9 @@ void Header(ImVec2 origin, float width)
 {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const float logo = std::round(S(38));
-    UpdateLogo(static_cast<int>(logo));
     const ImVec2 logoPosition = origin + ImVec2(std::round(S(kPadding)), std::round(S(18)));
-    if (m.logo.view.handle)
-        draw->AddImage(ImTextureRef(m.logo.view.handle), logoPosition, logoPosition + ImVec2(logo, logo));
+    if (const uint64_t texture = HeaderLogo())
+        draw->AddImage(ImTextureRef(texture), logoPosition, logoPosition + ImVec2(logo, logo));
     const float textX = S(kPadding) + logo + S(12);
     PushSize(16.5f);
     draw->AddText(origin + ImVec2(textX, S(17)), kText, "Unishade");
@@ -2239,7 +2481,7 @@ void Header(ImVec2 origin, float width)
     const ImVec2 saveSize(S(30), S(30));
     const float saveX = labelX - S(14) - saveSize.x;
 
-    const std::string preset = Utf8(CurrentPreset().stem().wstring());
+    const std::string preset = Utf8(m.current.stem().wstring());
     const ImVec2 nameSize = ImGui::CalcTextSize(preset.c_str());
     draw->PushClipRect(origin, origin + ImVec2((m.autoSave ? labelX : saveX) - S(12), S(kHeader)), true);
     draw->AddText(origin + ImVec2(textX, S(39)), kDim, preset.c_str());
@@ -2468,10 +2710,9 @@ void DrawMenu()
     ImGui::EndChild();
     Footer(origin, size);
     // Dialogs show over any tab.
-    const fs::path current = CurrentPreset();
-    NameDialog(current);
+    NameDialog(m.current);
     DeleteDialog();
-    UnsavedDialog(current);
+    UnsavedDialog(m.current);
     if (scrolls)
     {
         // Lets the window scroll down to the footer.
@@ -2674,7 +2915,6 @@ void DrawMenuFrame()
             m.saveNewPreset = false;
             m.pendingKeepsEdits = false;
             m.unsavedChoice = UnsavedChoice::Ask;
-            m.presetsScanned = 0;
             m.active.clear();
         }
     }
@@ -2695,10 +2935,16 @@ void CarryOutRequests()
         m.runtime->save_screenshot(m.beforeTaken ? "After" : nullptr);
         m.screenshotRequested = m.beforeAfterRequested = m.beforeTaken = false;
     }
-    if (m.presetStep)
+    // Steps go by presets read at most a couple of seconds before they were asked for, so new ones count.
+    if (m.presetStep && (!m.scanVersion || m.scannedAt + kScanInterval < m.presetStepAt))
     {
-        const fs::path current = CurrentPreset();
-        ScanPresets(current);
+        if (m.scanRequested < m.presetStepAt)
+            RequestScan();
+    }
+    else if (m.presetStep)
+    {
+        RefreshFolders();
+        const fs::path current = m.current;
         // The presets in open folders, in the order the Presets tab shows them.
         std::vector<fs::path> presets;
         for (const PresetFolder& folder : m.folders)
@@ -2740,6 +2986,13 @@ void OnOverlay(effect_runtime* runtime)
         ImGui::SetWindowFocus(kDlssWindow);
         m.focusDlss = false;
     }
+    // ReShade's own menu and shortcuts can switch presets too.
+    if (const fs::path current = CurrentPreset(); !SamePath(current, m.current))
+    {
+        m.current = current;
+        m.foldersDirty = true;
+    }
+    TakeScan();
     FollowGame();
     CarryOutRequests();
     const bool menu = g.editMode && !ReShadeMenuOpen();
@@ -2761,7 +3014,10 @@ void OnOverlay(effect_runtime* runtime)
     ApplyStyle(style);
     PushSize(14.5f);
     if (menu)
+    {
+        RefreshFolders();
         DrawMenuFrame();
+    }
     if (toast)
         DrawToast(elapsed);
     if (m.debugInfo)
@@ -2774,24 +3030,39 @@ void OnOverlay(effect_runtime* runtime)
 void OnInitRuntime(effect_runtime* runtime)
 {
     m.runtime = runtime;
+    m.device = runtime->get_device();
     m.techniquesDirty = true;
-    ReadPresetEffects(CurrentPreset());
+    m.current = CurrentPreset();
+    m.foldersDirty = true;
+    ReadPresetEffects(m.current);
+    // Ready for the first preset shortcut.
+    RequestScan();
 }
 
+// ReShade destroys the runtime when the swapchain is resized or released, such as after the graphics card was
+// reset, and creates a new one after. Logos are made again on the new device when they are drawn.
 void OnDestroyRuntime(effect_runtime* runtime)
 {
     if (runtime != m.runtime)
         return;
-    DestroyTexture(m.logo);
-    for (auto& [folder, texture] : m.folderLogos)
-        DestroyTexture(texture);
-    m.folderLogos.clear();
+    DestroyTextures();
+    m.device = nullptr;
     m.runtime = nullptr;
     m.comparing = false;
     m.compareKey = 0;
     m.techniques.clear();
     m.parameters.clear();
     m.parametersEffect.clear();
+}
+
+// Only after the runtime is gone, which released the logos made on the device already.
+void OnDestroyDevice(reshade::api::device* destroyed)
+{
+    if (destroyed != m.device)
+        return;
+    m.logo = {};
+    m.folderLogos.clear();
+    m.device = nullptr;
 }
 
 void OnReloadedEffects(effect_runtime*)
@@ -2818,6 +3089,7 @@ void InitMenu()
     m.menuScale = MenuScale();
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
+    reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyDevice);
     reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
     reshade::register_event<reshade::addon_event::reshade_set_effects_state>(OnSetEffectsState);
     reshade::register_event<reshade::addon_event::reshade_begin_effects>(OnBeginEffects);
@@ -2846,8 +3118,11 @@ void RequestScreenshot(bool beforeAfter)
 
 void RequestPresetStep(int step)
 {
-    if (m.runtime && g.overlayVisible)
-        m.presetStep += step;
+    if (!m.runtime || !g.overlayVisible)
+        return;
+    if (!m.presetStep)
+        m.presetStepAt = GetTickCount64();
+    m.presetStep += step;
 }
 
 void StartHeldCompare(UINT key)
