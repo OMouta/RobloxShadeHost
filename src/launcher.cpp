@@ -31,6 +31,7 @@ using std::min;
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -79,6 +80,15 @@ struct Target
     size_t index = 0;
     std::wstring label;
     bool on = false;
+};
+
+// Which control a target is. The targets are made again with every layout, so they are told apart by this.
+struct Control
+{
+    Action action;
+    size_t index = 0;
+
+    bool operator==(const Control&) const = default;
 };
 
 // A saved game, or an open window in the picker.
@@ -182,6 +192,8 @@ struct Launcher
     std::vector<Target> targets;
     int hovered = -1;
     bool tracking = false;
+    // A click only acts when it is let go over the control it was pressed on.
+    std::optional<Control> pressed;
 
     // The picker, a dialog over the launcher listing the open windows.
     HWND pickerWindow = nullptr;
@@ -194,6 +206,7 @@ struct Launcher
     int pickerScroll = 0;
     int pickerHovered = -1;
     bool pickerTracking = false;
+    HWND pickerPressed = nullptr; // the window whose row the click was pressed on
 };
 Launcher l;
 // The scaling of the window being laid out or painted, which P, F and the fonts follow.
@@ -541,6 +554,11 @@ void Resize()
     const int height = std::min<int>(frame.bottom - frame.top, monitor.rcWork.bottom - monitor.rcWork.top);
     SetWindowPos(g.launcher, nullptr, 0, 0, frame.right - frame.left, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     InvalidateRect(g.launcher, nullptr, FALSE);
+}
+
+Control ControlOf(const Target& target)
+{
+    return { target.action, target.index };
 }
 
 int TargetAt(POINT point)
@@ -1227,9 +1245,26 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             return TRUE;
         }
         break;
-    case WM_LBUTTONUP:
+    case WM_LBUTTONDOWN:
         if (const int index = ChoiceAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }); index >= 0)
+        {
+            l.pickerPressed = l.windows[index].window;
+            SetCapture(hwnd);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+    {
+        const HWND pressed = l.pickerPressed;
+        l.pickerPressed = nullptr;
+        if (GetCapture() == hwnd)
+            ReleaseCapture();
+        if (const int index = ChoiceAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) });
+            index >= 0 && pressed && l.windows[index].window == pressed)
             Choose(static_cast<size_t>(index));
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        l.pickerPressed = nullptr;
         return 0;
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE)
@@ -1333,13 +1368,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             return TRUE;
         }
         break;
-    case WM_LBUTTONUP:
+    case WM_LBUTTONDOWN:
         if (const int index = TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) }); index >= 0)
+        {
+            l.pressed = ControlOf(l.targets[index]);
+            SetCapture(hwnd);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+    {
+        const std::optional<Control> pressed = l.pressed;
+        l.pressed.reset();
+        if (GetCapture() == hwnd)
+            ReleaseCapture();
+        if (const int index = TargetAt({ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) });
+            index >= 0 && pressed == ControlOf(l.targets[index]))
         {
             // Copied, since running it lays the window out again.
             const Target target = l.targets[index];
             Run(target);
         }
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        l.pressed.reset();
         return 0;
     case WM_SHOWWINDOW:
         if (wParam && !IsIconic(hwnd))
