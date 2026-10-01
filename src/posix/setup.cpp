@@ -7,6 +7,7 @@
 
 #include <signal.h>
 #include <spawn.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -26,14 +27,29 @@ struct Cancelled
 {
 };
 
-// Downloads with curl, which macOS and nearly every Linux system have. Throws on failure or when cancelled.
-void Download(const std::string& url, const fs::path& path, const std::atomic<bool>& cancel)
+// Limits for what a download may bring, so a broken or hostile server cannot fill the disk or the memory. They are
+// far above what effect packages and presets need.
+constexpr uintmax_t kMaxListSize = 4 << 20; // the lists and presets
+constexpr uintmax_t kMaxPackageSize = 512 << 20;
+constexpr mz_uint kMaxZipFiles = 50'000;
+constexpr uint64_t kMaxZipFileSize = 256 << 20;
+constexpr uint64_t kMaxZipTotalSize = uint64_t(1) << 30;
+
+// Downloads with curl, which macOS and nearly every Linux system have. Only https, redirects included, except for
+// the sources given on the command line, which tests can point at local files. Throws on failure or when cancelled.
+void Download(const std::string& url, const fs::path& path, const std::atomic<bool>& cancel, uintmax_t limit, bool fromCommandLine = false)
 {
-    if (url.rfind("https://", 0) != 0 && url.rfind("file://", 0) != 0)
+    const bool local = fromCommandLine && url.rfind("file://", 0) == 0;
+    if (url.rfind("https://", 0) != 0 && !local)
         throw std::runtime_error("Refusing to download from " + url + ".");
     fs::create_directories(path.parent_path());
+    // So the size checked below is never that of an earlier download.
+    std::error_code error;
+    fs::remove(path, error);
     const std::string output = path.string();
-    const char* argv[] = { "curl", "-fsSL", "--retry", "2", "--connect-timeout", "20", "-o", output.c_str(), url.c_str(), nullptr };
+    const std::string maxSize = std::to_string(limit);
+    const char* argv[] = { "curl", "-fsSL", "--proto", local ? "=https,file" : "=https", "--proto-redir", "=https", "--max-filesize", maxSize.c_str(),
+                           "--retry", "2", "--connect-timeout", "20", "-o", output.c_str(), url.c_str(), nullptr };
     pid_t pid;
     if (posix_spawnp(&pid, "curl", nullptr, nullptr, const_cast<char* const*>(argv), environ) != 0)
         throw std::runtime_error("curl is needed to download effects. Install it and try again.");
@@ -48,8 +64,25 @@ void Download(const std::string& url, const fs::path& path, const std::atomic<bo
         }
         usleep(50'000);
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    // curl's own limit only works where the server says the size first, before curl 8.4.
+    const uintmax_t size = fs::file_size(path, error);
+    if ((WIFEXITED(status) && WEXITSTATUS(status) == 63) || (!error && size > limit))
+        throw std::runtime_error(url + " is larger than Unishade accepts.");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || error)
         throw std::runtime_error("Could not download " + url + ".");
+}
+
+// Downloads go to a new folder only this user can open, so other users cannot swap what is downloaded.
+fs::path MakeWorkFolder()
+{
+    std::error_code error;
+    fs::path temporary = fs::temp_directory_path(error);
+    if (error)
+        temporary = "/tmp";
+    std::string folder = (temporary / "unishade-setup-XXXXXX").string();
+    if (!mkdtemp(folder.data()))
+        throw std::runtime_error("Could not create a folder for downloads in " + temporary.string() + ".");
+    return folder;
 }
 
 bool IsInside(const fs::path& path, const fs::path& folder)
@@ -60,6 +93,12 @@ bool IsInside(const fs::path& path, const fs::path& folder)
 
 void ExtractZip(const fs::path& zipPath, const fs::path& destination, const std::string& name)
 {
+    std::error_code error;
+    const uintmax_t zipSize = fs::file_size(zipPath, error);
+    if (error)
+        throw std::runtime_error("Could not read the download of " + name + ".");
+    if (zipSize > kMaxPackageSize)
+        throw std::runtime_error("The download of " + name + " is larger than Unishade accepts.");
     const std::string data = ReadFile(zipPath);
     mz_zip_archive zip{};
     if (!mz_zip_reader_init_mem(&zip, data.data(), data.size(), 0))
@@ -70,7 +109,11 @@ void ExtractZip(const fs::path& zipPath, const fs::path& destination, const std:
         ~Closer() { mz_zip_reader_end(zip); }
     } closer{ &zip };
 
-    for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index)
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+    if (count > kMaxZipFiles)
+        throw std::runtime_error(name + " contains too many files.");
+    uint64_t total = 0;
+    for (mz_uint index = 0; index < count; ++index)
     {
         mz_zip_archive_file_stat stat{};
         if (!mz_zip_reader_file_stat(&zip, index, &stat) || stat.m_is_directory)
@@ -78,6 +121,10 @@ void ExtractZip(const fs::path& zipPath, const fs::path& destination, const std:
         const fs::path target = (destination / stat.m_filename).lexically_normal();
         if (!IsInside(target, destination))
             throw std::runtime_error(name + " contains a file outside its own folder.");
+        // miniz unpacks no more than the size the zip states, so checking that bounds what it writes.
+        total += stat.m_uncomp_size;
+        if (stat.m_uncomp_size > kMaxZipFileSize || total > kMaxZipTotalSize)
+            throw std::runtime_error(name + " is larger than Unishade accepts when unpacked.");
         size_t size = 0;
         void* bytes = mz_zip_reader_extract_to_heap(&zip, index, &size, 0);
         if (!bytes)
@@ -270,18 +317,21 @@ void EffectSetup::Fraction(float fraction)
 
 void EffectSetup::Run()
 {
-    const fs::path work = fs::temp_directory_path() / ("unishade-setup-" + std::to_string(getpid()));
+    fs::path work;
     std::vector<std::string> notes;
     std::string error;
+    // One install at a time, also across processes, such as --install-effects while the launcher installs.
+    const FileLock lock(DataDirectory() / "setup.lock");
     try
     {
-        fs::remove_all(work);
-        fs::create_directories(work);
+        if (lock.Busy())
+            throw std::runtime_error("Another Unishade is installing effects. Try again when it has finished.");
+        work = MakeWorkFolder();
 
         // Effects
         Status("Downloading the list of effects");
         const fs::path catalogPath = work / "EffectPackages.ini";
-        Download(setupSources.effects, catalogPath, cancel);
+        Download(setupSources.effects, catalogPath, cancel, kMaxListSize, setupSources.fromCommandLine);
         const PresetIni catalog(ReadFile(catalogPath));
         const std::vector<std::string> sections = catalog.SectionNames();
         if (sections.empty())
@@ -301,7 +351,7 @@ void EffectSetup::Run()
                 const fs::path zip = work / "package.zip";
                 const fs::path extracted = work / "package";
                 fs::remove_all(extracted);
-                Download(url, zip, cancel);
+                Download(url, zip, cancel, kMaxPackageSize);
                 ExtractZip(zip, extracted, name);
                 fs::path shaders, textures, shaderFallback, textureFallback;
                 FindPackageFolders(extracted, shaders, textures, shaderFallback, textureFallback);
@@ -329,7 +379,7 @@ void EffectSetup::Run()
         // Presets
         Status("Downloading presets");
         const fs::path presetList = work / "preset-downloads.ini";
-        Download(setupSources.presets + "/downloads.ini", presetList, cancel);
+        Download(setupSources.presets + "/downloads.ini", presetList, cancel, kMaxListSize, setupSources.fromCommandLine);
         const PresetIni presets(ReadFile(presetList));
         fs::create_directories(PresetsDirectory());
         for (const std::string& file : presets.SectionNames())
@@ -338,12 +388,13 @@ void EffectSetup::Run()
             if (fs::path(file).filename() != file || Lowercase(fs::path(file).extension().string()) != ".ini" || !presets.Get(file, "sha256", hash))
                 throw std::runtime_error("The preset list contains an invalid entry.");
             const fs::path downloaded = work / file;
-            Download(setupSources.presets + "/" + file, downloaded, cancel);
+            Download(setupSources.presets + "/" + file, downloaded, cancel, kMaxListSize, setupSources.fromCommandLine);
             const std::string contents = ReadFile(downloaded);
             if (Sha256(contents) != Lowercase(hash))
                 throw std::runtime_error("The preset " + file + " did not match its checksum.");
             // Presets the user already has may have changes of theirs.
-            if (!fs::exists(PresetsDirectory() / file) && !WriteFile(PresetsDirectory() / file, contents))
+            std::error_code missing;
+            if (!fs::exists(PresetsDirectory() / file, missing) && !WriteFile(PresetsDirectory() / file, contents))
                 throw std::runtime_error("Could not write the preset " + file + ".");
         }
         Fraction(1.0f);
@@ -359,8 +410,9 @@ void EffectSetup::Run()
         Log(LogLevel::Error, "Setup failed: %s", e.what());
     }
     std::error_code ignored;
-    fs::remove_all(work, ignored);
-    std::lock_guard lock(mutex);
+    if (!work.empty())
+        fs::remove_all(work, ignored);
+    std::lock_guard guard(mutex);
     state.running = false;
     state.finished = true;
     state.error = error;

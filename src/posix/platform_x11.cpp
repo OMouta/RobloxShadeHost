@@ -1,6 +1,7 @@
 // Linux: X11, which also covers games that run through XWayland, such as Wine and Proton games under a Wayland
 // desktop. Windows come from the window manager's _NET_CLIENT_LIST, pictures from XComposite, which keeps a
 // window's picture even where other windows cover it, and shortcuts from passive key grabs on the root window.
+// XDamage says when the game drew, so frames are only copied when there is something new.
 
 #include "platform.h"
 #include "gpu.h"
@@ -24,9 +25,15 @@
 #include <X11/Xlib-xcb.h>
 #include <xcb/dri3.h>
 #endif
+// Only the header is needed, from libxdamage-dev, since the library is loaded when present.
+#if __has_include(<X11/extensions/Xdamage.h>)
+#include <X11/extensions/Xdamage.h>
+#define UNISHADE_HAVE_XDAMAGE
+#endif
 #include <dlfcn.h>
 #include <stb_image_write.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -230,6 +237,9 @@ struct Dri3Functions
     decltype(&xcb_dri3_buffers_from_pixmap_strides) strides = nullptr;
     decltype(&xcb_dri3_buffers_from_pixmap_offsets) offsets = nullptr;
     decltype(&xcb_dri3_buffers_from_pixmap_buffers) buffers = nullptr;
+    decltype(&xcb_dri3_open) open = nullptr;
+    decltype(&xcb_dri3_open_reply) openReply = nullptr;
+    decltype(&xcb_dri3_open_reply_fds) openReplyFds = nullptr;
 
     bool Load()
     {
@@ -248,23 +258,34 @@ struct Dri3Functions
         strides = reinterpret_cast<decltype(strides)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_strides"));
         offsets = reinterpret_cast<decltype(offsets)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_offsets"));
         buffers = reinterpret_cast<decltype(buffers)>(dlsym(dri3, "xcb_dri3_buffers_from_pixmap_buffers"));
+        open = reinterpret_cast<decltype(open)>(dlsym(dri3, "xcb_dri3_open"));
+        openReply = reinterpret_cast<decltype(openReply)>(dlsym(dri3, "xcb_dri3_open_reply"));
+        openReplyFds = reinterpret_cast<decltype(openReplyFds)>(dlsym(dri3, "xcb_dri3_open_reply_fds"));
         return getConnection && extensionData && extension && queryVersion && queryVersionReply && buffersFromPixmap && buffersFromPixmapReply &&
-               strides && offsets && buffers;
+               strides && offsets && buffers && open && openReply && openReplyFds;
     }
 };
 
-// The pixmap's buffers, with DRI3 1.2's modifiers. Empty where the X server cannot share them, such as without
-// a GPU or with drivers that do not support DRI3.
-std::shared_ptr<DmaBuffer> BuffersFromPixmap(Display* d, Pixmap pixmap)
+// Null when DRI3 is missing, here or in the X server.
+const Dri3Functions* Dri3(Display* d)
 {
     static Dri3Functions dri3;
     static const bool loaded = dri3.Load();
     if (!loaded)
         return nullptr;
-    xcb_connection_t* connection = dri3.getConnection(d);
-    const xcb_query_extension_reply_t* present = dri3.extensionData(connection, dri3.extension);
-    if (!present || !present->present)
+    const xcb_query_extension_reply_t* present = dri3.extensionData(dri3.getConnection(d), dri3.extension);
+    return present && present->present ? &dri3 : nullptr;
+}
+
+// The pixmap's buffers, with DRI3 1.2's modifiers. Empty where the X server cannot share them, such as without
+// a GPU or with drivers that do not support DRI3.
+std::shared_ptr<DmaBuffer> BuffersFromPixmap(Display* d, Pixmap pixmap)
+{
+    const Dri3Functions* functions = Dri3(d);
+    if (!functions)
         return nullptr;
+    const Dri3Functions& dri3 = *functions;
+    xcb_connection_t* connection = dri3.getConnection(d);
     xcb_dri3_query_version_reply_t* version = dri3.queryVersionReply(connection, dri3.queryVersion(connection, 1, 2), nullptr);
     const bool modifiers = version && (version->major_version > 1 || version->minor_version >= 2);
     free(version);
@@ -298,6 +319,73 @@ std::shared_ptr<DmaBuffer> BuffersFromPixmap(Display*, Pixmap)
 // Frees the dma-buf imported into Vulkan. Defined with TakeFrame.
 void ReleaseImported();
 
+#ifdef UNISHADE_HAVE_XDAMAGE
+// XDamage, loaded when present rather than linked, like XRes.
+struct DamageFunctions
+{
+    decltype(&XDamageQueryExtension) queryExtension = nullptr;
+    decltype(&XDamageCreate) create = nullptr;
+    decltype(&XDamageSubtract) subtract = nullptr;
+
+    bool Load()
+    {
+        void* library = dlopen("libXdamage.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (!library)
+            return false;
+        queryExtension = reinterpret_cast<decltype(queryExtension)>(dlsym(library, "XDamageQueryExtension"));
+        create = reinterpret_cast<decltype(create)>(dlsym(library, "XDamageCreate"));
+        subtract = reinterpret_cast<decltype(subtract)>(dlsym(library, "XDamageSubtract"));
+        return queryExtension && create && subtract;
+    }
+};
+#endif
+
+// Tells when the game drew into its window, through XDamage on the capture thread's connection, which frees it when
+// it closes. Inactive without XDamage.
+class DamageWatch
+{
+public:
+    DamageWatch([[maybe_unused]] Display* d, [[maybe_unused]] ::Window window)
+    {
+#ifdef UNISHADE_HAVE_XDAMAGE
+        static DamageFunctions functions;
+        static const bool loaded = functions.Load();
+        int event = 0, error = 0;
+        if (!loaded || !functions.queryExtension(d, &event, &error))
+            return;
+        ErrorTrap trap(d);
+        damage = functions.create(d, window, XDamageReportNonEmpty);
+        if (trap.Failed())
+            return;
+        connection = d;
+        subtract = functions.subtract;
+        notify = event + XDamageNotify;
+#endif
+    }
+
+    bool Active() const { return notify >= 0; }
+
+    // Starts collecting again, so what the game draws from here on brings a new event.
+    void Clear()
+    {
+#ifdef UNISHADE_HAVE_XDAMAGE
+        if (subtract)
+            subtract(connection, damage, None, None);
+#endif
+    }
+
+private:
+    int notify = -1;
+#ifdef UNISHADE_HAVE_XDAMAGE
+    Display* connection = nullptr;
+    Damage damage = 0;
+    decltype(&XDamageSubtract) subtract = nullptr;
+#endif
+};
+
+// While the overlay is hidden.
+constexpr std::chrono::milliseconds kIdleInterval(200);
+
 struct Capture
 {
     std::thread thread;
@@ -305,13 +393,62 @@ struct Capture
     std::atomic<bool> running = false;
     std::atomic<bool> onGpu = false; // frames go to the main thread as dma-bufs instead of pixels
     std::atomic<bool> reset = false; // the capture thread names the pixmap again, to change how it copies
+    std::atomic<bool> idle = false;
+    std::atomic<int> refresh = 60; // of the monitor the game is on
+    int wake[2] = { -1, -1 };      // a pipe StopCapture writes to, so the capture thread stops waiting
     std::mutex mutex;
     Frame ready;
     std::string error;
 };
 Capture capture;
 
-void CaptureThread(::Window target, int refresh)
+// Waits until the time or until capture stops. With a connection, also until it has events, and returns whether
+// it has.
+bool WaitUntil(Display* d, std::chrono::steady_clock::time_point until)
+{
+    while (!capture.stop)
+    {
+        if (d && XPending(d))
+            return true;
+        const auto left = std::chrono::ceil<std::chrono::milliseconds>(until - std::chrono::steady_clock::now()).count();
+        if (left <= 0)
+            break;
+        pollfd fds[] = { { capture.wake[0], POLLIN, 0 }, { d ? ConnectionNumber(d) : -1, POLLIN, 0 } };
+        poll(fds, 2, int(std::min<long long>(left, 1000)));
+    }
+    return false;
+}
+
+// Gives the image shared memory for the X server to copy into. False where the X server cannot reach it, such as
+// over the network or from another container.
+bool AttachShm(Display* d, XImage* image, XShmSegmentInfo& segment)
+{
+    segment = {};
+    segment.shmid = shmget(IPC_PRIVATE, size_t(image->bytes_per_line) * image->height, IPC_CREAT | 0600);
+    if (segment.shmid < 0)
+        return false;
+    void* address = shmat(segment.shmid, nullptr, 0);
+    bool attached = false;
+    if (address != reinterpret_cast<void*>(-1))
+    {
+        segment.shmaddr = image->data = static_cast<char*>(address);
+        segment.readOnly = False;
+        ErrorTrap trap(d);
+        attached = XShmAttach(d, &segment) && !trap.Failed();
+    }
+    // Removed once the X server has attached it, so it goes away with the process even if it crashes.
+    shmctl(segment.shmid, IPC_RMID, nullptr);
+    if (!attached)
+    {
+        if (address != reinterpret_cast<void*>(-1))
+            shmdt(address);
+        image->data = nullptr;
+        segment = {};
+    }
+    return attached;
+}
+
+void CaptureThread(::Window target)
 {
     Display* d = XOpenDisplay(nullptr);
     if (!d)
@@ -321,15 +458,16 @@ void CaptureThread(::Window target, int refresh)
         capture.running = false;
         return;
     }
-    const bool shm = XShmQueryExtension(d);
+    bool shm = XShmQueryExtension(d);
     {
         ErrorTrap trap(d);
         XCompositeRedirectWindow(d, target, CompositeRedirectAutomatic);
+        // So the waits below also end when the window is resized, hidden or closed.
+        XSelectInput(d, target, StructureNotifyMask);
         trap.Failed();
     }
-
-    // Copies as often as the display refreshes. XComposite has no event for a new frame.
-    const auto interval = std::chrono::nanoseconds(1'000'000'000 / refresh);
+    // Without XDamage, frames are copied as often as the display refreshes.
+    DamageWatch damage(d, target);
 
     Pixmap pixmap = 0;
     std::shared_ptr<DmaBuffer> buffer;
@@ -339,11 +477,13 @@ void CaptureThread(::Window target, int refresh)
     Frame back;
     uint64_t serial = 0;
     std::string failure;
+    bool changed = true; // drawn into since the last copy
+    int failures = 0;    // copies in a row that failed
 
     const auto release = [&] {
         if (image)
         {
-            if (shm)
+            if (segment.shmaddr)
             {
                 XShmDetach(d, &segment);
                 shmdt(segment.shmaddr);
@@ -357,11 +497,46 @@ void CaptureThread(::Window target, int refresh)
         pixmap = 0;
         buffer.reset();
     };
+    const auto publish = [&] {
+        {
+            std::lock_guard lock(capture.mutex);
+            back.serial = ++serial;
+            std::swap(back, capture.ready);
+        }
+        back.hold.reset();
+        glfwPostEmptyEvent();
+    };
 
-    auto next = std::chrono::steady_clock::now();
+    auto last = std::chrono::steady_clock::now() - std::chrono::hours(1); // when the last copy started
     while (!capture.stop)
     {
-        next += interval;
+        // At most once per refresh of the game's monitor, and a few times a second while nobody sees the frames.
+        const std::chrono::nanoseconds interval = capture.idle ? std::chrono::nanoseconds(kIdleInterval)
+                                                               : std::chrono::nanoseconds(1'000'000'000 / capture.refresh);
+        if (damage.Active())
+        {
+            // A little sooner than once per refresh, so a game drawing at the display's rate never waits a frame.
+            WaitUntil(nullptr, last + interval * 3 / 4);
+            // Then until the game draws. The window is looked at now and then anyway, since hiding its window
+            // manager frame, as on another desktop, sends it no event.
+            if (!changed)
+                WaitUntil(d, std::chrono::steady_clock::now() + std::chrono::milliseconds(250));
+        }
+        else
+        {
+            WaitUntil(nullptr, last + interval);
+            changed = true;
+        }
+        // Every event here is about the window: its damage, or a change of its size or state.
+        while (XPending(d))
+        {
+            XEvent event;
+            XNextEvent(d, &event);
+            changed = true;
+        }
+        if (capture.stop)
+            break;
+
         XWindowAttributes attributes{};
         {
             ErrorTrap trap(d);
@@ -375,13 +550,14 @@ void CaptureThread(::Window target, int refresh)
         if (attributes.map_state != IsViewable || attributes.width <= 0 || attributes.height <= 0)
         {
             release();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            next = std::chrono::steady_clock::now();
+            changed = true;
+            WaitUntil(d, std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
             continue;
         }
         if (attributes.width != width || attributes.height != height || !pixmap || capture.reset.exchange(false))
         {
             release();
+            changed = true;
             width = attributes.width;
             height = attributes.height;
             ErrorTrap trap(d);
@@ -389,7 +565,7 @@ void CaptureThread(::Window target, int refresh)
             if (trap.Failed())
             {
                 pixmap = 0;
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                WaitUntil(nullptr, std::chrono::steady_clock::now() + std::chrono::milliseconds(50));
                 continue;
             }
             if (capture.onGpu)
@@ -405,14 +581,15 @@ void CaptureThread(::Window target, int refresh)
             if (shm && !buffer)
             {
                 image = XShmCreateImage(d, attributes.visual, attributes.depth, ZPixmap, nullptr, &segment, width, height);
-                if (image)
+                if (image && !AttachShm(d, image, segment))
                 {
-                    segment.shmid = shmget(IPC_PRIVATE, size_t(image->bytes_per_line) * image->height, IPC_CREAT | 0600);
-                    segment.shmaddr = image->data = static_cast<char*>(shmat(segment.shmid, nullptr, 0));
-                    segment.readOnly = False;
-                    XShmAttach(d, &segment);
-                    // Removed now, so it goes away with the process even if it crashes.
-                    shmctl(segment.shmid, IPC_RMID, nullptr);
+                    XDestroyImage(image);
+                    image = nullptr;
+                }
+                if (!image)
+                {
+                    shm = false;
+                    Log(LogLevel::Info, "The X server cannot share memory with Unishade, so copying the game's picture takes longer.");
                 }
             }
             if (image && (image->bits_per_pixel != 32 || image->red_mask != 0xFF0000 || image->blue_mask != 0xFF))
@@ -421,43 +598,57 @@ void CaptureThread(::Window target, int refresh)
                 break;
             }
         }
+        if (!changed)
+            continue;
+        // Before the copy, so what the game draws meanwhile brings a new event.
+        damage.Clear();
+        changed = false;
+        last = std::chrono::steady_clock::now();
 
         if (buffer)
         {
-            // The X server keeps drawing into the same buffer, so each frame only says it is there to use.
+            // The X server keeps drawing into the same buffer, so each frame only says there is something new in
+            // it. Nothing makes the graphics card wait until that drawing is done before reading it: XDamage only
+            // says the drawing was sent, and Vulkan does not wait for the dma-buf's implicit fences. So a frame can
+            // now and then show the game's picture half drawn.
+            XFlush(d);
             back.pixels.clear();
             back.width = width;
             back.height = height;
             back.hold = buffer;
-            {
-                std::lock_guard lock(capture.mutex);
-                back.serial = ++serial;
-                std::swap(back, capture.ready);
-            }
-            back.hold.reset();
-            glfwPostEmptyEvent();
-            std::this_thread::sleep_until(next);
-            if (std::chrono::steady_clock::now() > next + interval)
-                next = std::chrono::steady_clock::now();
+            publish();
             continue;
         }
 
         XImage* got = nullptr;
         {
             ErrorTrap trap(d);
-            if (shm && image)
+            if (image)
                 got = XShmGetImage(d, pixmap, image, 0, 0, AllPlanes) ? image : nullptr;
             else
                 got = XGetImage(d, pixmap, 0, 0, width, height, AllPlanes, ZPixmap);
             if (trap.Failed())
+            {
+                if (got && got != image)
+                    XDestroyImage(got);
                 got = nullptr;
+            }
         }
         if (!got)
         {
-            // The window changed between the size check and the copy. The next round names its pixmap again.
+            // Usually the window changed between the size check and the copy, which naming its pixmap again
+            // fixes. Shared memory that keeps failing, as with some remote X servers, is given up.
             release();
+            changed = true;
+            if (++failures >= 3 && shm)
+            {
+                shm = false;
+                Log(LogLevel::Info, "Copying the game's picture through shared memory keeps failing, so Unishade copies it without.");
+            }
+            WaitUntil(nullptr, std::chrono::steady_clock::now() + std::min(std::chrono::milliseconds(20) * failures, std::chrono::milliseconds(1000)));
             continue;
         }
+        failures = 0;
         if (got->bits_per_pixel != 32)
         {
             failure = "The game's window uses a pixel format Unishade cannot read.";
@@ -480,15 +671,7 @@ void CaptureThread(::Window target, int refresh)
         }
         if (got != image)
             XDestroyImage(got);
-        {
-            std::lock_guard lock(capture.mutex);
-            back.serial = ++serial;
-            std::swap(back, capture.ready);
-        }
-        glfwPostEmptyEvent();
-        std::this_thread::sleep_until(next);
-        if (std::chrono::steady_clock::now() > next + interval)
-            next = std::chrono::steady_clock::now();
+        publish();
     }
 
     release();
@@ -528,6 +711,9 @@ KeySym Keysym(ImGuiKey key)
         return XK_0 + (key - ImGuiKey_0);
     if (key >= ImGuiKey_F1 && key <= ImGuiKey_F24)
         return XK_F1 + (key - ImGuiKey_F1);
+    // The number pad's digits are one key with Num Lock on or off, so the shortcut works either way.
+    if (key >= ImGuiKey_Keypad0 && key <= ImGuiKey_Keypad9)
+        return XK_KP_0 + (key - ImGuiKey_Keypad0);
     switch (key)
     {
     case ImGuiKey_Home: return XK_Home;
@@ -545,6 +731,11 @@ KeySym Keysym(ImGuiKey key)
     case ImGuiKey_RightArrow: return XK_Right;
     case ImGuiKey_UpArrow: return XK_Up;
     case ImGuiKey_DownArrow: return XK_Down;
+    case ImGuiKey_KeypadMultiply: return XK_KP_Multiply;
+    case ImGuiKey_KeypadAdd: return XK_KP_Add;
+    case ImGuiKey_KeypadSubtract: return XK_KP_Subtract;
+    case ImGuiKey_KeypadDecimal: return XK_KP_Decimal;
+    case ImGuiKey_KeypadDivide: return XK_KP_Divide;
     default: return NoSymbol;
     }
 }
@@ -558,6 +749,300 @@ unsigned XModifiers(unsigned modifiers)
 // Num Lock and Caps Lock are modifiers to X11, so each shortcut is grabbed with and without them.
 constexpr unsigned kLockVariants[] = { 0, LockMask, Mod2Mask, LockMask | Mod2Mask };
 constexpr unsigned kRelevantModifiers = ControlMask | Mod1Mask | ShiftMask | Mod4Mask;
+
+// The Windows virtual-key code of a keysym, or 0.
+int VirtualKey(KeySym sym)
+{
+    if (sym >= XK_a && sym <= XK_z)
+        return 'A' + int(sym - XK_a);
+    if (sym >= XK_A && sym <= XK_Z)
+        return 'A' + int(sym - XK_A);
+    if (sym >= XK_0 && sym <= XK_9)
+        return '0' + int(sym - XK_0);
+    if (sym >= XK_KP_0 && sym <= XK_KP_9)
+        return 0x60 + int(sym - XK_KP_0);
+    if (sym >= XK_F1 && sym <= XK_F24)
+        return 0x70 + int(sym - XK_F1);
+    switch (sym)
+    {
+    case XK_BackSpace: return 0x08;
+    case XK_Tab: case XK_ISO_Left_Tab: return 0x09;
+    case XK_Return: case XK_KP_Enter: return 0x0D;
+    case XK_Pause: return 0x13;
+    case XK_Caps_Lock: return 0x14;
+    case XK_Escape: return 0x1B;
+    case XK_space: return 0x20;
+    case XK_Prior: return 0x21;
+    case XK_Next: return 0x22;
+    case XK_End: return 0x23;
+    case XK_Home: return 0x24;
+    case XK_Left: return 0x25;
+    case XK_Up: return 0x26;
+    case XK_Right: return 0x27;
+    case XK_Down: return 0x28;
+    case XK_Print: return 0x2C;
+    case XK_Insert: return 0x2D;
+    case XK_Delete: return 0x2E;
+    case XK_Super_L: return 0x5B;
+    case XK_Super_R: return 0x5C;
+    case XK_Menu: return 0x5D;
+    case XK_KP_Multiply: return 0x6A;
+    case XK_KP_Add: return 0x6B;
+    case XK_KP_Separator: return 0x6C;
+    case XK_KP_Subtract: return 0x6D;
+    case XK_KP_Decimal: return 0x6E;
+    case XK_KP_Divide: return 0x6F;
+    case XK_Num_Lock: return 0x90;
+    case XK_Scroll_Lock: return 0x91;
+    case XK_Shift_L: return 0xA0;
+    case XK_Shift_R: return 0xA1;
+    case XK_Control_L: return 0xA2;
+    case XK_Control_R: return 0xA3;
+    case XK_Alt_L: return 0xA4;
+    case XK_Alt_R: case XK_ISO_Level3_Shift: return 0xA5;
+    case XK_semicolon: return 0xBA;
+    case XK_equal: return 0xBB;
+    case XK_comma: return 0xBC;
+    case XK_minus: return 0xBD;
+    case XK_period: return 0xBE;
+    case XK_slash: return 0xBF;
+    case XK_grave: return 0xC0;
+    case XK_bracketleft: return 0xDB;
+    case XK_backslash: return 0xDC;
+    case XK_bracketright: return 0xDD;
+    case XK_apostrophe: return 0xDE;
+    case XK_less: return 0xE2;
+    default: return 0;
+    }
+}
+
+// Virtual-key codes by X11 keycode, for ReadInput. Made again when the keyboard mapping changes.
+std::array<uint8_t, 256> virtualKeys{};
+bool virtualKeysKnown = false;
+
+void MapVirtualKeys()
+{
+    virtualKeys = {};
+    int first = 0, last = 0;
+    XDisplayKeycodes(display, &first, &last);
+    for (int code = std::max(first, 0); code <= std::min(last, 255); ++code)
+    {
+        // A key's code comes from its first level, such as a for the A key, or from its second where only that has
+        // one, such as the digits of a French keyboard. Number pad keys count as such with Num Lock off too.
+        const int base = VirtualKey(XkbKeycodeToKeysym(display, KeyCode(code), 0, 0));
+        const int shifted = VirtualKey(XkbKeycodeToKeysym(display, KeyCode(code), 0, 1));
+        virtualKeys[code] = uint8_t(shifted >= 0x60 && shifted <= 0x6F ? shifted : base ? base : shifted);
+    }
+    virtualKeysKnown = true;
+}
+
+// The game's window, which the main loop asks about on every pass. The answers are kept until the X server sends an
+// event about the window or the window manager's frame around it, and asked for again every second in case a change
+// sends none.
+struct Tracked
+{
+    ::Window window = 0;
+    ::Window frame = 0; // the root window's child that holds it
+    bool destroyed = false;
+    bool known = false;
+    bool visible = false;
+    Rect bounds;
+    std::chrono::steady_clock::time_point checked;
+};
+Tracked tracked;
+
+// The window in front, kept until the window manager changes _NET_ACTIVE_WINDOW. Without a window manager that sets
+// it, the focus is asked for again after a moment.
+struct Foreground
+{
+    bool known = false;
+    bool fromProperty = false;
+    WindowId window = 0;
+    int pid = -1; // its process, -1 until asked for
+    std::chrono::steady_clock::time_point checked;
+};
+Foreground foreground;
+
+// The root window's child that holds the window: the window manager's frame, or the window itself without one.
+::Window TopLevel(::Window window)
+{
+    ErrorTrap trap(display);
+    ::Window current = window;
+    for (;;)
+    {
+        ::Window rootReturn = 0, parent = 0, *children = nullptr;
+        unsigned int count = 0;
+        if (!XQueryTree(display, current, &rootReturn, &parent, &children, &count))
+            return 0;
+        if (children)
+            XFree(children);
+        if (!parent || parent == root)
+            break;
+        current = parent;
+    }
+    return trap.Failed() ? 0 : current;
+}
+
+void Untrack()
+{
+    if (!tracked.window)
+        return;
+    ErrorTrap trap(display);
+    if (!tracked.destroyed)
+        XSelectInput(display, tracked.window, NoEventMask);
+    if (tracked.frame && tracked.frame != tracked.window)
+        XSelectInput(display, tracked.frame, NoEventMask);
+    trap.Failed();
+    tracked = {};
+}
+
+void Track(::Window window)
+{
+    Untrack();
+    tracked.window = window;
+    tracked.frame = TopLevel(window);
+    {
+        ErrorTrap trap(display);
+        XSelectInput(display, window, StructureNotifyMask);
+        tracked.destroyed = trap.Failed();
+    }
+    if (tracked.frame && tracked.frame != window)
+    {
+        ErrorTrap trap(display);
+        XSelectInput(display, tracked.frame, StructureNotifyMask);
+        if (trap.Failed())
+            tracked.frame = 0;
+    }
+}
+
+// The window manager put the window into another frame, or took it out of one.
+void Reframe()
+{
+    const ::Window old = tracked.frame;
+    tracked.frame = TopLevel(tracked.window);
+    if (tracked.frame == old)
+        return;
+    ErrorTrap trap(display);
+    if (old && old != tracked.window)
+        XSelectInput(display, old, NoEventMask);
+    if (tracked.frame && tracked.frame != tracked.window)
+        XSelectInput(display, tracked.frame, StructureNotifyMask);
+    trap.Failed();
+}
+
+// Marks what an event from the X server changed: the tracked window, the window in front or the keyboard mapping.
+void HandleEvent(XEvent& event)
+{
+    static const Atom activeWindow = GetAtom(display, "_NET_ACTIVE_WINDOW");
+    switch (event.type)
+    {
+    case PropertyNotify:
+        if (event.xproperty.window == root && event.xproperty.atom == activeWindow)
+            foreground.known = false;
+        break;
+    case DestroyNotify:
+        if (event.xdestroywindow.window == tracked.window)
+            tracked.destroyed = true;
+        else if (event.xdestroywindow.window == tracked.frame)
+            tracked.frame = 0;
+        tracked.known = false;
+        break;
+    case ReparentNotify:
+        if (event.xreparent.window == tracked.window && !tracked.destroyed)
+            Reframe();
+        tracked.known = false;
+        break;
+    case ConfigureNotify:
+    case MapNotify:
+    case UnmapNotify:
+    case GravityNotify:
+        tracked.known = false;
+        break;
+    case MappingNotify:
+        XRefreshKeyboardMapping(&event.xmapping);
+        virtualKeysKnown = false;
+        break;
+    }
+}
+
+bool QueryBounds(WindowId window, Rect& bounds)
+{
+    ErrorTrap trap(display);
+    XWindowAttributes attributes{};
+    int x = 0, y = 0;
+    ::Window child;
+    if (!XGetWindowAttributes(display, window, &attributes) || attributes.map_state != IsViewable ||
+        !XTranslateCoordinates(display, window, root, 0, 0, &x, &y, &child) || trap.Failed() || Hidden(window))
+        return false;
+    bounds = { x, y, attributes.width, attributes.height };
+    return true;
+}
+
+// The refresh rate of the monitor that shows most of the window, which GLFW reads from XRandR's CRTCs.
+int RefreshRate(const Rect& bounds)
+{
+    int count = 0, rate = 60;
+    long largest = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&count);
+    for (int i = 0; i < count; ++i)
+    {
+        const GLFWvidmode* mode = glfwGetVideoMode(monitors[i]);
+        int x = 0, y = 0;
+        glfwGetMonitorPos(monitors[i], &x, &y);
+        if (!mode || mode->refreshRate <= 0)
+            continue;
+        const long width = std::min(bounds.x + bounds.width, x + mode->width) - std::max(bounds.x, x);
+        const long height = std::min(bounds.y + bounds.height, y + mode->height) - std::max(bounds.y, y);
+        if (width > 0 && height > 0 && width * height > largest)
+        {
+            largest = width * height;
+            rate = mode->refreshRate;
+        }
+    }
+    return std::clamp(rate, 30, 360);
+}
+
+// Top-level windows, from the window manager or, without one, the root window's children.
+std::vector<unsigned long> Clients()
+{
+    std::vector<unsigned long> clients = Property32(display, root, GetAtom(display, "_NET_CLIENT_LIST"), XA_WINDOW);
+    if (clients.empty())
+    {
+        ::Window parent, rootReturn, *children = nullptr;
+        unsigned int count = 0;
+        if (XQueryTree(display, root, &rootReturn, &parent, &children, &count) && children)
+        {
+            clients.assign(children, children + count);
+            XFree(children);
+        }
+    }
+    return clients;
+}
+
+// The window as ListWindows lists it. Call inside an ErrorTrap, since windows close at any time.
+std::optional<Window> Listed(::Window client)
+{
+    static const std::set<Atom> skippedTypes = [] {
+        std::set<Atom> types;
+        for (const char* name : { "_NET_WM_WINDOW_TYPE_DOCK", "_NET_WM_WINDOW_TYPE_DESKTOP", "_NET_WM_WINDOW_TYPE_TOOLBAR", "_NET_WM_WINDOW_TYPE_MENU",
+                                  "_NET_WM_WINDOW_TYPE_SPLASH", "_NET_WM_WINDOW_TYPE_NOTIFICATION", "_NET_WM_WINDOW_TYPE_TOOLTIP" })
+            types.insert(GetAtom(display, name));
+        return types;
+    }();
+    XWindowAttributes attributes{};
+    if (!XGetWindowAttributes(display, client, &attributes) || attributes.map_state != IsViewable || attributes.override_redirect ||
+        attributes.width < 64 || attributes.height < 64)
+        return std::nullopt;
+    for (unsigned long type : Property32(display, client, GetAtom(display, "_NET_WM_WINDOW_TYPE"), XA_ATOM))
+        if (skippedTypes.count(type))
+            return std::nullopt;
+    if (Hidden(client))
+        return std::nullopt;
+    Window window{ client, Title(client), WindowPid(client) };
+    if (window.title.empty() || window.pid == getpid())
+        return std::nullopt;
+    return window;
+}
 } // namespace
 
 bool Init(std::string& error)
@@ -571,6 +1056,8 @@ bool Init(std::string& error)
         return false;
     }
     root = DefaultRootWindow(display);
+    // For _NET_ACTIVE_WINDOW, so the window in front is only asked for when it changes.
+    XSelectInput(display, root, PropertyChangeMask);
     int event, errorBase, major = 0, minor = 2;
     if (!XCompositeQueryExtension(display, &event, &errorBase) || !XCompositeQueryVersion(display, &major, &minor) || (major == 0 && minor < 2))
     {
@@ -585,7 +1072,7 @@ bool Init(std::string& error)
     Bool detectable = False;
     XkbSetDetectableAutoRepeat(display, True, &detectable);
 
-    // GLFW only wakes for its own connection, so shortcuts on this one wake the loop from here.
+    // GLFW only wakes for its own connection, so shortcuts and window changes on this one wake the loop from here.
     waker = std::thread([] {
         pollfd fd{ ConnectionNumber(display), POLLIN, 0 };
         while (!wakerStop)
@@ -596,7 +1083,7 @@ bool Init(std::string& error)
             }
     });
 
-    if (getenv("WAYLAND_DISPLAY"))
+    if (WaylandDesktop())
         Log(LogLevel::Info, "Running through XWayland. Games that draw to Wayland directly cannot be captured.");
     return true;
 }
@@ -617,50 +1104,38 @@ void Shutdown()
 std::vector<Window> ListWindows()
 {
     std::vector<Window> windows;
-    const Atom typeAtom = GetAtom(display, "_NET_WM_WINDOW_TYPE");
-    std::set<Atom> skippedTypes;
-    for (const char* name : { "_NET_WM_WINDOW_TYPE_DOCK", "_NET_WM_WINDOW_TYPE_DESKTOP", "_NET_WM_WINDOW_TYPE_TOOLBAR", "_NET_WM_WINDOW_TYPE_MENU",
-                              "_NET_WM_WINDOW_TYPE_SPLASH", "_NET_WM_WINDOW_TYPE_NOTIFICATION", "_NET_WM_WINDOW_TYPE_TOOLTIP" })
-        skippedTypes.insert(GetAtom(display, name));
-
-    std::vector<unsigned long> clients = Property32(display, root, GetAtom(display, "_NET_CLIENT_LIST"), XA_WINDOW);
-    if (clients.empty())
-    {
-        // Without a window manager that lists windows, the root window's children are the top-level windows.
-        ::Window parent, rootReturn, *children = nullptr;
-        unsigned int count = 0;
-        if (XQueryTree(display, root, &rootReturn, &parent, &children, &count) && children)
-        {
-            clients.assign(children, children + count);
-            XFree(children);
-        }
-    }
-
-    const int self = getpid();
     ErrorTrap trap(display);
-    for (unsigned long client : clients)
-    {
-        XWindowAttributes attributes{};
-        if (!XGetWindowAttributes(display, client, &attributes) || attributes.map_state != IsViewable || attributes.override_redirect ||
-            attributes.width < 64 || attributes.height < 64)
-            continue;
-        bool skip = false;
-        for (unsigned long type : Property32(display, client, typeAtom, XA_ATOM))
-            skip |= skippedTypes.count(type) != 0;
-        if (skip || Hidden(client))
-            continue;
-        Window window{ client, Title(client), WindowPid(client) };
-        if (window.title.empty() || window.pid == self)
-            continue;
-        windows.push_back(std::move(window));
-    }
+    for (unsigned long client : Clients())
+        if (std::optional<Window> window = Listed(client))
+            windows.push_back(std::move(*window));
     trap.Failed();
     std::sort(windows.begin(), windows.end(), [](const Window& a, const Window& b) { return strcasecmp(a.title.c_str(), b.title.c_str()) < 0; });
     return windows;
 }
 
+std::optional<Window> ListedWindow(WindowId id)
+{
+    ErrorTrap trap(display);
+    std::optional<Window> window = Listed(id);
+    return trap.Failed() ? std::nullopt : window;
+}
+
+std::set<int> WindowOwners()
+{
+    std::set<int> owners;
+    ErrorTrap trap(display);
+    for (unsigned long client : Clients())
+        if (const int pid = WindowPid(client); pid > 0)
+            owners.insert(pid);
+    trap.Failed();
+    return owners;
+}
+
 bool WindowExists(const Window& window)
 {
+    // The game's window is there until the X server says it was destroyed.
+    if (window.id == tracked.window)
+        return !tracked.destroyed;
     ErrorTrap trap(display);
     XWindowAttributes attributes{};
     const bool exists = XGetWindowAttributes(display, window.id, &attributes) && !trap.Failed();
@@ -669,40 +1144,63 @@ bool WindowExists(const Window& window)
 
 bool WindowBounds(WindowId window, Rect& bounds)
 {
-    ErrorTrap trap(display);
-    XWindowAttributes attributes{};
-    int x = 0, y = 0;
-    ::Window child;
-    if (!XGetWindowAttributes(display, window, &attributes) || attributes.map_state != IsViewable ||
-        !XTranslateCoordinates(display, window, root, 0, 0, &x, &y, &child) || trap.Failed() || Hidden(window))
-        return false;
-    bounds = { x, y, attributes.width, attributes.height };
-    return true;
+    if (window != tracked.window)
+        return QueryBounds(window, bounds);
+    const auto now = std::chrono::steady_clock::now();
+    if (!tracked.known || now - tracked.checked > std::chrono::seconds(1))
+    {
+        tracked.visible = !tracked.destroyed && QueryBounds(window, tracked.bounds);
+        tracked.known = true;
+        tracked.checked = now;
+        // The game can move to another monitor.
+        if (tracked.visible)
+            capture.refresh = RefreshRate(tracked.bounds);
+    }
+    bounds = tracked.bounds;
+    return tracked.visible;
 }
 
 WindowId ForegroundWindow()
 {
+    const auto now = std::chrono::steady_clock::now();
+    if (foreground.known && now - foreground.checked < std::chrono::milliseconds(foreground.fromProperty ? 1000 : 250))
+        return foreground.window;
+    const Foreground previous = foreground;
+    foreground = {};
+    foreground.known = true;
+    foreground.checked = now;
     const auto active = Property32(display, root, GetAtom(display, "_NET_ACTIVE_WINDOW"), XA_WINDOW);
     if (!active.empty())
-        return active[0];
-    // Without a window manager that tracks it, the window with input focus, up to its top-level window.
-    ::Window focus = 0;
-    int revert;
-    XGetInputFocus(display, &focus, &revert);
-    ErrorTrap trap(display);
-    while (focus && focus != root && focus != PointerRoot)
     {
-        ::Window parent = 0, rootReturn, *children = nullptr;
-        unsigned int count = 0;
-        if (!XQueryTree(display, focus, &rootReturn, &parent, &children, &count))
-            break;
-        if (children)
-            XFree(children);
-        if (parent == root)
-            return trap.Failed() ? 0 : focus;
-        focus = parent;
+        foreground.fromProperty = true;
+        foreground.window = active[0];
     }
-    return 0;
+    else
+    {
+        // Without a window manager that tracks it, the window with input focus, up to its top-level window.
+        ::Window focus = 0;
+        int revert;
+        XGetInputFocus(display, &focus, &revert);
+        ErrorTrap trap(display);
+        while (focus && focus != root && focus != PointerRoot)
+        {
+            ::Window parent = 0, rootReturn, *children = nullptr;
+            unsigned int count = 0;
+            if (!XQueryTree(display, focus, &rootReturn, &parent, &children, &count))
+                break;
+            if (children)
+                XFree(children);
+            if (parent == root)
+            {
+                foreground.window = trap.Failed() ? 0 : focus;
+                break;
+            }
+            focus = parent;
+        }
+    }
+    if (foreground.window == previous.window)
+        foreground.pid = previous.pid;
+    return foreground.window;
 }
 
 bool ProcessInFront(int pid)
@@ -710,9 +1208,13 @@ bool ProcessInFront(int pid)
     const WindowId window = ForegroundWindow();
     if (!window)
         return false;
-    ErrorTrap trap(display);
-    const int owner = WindowPid(window);
-    return !trap.Failed() && owner == pid;
+    if (foreground.pid < 0)
+    {
+        ErrorTrap trap(display);
+        const int owner = WindowPid(window);
+        foreground.pid = trap.Failed() ? 0 : owner;
+    }
+    return foreground.pid == pid;
 }
 
 void Activate(const Window& window)
@@ -767,6 +1269,16 @@ void SetupOverlayWindow(GLFWwindow* window)
     const ::Window x = glfwGetX11Window(window);
     const Atom states[] = { GetAtom(d, "_NET_WM_STATE_SKIP_TASKBAR"), GetAtom(d, "_NET_WM_STATE_SKIP_PAGER") };
     XChangeProperty(d, x, GetAtom(d, "_NET_WM_STATE"), XA_ATOM, 32, PropModeAppend, reinterpret_cast<const unsigned char*>(states), 2);
+    // A utility window, in place of GLFW's normal one: it can still take focus for the menu and stay above the game,
+    // while GNOME and KDE leave such windows out of the animations they play when a window opens or closes, which
+    // would fade the overlay in and out over the game. Docks would suit too, but GNOME puts them below full-screen
+    // windows.
+    const Atom utility = GetAtom(d, "_NET_WM_WINDOW_TYPE_UTILITY");
+    XChangeProperty(d, x, GetAtom(d, "_NET_WM_WINDOW_TYPE"), XA_ATOM, 32, PropModeReplace, reinterpret_cast<const unsigned char*>(&utility), 1);
+    // GNOME draws no shadow around a window whose frame extents say it draws its own. picom users can leave the
+    // overlay out of shadows and fading by its class, unishade-overlay.
+    const long extents[4] = {};
+    XChangeProperty(d, x, GetAtom(d, "_GTK_FRAME_EXTENTS"), XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char*>(extents), 4);
     XClassHint hint{ const_cast<char*>("unishade-overlay"), const_cast<char*>("Unishade") };
     XSetClassHint(d, x, &hint);
     XFlush(d);
@@ -815,29 +1327,47 @@ bool StartCapture(const Window& window, std::string& error)
         capture.error.clear();
         capture.ready = {};
     }
+    // Also sets the refresh rate of the window's monitor.
+    Track(window.id);
     Rect bounds;
     if (!WindowBounds(window.id, bounds))
     {
+        Untrack();
         error = "The window is not visible.";
         return false;
     }
-    int refresh = 60;
-    if (const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor()); mode && mode->refreshRate > 0)
-        refresh = std::clamp(mode->refreshRate, 30, 360);
+    if (pipe2(capture.wake, O_CLOEXEC) != 0)
+    {
+        Untrack();
+        error = "Could not start a thread to copy the game's picture.";
+        return false;
+    }
     capture.stop = false;
     capture.running = true;
     capture.onGpu = gpu.dmaBuf;
     capture.reset = false;
-    capture.thread = std::thread(CaptureThread, static_cast<::Window>(window.id), refresh);
+    capture.thread = std::thread(CaptureThread, static_cast<::Window>(window.id));
     return true;
 }
 
 void StopCapture()
 {
     capture.stop = true;
+    if (capture.wake[1] >= 0)
+    {
+        // Without it, the capture thread still sees stop within a second.
+        [[maybe_unused]] const ssize_t woken = write(capture.wake[1], "", 1);
+    }
     if (capture.thread.joinable())
         capture.thread.join();
+    for (int& fd : capture.wake)
+    {
+        if (fd >= 0)
+            close(fd);
+        fd = -1;
+    }
     capture.running = false;
+    Untrack();
     // The host waited for the graphics card before stopping.
     std::lock_guard lock(capture.mutex);
     capture.ready = {};
@@ -847,6 +1377,11 @@ void StopCapture()
 bool Capturing()
 {
     return capture.running;
+}
+
+void SetCaptureIdle(bool idle)
+{
+    capture.idle = idle;
 }
 
 namespace
@@ -870,6 +1405,44 @@ void ReleaseImported()
     imported = {};
 }
 
+// Whether the graphics card can read the X server's buffer as it is laid out: its modifier with as many planes, for
+// copying from, imported from a dma-buf at its size.
+bool CanImport(const DmaBuffer& buffer, VkFormat format)
+{
+    VkDrmFormatModifierPropertiesListEXT list{ VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT };
+    VkFormatProperties2 properties{ VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2 };
+    properties.pNext = &list;
+    vkGetPhysicalDeviceFormatProperties2(gpu.physicalDevice, format, &properties);
+    std::vector<VkDrmFormatModifierPropertiesEXT> modifiers(list.drmFormatModifierCount);
+    list.pDrmFormatModifierProperties = modifiers.data();
+    vkGetPhysicalDeviceFormatProperties2(gpu.physicalDevice, format, &properties);
+    modifiers.resize(list.drmFormatModifierCount);
+    const auto modifier = std::find_if(modifiers.begin(), modifiers.end(),
+                                       [&](const VkDrmFormatModifierPropertiesEXT& entry) { return entry.drmFormatModifier == buffer.modifier; });
+    if (modifier == modifiers.end() || modifier->drmFormatModifierPlaneCount != buffer.fds.size() ||
+        !(modifier->drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
+        return false;
+
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifierInfo{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT };
+    modifierInfo.drmFormatModifier = buffer.modifier;
+    modifierInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkPhysicalDeviceExternalImageFormatInfo externalInfo{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO };
+    externalInfo.pNext = &modifierInfo;
+    externalInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkPhysicalDeviceImageFormatInfo2 info{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2 };
+    info.pNext = &externalInfo;
+    info.format = format;
+    info.type = VK_IMAGE_TYPE_2D;
+    info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    VkExternalImageFormatProperties external{ VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
+    VkImageFormatProperties2 result{ VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+    result.pNext = &external;
+    return vkGetPhysicalDeviceImageFormatProperties2(gpu.physicalDevice, &info, &result) == VK_SUCCESS &&
+           (external.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) &&
+           result.imageFormatProperties.maxExtent.width >= buffer.width && result.imageFormatProperties.maxExtent.height >= buffer.height;
+}
+
 VkImage Import(const std::shared_ptr<void>& held)
 {
     if (imported.buffer == held)
@@ -877,6 +1450,14 @@ VkImage Import(const std::shared_ptr<void>& held)
     vkDeviceWaitIdle(gpu.device);
     ReleaseImported();
     const DmaBuffer& buffer = *static_cast<const DmaBuffer*>(held.get());
+    // XRGB8888 and ARGB8888, the formats of 24 and 32-bit windows.
+    const VkFormat format = VK_FORMAT_B8G8R8A8_UNORM;
+    if (buffer.fds.size() > 4 || !CanImport(buffer, format))
+    {
+        Log(LogLevel::Info, "The graphics card cannot read the X server's layout of the game's picture (modifier 0x%llx).",
+            static_cast<unsigned long long>(buffer.modifier));
+        return VK_NULL_HANDLE;
+    }
 
     // Every plane must be in one buffer object, which is how drivers lay out RGB images.
     struct stat first{}, other{};
@@ -899,8 +1480,7 @@ VkImage Import(const std::shared_ptr<void>& held)
     VkImageCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     info.pNext = &external;
     info.imageType = VK_IMAGE_TYPE_2D;
-    // XRGB8888 and ARGB8888, the formats of 24 and 32-bit windows.
-    info.format = VK_FORMAT_B8G8R8A8_UNORM;
+    info.format = format;
     info.extent = { buffer.width, buffer.height, 1 };
     info.mipLevels = 1;
     info.arrayLayers = 1;
@@ -930,9 +1510,13 @@ VkImage Import(const std::shared_ptr<void>& held)
     import.fd = fd;
     VkMemoryAllocateInfo allocation{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     allocation.pNext = &import;
-    allocation.allocationSize = std::max<VkDeviceSize>(requirements.size, lseek(fd, 0, SEEK_END));
+    // A dedicated allocation is the image's size, which the dma-buf must hold. Where the kernel cannot tell the
+    // dma-buf's size, the driver checks it.
+    const off_t size = fd >= 0 ? lseek(fd, 0, SEEK_END) : -1;
+    allocation.allocationSize = requirements.size;
     allocation.memoryTypeIndex = type;
-    if (type == UINT32_MAX || vkAllocateMemory(gpu.device, &allocation, nullptr, &result.memory) != VK_SUCCESS)
+    if (type == UINT32_MAX || (size >= 0 && VkDeviceSize(size) < requirements.size) ||
+        vkAllocateMemory(gpu.device, &allocation, nullptr, &result.memory) != VK_SUCCESS)
     {
         if (fd >= 0)
             close(fd);
@@ -1058,7 +1642,10 @@ void PollHotkeys()
         XEvent event;
         XNextEvent(display, &event);
         if (event.type != KeyPress && event.type != KeyRelease)
+        {
+            HandleEvent(event);
             continue;
+        }
         const bool pressed = event.type == KeyPress;
         for (const auto& [id, grab] : grabs)
         {
@@ -1155,8 +1742,59 @@ std::string UiFont()
     return {};
 }
 
-bool DisplayDrmDevice(int64_t&, int64_t&)
+void ReadInput(std::array<bool, 256>& keys, std::array<bool, 5>& buttons)
 {
+    keys = {};
+    buttons = {};
+    if (!virtualKeysKnown)
+        MapVirtualKeys();
+    char state[32] = {};
+    XQueryKeymap(display, state);
+    for (int code = 0; code < 256; ++code)
+        if (((static_cast<unsigned char>(state[code / 8]) >> (code % 8)) & 1) && virtualKeys[code])
+            keys[virtualKeys[code]] = true;
+    ::Window rootReturn = 0, child = 0;
+    int rootX = 0, rootY = 0, x = 0, y = 0;
+    unsigned int mask = 0;
+    if (XQueryPointer(display, root, &rootReturn, &child, &rootX, &rootY, &x, &y, &mask))
+    {
+        buttons[0] = mask & Button1Mask;
+        buttons[1] = mask & Button3Mask;
+        buttons[2] = mask & Button2Mask;
+    }
+}
+
+bool WaylandDesktop()
+{
+    const char* wayland = getenv("WAYLAND_DISPLAY");
+    const char* session = getenv("XDG_SESSION_TYPE");
+    return (wayland && *wayland) || (session && !strcmp(session, "wayland"));
+}
+
+bool DisplayDrmDevice([[maybe_unused]] int64_t& deviceMajor, [[maybe_unused]] int64_t& deviceMinor)
+{
+#ifdef UNISHADE_HAVE_DRI3
+    const Dri3Functions* dri3 = display ? Dri3(display) : nullptr;
+    if (!dri3)
+        return false;
+    // The device the X server hands its clients for drawing, the same one its own buffers live on.
+    xcb_connection_t* connection = dri3->getConnection(display);
+    xcb_dri3_open_reply_t* reply = dri3->openReply(connection, dri3->open(connection, root, 0), nullptr);
+    if (!reply)
+        return false;
+    const int fd = reply->nfd == 1 ? dri3->openReplyFds(connection, reply)[0] : -1;
+    free(reply);
+    struct stat device{};
+    const bool found = fd >= 0 && fstat(fd, &device) == 0 && S_ISCHR(device.st_mode);
+    if (fd >= 0)
+        close(fd);
+    if (!found)
+        return false;
+    deviceMajor = major(device.st_rdev);
+    deviceMinor = minor(device.st_rdev);
+    return true;
+#else
     return false;
+#endif
 }
 } // namespace platform

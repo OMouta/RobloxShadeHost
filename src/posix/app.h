@@ -7,8 +7,10 @@
 #include "platform.h"
 #include "setup.h"
 
+#include <future>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -34,6 +36,7 @@ struct UiWindow
     Surface surface;
     ImGuiContext* context = nullptr;
     float scale = 1.0f;
+    bool rescale = false; // the window's content scale changed
 };
 
 // The host: the launcher outside the game, and the overlay that redraws the game with effects and shows the
@@ -84,6 +87,9 @@ public:
     std::vector<AutoGame> autoGames;
     std::optional<platform::Window> selected;
     std::optional<platform::Window> active;
+    // How the active window's process was started, read once for matching saved games.
+    std::string activeExecutable;
+    std::string activeCommand;
     // The saved game being played, by its folder's name. Empty for a window picked for this session only.
     std::string game;
     // Folders opened or closed by hand, by path.
@@ -103,11 +109,15 @@ public:
 private:
     void OnHotkey(int id, bool pressed);
     void UpdateTarget();
+    std::optional<platform::Window> GameInFront();
+    void NoticeWindowless(const std::vector<GameProcess>& processes);
     void UpdateOverlay();
     void UpdateGameHotkeys();
+    void UpdateInput();
     void RenderOverlay();
     void RenderLauncher();
     void SaveScreenshot();
+    void TakeScreenshots();
     void StartCapture(const platform::Window& window);
     void StopCapture();
     void FollowGame();
@@ -130,7 +140,24 @@ private:
     bool startHintShown = false;
     bool screenshotRequested = false;
     bool beforeAfterRequested = false;
+    std::vector<std::future<std::string>> screenshots; // being written, each to the message it shows
+    std::string screenshotStamp;                        // the second of the last screenshot
+    int screenshotsInStamp = 0;
+    // A picture size the effects could not make room for. The overlay stays hidden until the size changes.
+    uint32_t failedWidth = 0;
+    uint32_t failedHeight = 0;
+    // For effects: the cursor in the previous frame, and the menu's state in its last frame.
+    float lastMouseX = 0;
+    float lastMouseY = 0;
+    bool cursorKnown = false;
+    float menuWheel = 0;
+    bool menuActive = false;
+    bool menuHovered = false;
     double nextSearch = 0;
+    double nextScan = 0;                   // of every process
+    platform::WindowId notGame = 0;        // the window in front, when it was not a saved game's
+    std::map<int, double> windowlessSince; // saved games' processes without a window, since when
+    std::set<int> windowlessNoticed;
     double lastOverlayFrame = 0;
     double lastLauncherFrame = 0;
     double lastAutoSave = 0;

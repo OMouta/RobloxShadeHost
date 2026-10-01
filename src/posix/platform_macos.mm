@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <thread>
@@ -36,31 +37,34 @@ extern char** environ;
 
 namespace
 {
+// What the capture queue hands the main thread. A stopped stream's callbacks can still run for a moment, so
+// generation tells them apart: it changes under the lock whenever capture starts or stops, and a callback only hands
+// over a frame or an error while it holds the lock and its generation is the current one.
 struct CaptureState
 {
     std::mutex mutex;
     platform::Frame ready;
-    platform::Frame back;
     uint64_t serial = 0;
     std::string error;
     std::atomic<bool> running = false;
-    std::atomic<uint64_t> generation = 0; // a new capture makes callbacks of the old one stale
+    std::atomic<uint64_t> generation = 0;
     uint32_t configWidth = 0;
     uint32_t configHeight = 0;
     bool reconfiguring = false;
     std::atomic<bool> onGpu = false; // frames go to the main thread as IOSurfaces instead of pixels
+    std::atomic<bool> idle = false;  // nobody sees the frames, so a few a second do
 };
 CaptureState capture;
 
 void FailCapture(uint64_t generation, const std::string& message)
 {
-    if (generation != capture.generation)
-        return;
     {
         std::lock_guard lock(capture.mutex);
+        if (generation != capture.generation)
+            return;
         capture.error = message;
+        capture.running = false;
     }
-    capture.running = false;
     glfwPostEmptyEvent();
 }
 } // namespace
@@ -71,9 +75,19 @@ void FailCapture(uint64_t generation, const std::string& message)
 @end
 
 @implementation UnishadeStreamOutput
+{
+    // The frame being filled. Only this stream's callbacks use it, one at a time on the capture queue.
+    platform::Frame _back;
+    std::chrono::steady_clock::time_point _handedOver;
+}
+
 - (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type
 {
     if (type != SCStreamOutputTypeScreen || self.generation != capture.generation || !CMSampleBufferIsValid(sampleBuffer))
+        return;
+    // While the overlay is hidden, a few frames a second keep it from showing an old one when it comes back.
+    const auto now = std::chrono::steady_clock::now();
+    if (capture.idle && now - _handedOver < std::chrono::milliseconds(200))
         return;
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
     if (!attachments || CFArrayGetCount(attachments) == 0)
@@ -109,7 +123,7 @@ void FailCapture(uint64_t generation, const std::string& message)
             bool reconfigure = false;
             {
                 std::lock_guard lock(capture.mutex);
-                reconfigure = !capture.reconfiguring && wantedWidth > 0 && wantedHeight > 0 &&
+                reconfigure = self.generation == capture.generation && !capture.reconfiguring && wantedWidth > 0 && wantedHeight > 0 &&
                               (wantedWidth != capture.configWidth || wantedHeight != capture.configHeight);
                 capture.reconfiguring |= reconfigure;
             }
@@ -142,7 +156,7 @@ void FailCapture(uint64_t generation, const std::string& message)
         }
     }
 
-    platform::Frame& back = capture.back;
+    platform::Frame& back = _back;
     back.width = uint32_t(width);
     back.height = uint32_t(height);
     if (capture.onGpu && CVPixelBufferGetIOSurface(image))
@@ -179,14 +193,23 @@ void FailCapture(uint64_t generation, const std::string& message)
         if (back.pixels.empty())
             return;
     }
+    bool current = false;
     {
         std::lock_guard lock(capture.mutex);
-        back.serial = ++capture.serial;
-        std::swap(back, capture.ready);
+        current = self.generation == capture.generation;
+        if (current)
+        {
+            back.serial = ++capture.serial;
+            std::swap(back, capture.ready);
+        }
     }
-    // A frame the main thread skipped goes back to ScreenCaptureKit's pool now.
+    // A frame the main thread skipped goes back to ScreenCaptureKit's pool now, as does one of a stopped capture.
     back.hold.reset();
-    glfwPostEmptyEvent();
+    if (current)
+    {
+        _handedOver = now;
+        glfwPostEmptyEvent();
+    }
 }
 
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error
@@ -201,6 +224,21 @@ namespace
 {
 UnishadeStreamOutput* output = nil;
 dispatch_queue_t captureQueue = nullptr;
+
+// Stops a stream without waiting for it. The block keeps the stream and its output alive until it has stopped and
+// the callbacks it queued have run, which find their generation stale and hand nothing over.
+void StopStream(UnishadeStreamOutput* handler)
+{
+    SCStream* stream = handler.stream;
+    handler.stream = nil;
+    [stream stopCaptureWithCompletionHandler:^(NSError* error) {
+      (void)error;
+      dispatch_async(captureQueue, ^{
+        (void)handler;
+        (void)stream;
+      });
+    }];
+}
 
 // IOSurfaces wrapped in Vulkan images. ScreenCaptureKit cycles through a few surfaces, so each is wrapped once.
 struct Imported
@@ -286,6 +324,23 @@ NSArray* WindowList(CGWindowListOption options, CGWindowID window)
     return CFBridgingRelease(CGWindowListCopyWindowInfo(options, window));
 }
 
+// The main loop asks about the game's window more than once in each pass, which one answer serves.
+NSDictionary* WindowInfo(CGWindowID window)
+{
+    static CGWindowID cachedWindow = kCGNullWindowID;
+    static NSDictionary* cached = nil;
+    static std::chrono::steady_clock::time_point cachedTime;
+    const auto now = std::chrono::steady_clock::now();
+    if (window != cachedWindow || now - cachedTime > std::chrono::milliseconds(10))
+    {
+        NSArray* list = WindowList(kCGWindowListOptionIncludingWindow, window);
+        cached = list.count > 0 ? list[0] : nil;
+        cachedWindow = window;
+        cachedTime = now;
+    }
+    return cached;
+}
+
 bool Bounds(NSDictionary* info, Rect& bounds)
 {
     CGRect rect;
@@ -294,6 +349,23 @@ bool Bounds(NSDictionary* info, Rect& bounds)
     bounds = { int(std::lround(rect.origin.x)), int(std::lround(rect.origin.y)), int(std::lround(rect.size.width)),
                int(std::lround(rect.size.height)) };
     return true;
+}
+
+// The window as ListWindows lists it.
+std::optional<Window> Listed(NSDictionary* info)
+{
+    const int pid = [info[(id)kCGWindowOwnerPID] intValue];
+    Rect bounds;
+    if ([info[(id)kCGWindowLayer] intValue] != 0 || pid == getpid() || [info[(id)kCGWindowAlpha] doubleValue] <= 0 || !Bounds(info, bounds) ||
+        bounds.width < 64 || bounds.height < 64)
+        return std::nullopt;
+    // Window titles need the screen recording permission. The program's name stands in without it.
+    NSString* name = info[(id)kCGWindowName];
+    NSString* owner = info[(id)kCGWindowOwnerName];
+    NSString* title = name.length ? name : owner;
+    if (!title.length)
+        return std::nullopt;
+    return Window{ [info[(id)kCGWindowNumber] unsignedLongLongValue], title.UTF8String, pid };
 }
 
 std::string ProcessArgument(int pid)
@@ -339,10 +411,43 @@ UInt32 KeyCode(ImGuiKey key)
         { ImGuiKey_PageUp, kVK_PageUp }, { ImGuiKey_PageDown, kVK_PageDown }, { ImGuiKey_Space, kVK_Space }, { ImGuiKey_Tab, kVK_Tab },
         { ImGuiKey_Escape, kVK_Escape }, { ImGuiKey_LeftArrow, kVK_LeftArrow }, { ImGuiKey_RightArrow, kVK_RightArrow },
         { ImGuiKey_UpArrow, kVK_UpArrow }, { ImGuiKey_DownArrow, kVK_DownArrow },
+        { ImGuiKey_Keypad0, kVK_ANSI_Keypad0 }, { ImGuiKey_Keypad1, kVK_ANSI_Keypad1 }, { ImGuiKey_Keypad2, kVK_ANSI_Keypad2 },
+        { ImGuiKey_Keypad3, kVK_ANSI_Keypad3 }, { ImGuiKey_Keypad4, kVK_ANSI_Keypad4 }, { ImGuiKey_Keypad5, kVK_ANSI_Keypad5 },
+        { ImGuiKey_Keypad6, kVK_ANSI_Keypad6 }, { ImGuiKey_Keypad7, kVK_ANSI_Keypad7 }, { ImGuiKey_Keypad8, kVK_ANSI_Keypad8 },
+        { ImGuiKey_Keypad9, kVK_ANSI_Keypad9 }, { ImGuiKey_KeypadMultiply, kVK_ANSI_KeypadMultiply }, { ImGuiKey_KeypadAdd, kVK_ANSI_KeypadPlus },
+        { ImGuiKey_KeypadSubtract, kVK_ANSI_KeypadMinus }, { ImGuiKey_KeypadDecimal, kVK_ANSI_KeypadDecimal },
+        { ImGuiKey_KeypadDivide, kVK_ANSI_KeypadDivide },
     };
     const auto found = codes.find(key);
     return found == codes.end() ? UINT32_MAX : found->second;
 }
+
+// Windows virtual-key codes, which ReShade's effects and presets use, by key code.
+constexpr std::pair<CGKeyCode, uint8_t> kVirtualKeys[] = {
+    { kVK_ANSI_A, 'A' }, { kVK_ANSI_B, 'B' }, { kVK_ANSI_C, 'C' }, { kVK_ANSI_D, 'D' }, { kVK_ANSI_E, 'E' }, { kVK_ANSI_F, 'F' },
+    { kVK_ANSI_G, 'G' }, { kVK_ANSI_H, 'H' }, { kVK_ANSI_I, 'I' }, { kVK_ANSI_J, 'J' }, { kVK_ANSI_K, 'K' }, { kVK_ANSI_L, 'L' },
+    { kVK_ANSI_M, 'M' }, { kVK_ANSI_N, 'N' }, { kVK_ANSI_O, 'O' }, { kVK_ANSI_P, 'P' }, { kVK_ANSI_Q, 'Q' }, { kVK_ANSI_R, 'R' },
+    { kVK_ANSI_S, 'S' }, { kVK_ANSI_T, 'T' }, { kVK_ANSI_U, 'U' }, { kVK_ANSI_V, 'V' }, { kVK_ANSI_W, 'W' }, { kVK_ANSI_X, 'X' },
+    { kVK_ANSI_Y, 'Y' }, { kVK_ANSI_Z, 'Z' },
+    { kVK_ANSI_0, '0' }, { kVK_ANSI_1, '1' }, { kVK_ANSI_2, '2' }, { kVK_ANSI_3, '3' }, { kVK_ANSI_4, '4' },
+    { kVK_ANSI_5, '5' }, { kVK_ANSI_6, '6' }, { kVK_ANSI_7, '7' }, { kVK_ANSI_8, '8' }, { kVK_ANSI_9, '9' },
+    { kVK_F1, 0x70 }, { kVK_F2, 0x71 }, { kVK_F3, 0x72 }, { kVK_F4, 0x73 }, { kVK_F5, 0x74 }, { kVK_F6, 0x75 }, { kVK_F7, 0x76 },
+    { kVK_F8, 0x77 }, { kVK_F9, 0x78 }, { kVK_F10, 0x79 }, { kVK_F11, 0x7A }, { kVK_F12, 0x7B }, { kVK_F13, 0x7C }, { kVK_F14, 0x7D },
+    { kVK_F15, 0x7E }, { kVK_F16, 0x7F }, { kVK_F17, 0x80 }, { kVK_F18, 0x81 }, { kVK_F19, 0x82 }, { kVK_F20, 0x83 },
+    { kVK_Delete, 0x08 }, { kVK_Tab, 0x09 }, { kVK_Return, 0x0D }, { kVK_ANSI_KeypadEnter, 0x0D }, { kVK_CapsLock, 0x14 },
+    { kVK_Escape, 0x1B }, { kVK_Space, 0x20 }, { kVK_PageUp, 0x21 }, { kVK_PageDown, 0x22 }, { kVK_End, 0x23 }, { kVK_Home, 0x24 },
+    { kVK_LeftArrow, 0x25 }, { kVK_UpArrow, 0x26 }, { kVK_RightArrow, 0x27 }, { kVK_DownArrow, 0x28 }, { kVK_Help, 0x2D },
+    { kVK_ForwardDelete, 0x2E }, { kVK_Command, 0x5B }, { kVK_RightCommand, 0x5C },
+    { kVK_ANSI_Keypad0, 0x60 }, { kVK_ANSI_Keypad1, 0x61 }, { kVK_ANSI_Keypad2, 0x62 }, { kVK_ANSI_Keypad3, 0x63 }, { kVK_ANSI_Keypad4, 0x64 },
+    { kVK_ANSI_Keypad5, 0x65 }, { kVK_ANSI_Keypad6, 0x66 }, { kVK_ANSI_Keypad7, 0x67 }, { kVK_ANSI_Keypad8, 0x68 }, { kVK_ANSI_Keypad9, 0x69 },
+    { kVK_ANSI_KeypadMultiply, 0x6A }, { kVK_ANSI_KeypadPlus, 0x6B }, { kVK_ANSI_KeypadMinus, 0x6D }, { kVK_ANSI_KeypadDecimal, 0x6E },
+    { kVK_ANSI_KeypadDivide, 0x6F },
+    { kVK_Shift, 0xA0 }, { kVK_RightShift, 0xA1 }, { kVK_Control, 0xA2 }, { kVK_RightControl, 0xA3 }, { kVK_Option, 0xA4 },
+    { kVK_RightOption, 0xA5 },
+    { kVK_ANSI_Semicolon, 0xBA }, { kVK_ANSI_Equal, 0xBB }, { kVK_ANSI_Comma, 0xBC }, { kVK_ANSI_Minus, 0xBD }, { kVK_ANSI_Period, 0xBE },
+    { kVK_ANSI_Slash, 0xBF }, { kVK_ANSI_Grave, 0xC0 }, { kVK_ANSI_LeftBracket, 0xDB }, { kVK_ANSI_Backslash, 0xDC },
+    { kVK_ANSI_RightBracket, 0xDD }, { kVK_ANSI_Quote, 0xDE },
+};
 
 OSStatus OnHotkey(EventHandlerCallRef, EventRef event, void*)
 {
@@ -385,37 +490,38 @@ void Shutdown()
 std::vector<Window> ListWindows()
 {
     std::vector<Window> windows;
-    const int self = getpid();
     for (NSDictionary* info in WindowList(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID))
-    {
-        const int pid = [info[(id)kCGWindowOwnerPID] intValue];
-        Rect bounds;
-        if ([info[(id)kCGWindowLayer] intValue] != 0 || pid == self || [info[(id)kCGWindowAlpha] doubleValue] <= 0 || !Bounds(info, bounds) ||
-            bounds.width < 64 || bounds.height < 64)
-            continue;
-        // Window titles need the screen recording permission. The program's name stands in without it.
-        NSString* name = info[(id)kCGWindowName];
-        NSString* owner = info[(id)kCGWindowOwnerName];
-        NSString* title = name.length ? name : owner;
-        if (!title.length)
-            continue;
-        windows.push_back({ [info[(id)kCGWindowNumber] unsignedLongLongValue], title.UTF8String, pid });
-    }
+        if (std::optional<Window> window = Listed(info))
+            windows.push_back(std::move(*window));
     std::sort(windows.begin(), windows.end(), [](const Window& a, const Window& b) { return strcasecmp(a.title.c_str(), b.title.c_str()) < 0; });
     return windows;
 }
 
+std::optional<Window> ListedWindow(WindowId window)
+{
+    NSDictionary* info = WindowInfo(CGWindowID(window));
+    return info && [info[(id)kCGWindowIsOnscreen] boolValue] ? Listed(info) : std::nullopt;
+}
+
+std::set<int> WindowOwners()
+{
+    std::set<int> owners;
+    for (NSDictionary* info in WindowList(kCGWindowListOptionAll, kCGNullWindowID))
+        owners.insert([info[(id)kCGWindowOwnerPID] intValue]);
+    return owners;
+}
+
 bool WindowExists(const Window& window)
 {
-    NSArray* list = WindowList(kCGWindowListOptionIncludingWindow, CGWindowID(window.id));
-    return list.count > 0 && [list[0][(id)kCGWindowOwnerPID] intValue] == window.pid;
+    NSDictionary* info = WindowInfo(CGWindowID(window.id));
+    return info && [info[(id)kCGWindowOwnerPID] intValue] == window.pid;
 }
 
 // The whole window, title bar included, since that is what ScreenCaptureKit copies of a single window.
 bool WindowBounds(WindowId window, Rect& bounds)
 {
-    NSArray* list = WindowList(kCGWindowListOptionIncludingWindow, CGWindowID(window));
-    return list.count > 0 && [list[0][(id)kCGWindowIsOnscreen] boolValue] && Bounds(list[0], bounds) && bounds.width > 0 && bounds.height > 0;
+    NSDictionary* info = WindowInfo(CGWindowID(window));
+    return info && [info[(id)kCGWindowIsOnscreen] boolValue] && Bounds(info, bounds) && bounds.width > 0 && bounds.height > 0;
 }
 
 WindowId ForegroundWindow()
@@ -558,16 +664,16 @@ bool StartCapture(const Window& window, std::string& error)
         error = "The window is not visible.";
         return false;
     }
-    const uint64_t generation = ++capture.generation;
     capture.onGpu = gpu.metalObjects;
+    uint64_t generation = 0;
     {
         std::lock_guard lock(capture.mutex);
+        generation = ++capture.generation;
         capture.error.clear();
         capture.ready = {};
-        capture.back = {};
         capture.reconfiguring = false;
+        capture.running = true;
     }
-    capture.running = true;
     const CGWindowID windowId = CGWindowID(window.id);
 
     [SCShareableContent
@@ -626,8 +732,7 @@ bool StartCapture(const Window& window, std::string& error)
                                      // Stopped or replaced before it started.
                                      if (generation != capture.generation)
                                      {
-                                         [handler.stream stopCaptureWithCompletionHandler:nil];
-                                         handler.stream = nil;
+                                         StopStream(handler);
                                          return;
                                      }
                                      output = handler;
@@ -642,17 +747,16 @@ bool StartCapture(const Window& window, std::string& error)
 
 void StopCapture()
 {
-    ++capture.generation;
-    capture.running = false;
-    if (output)
-    {
-        [output.stream stopCaptureWithCompletionHandler:nil];
-        output.stream = nil;
-        output = nil;
-    }
     {
         std::lock_guard lock(capture.mutex);
+        ++capture.generation;
+        capture.running = false;
         capture.ready = {};
+    }
+    if (output)
+    {
+        StopStream(output);
+        output = nil;
     }
     // The host waited for the graphics card before stopping.
     ReleaseImported();
@@ -661,6 +765,11 @@ void StopCapture()
 bool Capturing()
 {
     return capture.running;
+}
+
+void SetCaptureIdle(bool idle)
+{
+    capture.idle = idle;
 }
 
 bool TakeFrame(Frame& frame)
@@ -753,6 +862,22 @@ std::string UiFont()
         if (access(path, R_OK) == 0)
             return path;
     return {};
+}
+
+void ReadInput(std::array<bool, 256>& keys, std::array<bool, 5>& buttons)
+{
+    keys = {};
+    for (const auto& [code, key] : kVirtualKeys)
+        if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, code))
+            keys[key] = true;
+    const CGMouseButton mouseButtons[] = { kCGMouseButtonLeft, kCGMouseButtonRight, kCGMouseButtonCenter, CGMouseButton(3), CGMouseButton(4) };
+    for (size_t i = 0; i < buttons.size(); ++i)
+        buttons[i] = CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, mouseButtons[i]);
+}
+
+bool WaylandDesktop()
+{
+    return false;
 }
 
 bool DisplayDrmDevice(int64_t&, int64_t&)
