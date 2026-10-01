@@ -5,6 +5,9 @@
 // D3D11 device shared by the capture pool and the overlay swapchain.
 void CreateDevice();
 
+// Asks Windows once, without waiting, to allow capture without the border it draws around the captured window.
+void RequestBorderlessCapture();
+
 // Starts Windows.Graphics.Capture on the target game window and records it as the target.
 void StartCapture(HWND target);
 

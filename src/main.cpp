@@ -57,6 +57,7 @@ int Run()
         ShowError(message);
         return 1;
     }
+    RequestBorderlessCapture();
 
     LoadInputHotkeys();
     LoadGames();

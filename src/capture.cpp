@@ -6,12 +6,23 @@
 #include "state.h"
 
 #include <winrt/Windows.Foundation.Metadata.h>
+#include <winrt/Windows.Security.Authorization.AppCapabilityAccess.h>
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 
+#include <atomic>
 #include <chrono>
 
+using winrt::Windows::Foundation::AsyncStatus;
 using winrt::Windows::Foundation::Metadata::ApiInformation;
+using winrt::Windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
+
+namespace
+{
+constexpr wchar_t kSessionClass[] = L"Windows.Graphics.Capture.GraphicsCaptureSession";
+// Set when Windows does not allow capture without its border, so capture keeps it instead of failing to start.
+std::atomic<bool> borderRequired = false;
+} // namespace
 
 void CreateDevice()
 {
@@ -27,6 +38,28 @@ void CreateDevice()
     winrt::com_ptr<::IInspectable> inspectable;
     winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.get(), inspectable.put()));
     g.captureDevice = inspectable.as<IDirect3DDevice>();
+}
+
+void RequestBorderlessCapture()
+{
+    if (!ApiInformation::IsPropertyPresent(kSessionClass, L"IsBorderRequired"))
+        return;
+    try
+    {
+        // Windows answers in the background. Programs that are not packaged are allowed without a prompt.
+        GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
+            .Completed([](const auto& request, AsyncStatus status) {
+                if (status == AsyncStatus::Completed && request.GetResults() == AppCapabilityAccessStatus::Allowed)
+                    return;
+                borderRequired = true;
+                Log(LogLevel::Info, L"Windows did not allow capture without a border, so it may draw one around the game.");
+            });
+    }
+    catch (const winrt::hresult_error& e)
+    {
+        borderRequired = true;
+        Log(LogLevel::Info, L"Could not ask to capture without a border: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
+    }
 }
 
 void StartCapture(HWND target)
@@ -47,13 +80,11 @@ void StartCapture(HWND target)
 
     // The real cursor is already drawn on top of the overlay.
     g.session.IsCursorCaptureEnabled(false);
-    if (ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsBorderRequired"))
-    {
-        GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless);
+    // RequestBorderlessCapture asked for this at startup.
+    if (!borderRequired && ApiInformation::IsPropertyPresent(kSessionClass, L"IsBorderRequired"))
         g.session.IsBorderRequired(false);
-    }
     // Without this, capture can be capped at 60 FPS.
-    if (ApiInformation::IsPropertyPresent(L"Windows.Graphics.Capture.GraphicsCaptureSession", L"MinUpdateInterval"))
+    if (ApiInformation::IsPropertyPresent(kSessionClass, L"MinUpdateInterval"))
         g.session.MinUpdateInterval(std::chrono::milliseconds(1));
 
     g.session.StartCapture();
