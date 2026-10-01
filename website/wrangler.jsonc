@@ -1,0 +1,11 @@
+// Cloudflare deploys the built site with `npx wrangler deploy`. Without this file wrangler tries to set the project up
+// for server rendering, which the site doesn't use.
+{
+  "name": "unishade",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    // Serves 404.html, with status 404, for addresses that match no file.
+    "not_found_handling": "404-page"
+  }
+}
