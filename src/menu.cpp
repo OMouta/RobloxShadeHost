@@ -9,13 +9,14 @@
 #include "addon.h"
 #include "config.h"
 #include "log.h"
+#include "names.h"
 #include "reshade_imgui.h"
 #include "resource.h"
 #include "shell.h"
 #include "state.h"
+#include "text.h"
 #include "theme.h"
 #include "update.h"
-#include "../installer/text.h"
 
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -1082,54 +1083,26 @@ std::wstring LibraryPath(const fs::path& preset)
 
 // Names
 
-// What Windows does not allow in file names.
-bool InvalidInName(wchar_t character)
-{
-    return character < 32 || wcschr(L"\\/:*?\"<>|", character);
-}
-
-// Names Windows keeps for devices, such as CON or COM1, whatever extension follows them.
-bool ReservedName(const std::wstring& name)
-{
-    std::wstring base = name.substr(0, name.find(L'.'));
-    base.erase(base.find_last_not_of(L' ') + 1);
-    for (const wchar_t* reserved : { L"CON", L"PRN", L"AUX", L"NUL", L"CONIN$", L"CONOUT$" })
-        if (_wcsicmp(base.c_str(), reserved) == 0)
-            return true;
-    const bool port = base.size() == 4 && (_wcsnicmp(base.c_str(), L"COM", 3) == 0 || _wcsnicmp(base.c_str(), L"LPT", 3) == 0);
-    return port && ((base[3] >= L'0' && base[3] <= L'9') || base[3] == L'\u00B9' || base[3] == L'\u00B2' || base[3] == L'\u00B3');
-}
-
 // Why a name typed for a preset or folder cannot be used, or empty when it can. Trims spaces from both ends first.
 std::string NameProblem(std::wstring& name)
 {
     name.erase(0, name.find_first_not_of(L' '));
     name.erase(name.find_last_not_of(L' ') + 1);
-    if (name.empty())
+    switch (CheckName(name, false))
+    {
+    case NameIssue::None:
+        break;
+    case NameIssue::Empty:
         return "Enter a name.";
-    if (std::any_of(name.begin(), name.end(), InvalidInName))
+    case NameIssue::Control:
+    case NameIssue::Character:
         return "A name cannot contain \\ / : * ? \" < > | or control characters.";
-    // Windows drops dots from the end of names, which also rules out . and ..
-    if (name.back() == L'.')
+    case NameIssue::End:
         return "A name cannot end with a dot.";
-    if (ReservedName(name))
+    case NameIssue::Device:
         return "Windows keeps " + Utf8(name) + " for devices. Pick another name.";
+    }
     return {};
-}
-
-// A game's folder is named after it, without what Windows does not allow in names. The name is also the game's
-// key in [GamePresets], so it leaves out what would break that line too.
-std::wstring FolderName(std::wstring name)
-{
-    for (wchar_t& character : name)
-        if (InvalidInName(character) || wcschr(L"=;[]", character))
-            character = L' ';
-    name.erase(0, name.find_first_not_of(L' '));
-    // Windows drops dots and spaces from the end of names.
-    name.erase(name.find_last_not_of(L". ") + 1);
-    if (ReservedName(name))
-        name += L" game";
-    return name;
 }
 
 // Copies UTF-8 text into a fixed buffer, cut between characters when it does not fit.
@@ -2649,20 +2622,16 @@ void StopCapture()
 
 void ApplyHotkeys(const InputHotkeys& hotkeys)
 {
-    for (size_t i = 1; i < std::size(kShortcuts); ++i)
-        for (size_t j = 0; j < i; ++j)
-        {
-            const Hotkey& a = hotkeys.*kShortcuts[i].member;
-            const Hotkey& b = hotkeys.*kShortcuts[j].member;
-            if (a.key && a.key == b.key && a.modifiers == b.modifiers)
-            {
-                // Names the shortcut that already had these keys, not the one just changed.
-                const Hotkey& before = g.hotkeys.*kShortcuts[i].member;
-                const bool changed = a.key != before.key || a.modifiers != before.modifiers;
-                m.shortcutError = FormatHotkey(a) + L" is already used by \"" + Wide(kShortcutText[changed ? j : i].title) + L"\".";
-                return;
-            }
-        }
+    if (const auto clash = FindShortcutClash(hotkeys))
+    {
+        // Names the shortcut that already had these keys, not the one just changed.
+        const Hotkey& hotkey = hotkeys.*kShortcuts[clash->later].member;
+        const Hotkey& before = g.hotkeys.*kShortcuts[clash->later].member;
+        const bool changed = hotkey.key != before.key || hotkey.modifiers != before.modifiers;
+        const char* holder = kShortcutText[changed ? clash->earlier : clash->later].title;
+        m.shortcutError = FormatHotkey(hotkey) + L" is already used by \"" + Wide(holder) + L"\".";
+        return;
+    }
     m.shortcutError = ChangeHotkeys(hotkeys);
 }
 
@@ -2922,11 +2891,6 @@ void ConfirmDialog()
 
 // Status
 
-bool IsWebAddress(const std::string& word)
-{
-    return word.starts_with("https://") || word.starts_with("http://");
-}
-
 // Wraps a notice at the edge of the window, with the web addresses in it as links. Wrapped lines start where the
 // first one does.
 void NoticeText(const std::string& text)
@@ -2950,18 +2914,17 @@ void NoticeText(const std::string& text)
         start = end + 1;
         if (word.empty())
             continue;
-        // Punctuation after an address, such as a full stop, is not part of it.
+        const size_t address = WebAddressLength(word);
         std::string after;
-        if (IsWebAddress(word))
+        if (address)
         {
-            const size_t cut = word.find_last_not_of(".,;:!?)'\"") + 1;
-            after = word.substr(cut);
-            word.resize(cut);
+            after = word.substr(address);
+            word.resize(address);
         }
         if (!first && ImGui::GetItemRectMax().x + space + ImGui::CalcTextSize((word + after).c_str()).x <= right)
             ImGui::SameLine(0, space);
         first = false;
-        if (IsWebAddress(word))
+        if (address)
         {
             ImGui::PushID(index);
             if (Link(word.c_str()))

@@ -103,6 +103,18 @@ void UnregisterAll()
 }
 } // namespace
 
+std::optional<ShortcutClash> FindShortcutClash(const InputHotkeys& hotkeys)
+{
+    for (size_t later = 1; later < std::size(kShortcuts); ++later)
+        for (size_t earlier = 0; earlier < later; ++earlier)
+        {
+            const Hotkey& hotkey = hotkeys.*kShortcuts[later].member;
+            if (hotkey.key && Same(hotkey, hotkeys.*kShortcuts[earlier].member))
+                return ShortcutClash{ earlier, later };
+        }
+    return std::nullopt;
+}
+
 std::wstring ExeDirectory()
 {
     wchar_t executable[32768]{};
@@ -127,17 +139,15 @@ void LoadInputHotkeys()
     for (const Shortcut& shortcut : kShortcuts)
         hotkeys.*shortcut.member = ReadHotkey(path, shortcut.name, shortcut.fallback, shortcut.member != &InputHotkeys::input);
     // A key can only do one thing, so a later shortcut on the same key is turned off.
-    for (size_t i = 1; i < std::size(kShortcuts); ++i)
-        for (size_t j = 0; j < i; ++j)
-        {
-            Hotkey& later = hotkeys.*kShortcuts[i].member;
-            if (later.key && Same(later, hotkeys.*kShortcuts[j].member))
-            {
-                Log(LogLevel::Warning, L"%ls and %ls in RobloxShadeHost.ini are both %ls, so %ls is off. Pick another one in the menu's Settings.",
-                    kShortcuts[j].name, kShortcuts[i].name, FormatHotkey(later).c_str(), kShortcuts[i].name);
-                later = {};
-            }
-        }
+    while (const auto clash = FindShortcutClash(hotkeys))
+    {
+        const Shortcut& earlier = kShortcuts[clash->earlier];
+        const Shortcut& later = kShortcuts[clash->later];
+        Hotkey& hotkey = hotkeys.*later.member;
+        Log(LogLevel::Warning, L"%ls and %ls in RobloxShadeHost.ini are both %ls, so %ls is off. Pick another one in the menu's Settings.",
+            earlier.name, later.name, FormatHotkey(hotkey).c_str(), later.name);
+        hotkey = {};
+    }
     UseHotkeys(hotkeys);
 }
 

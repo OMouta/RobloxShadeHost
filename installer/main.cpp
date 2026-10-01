@@ -5,8 +5,9 @@
 #include "install.h"
 #include "pinned.h"
 #include "resource.h"
-#include "text.h"
 #include "../src/hotkey.h"
+#include "../src/text.h"
+#include "../src/theme.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -41,25 +42,25 @@ constexpr float kStrip = 3;
 constexpr float kSidebar = 236;
 constexpr float kFooter = 74;
 
-constexpr ImU32 kBackground = IM_COL32(17, 18, 23, 255);
-constexpr ImU32 kSidebarColor = IM_COL32(12, 13, 17, 255);
-constexpr ImU32 kCard = IM_COL32(25, 26, 33, 255);
-constexpr ImU32 kCardHover = IM_COL32(31, 32, 41, 255);
-constexpr ImU32 kBorder = IM_COL32(40, 42, 53, 255);
-constexpr ImU32 kBorderStrong = IM_COL32(74, 77, 94, 255);
-constexpr ImU32 kText = IM_COL32(236, 236, 241, 255);
-constexpr ImU32 kDim = IM_COL32(150, 152, 167, 255);
-constexpr ImU32 kAccent = IM_COL32(112, 122, 255, 255);
-constexpr ImU32 kAccentHover = IM_COL32(132, 141, 255, 255);
-constexpr ImU32 kAccentActive = IM_COL32(95, 104, 235, 255);
-constexpr ImU32 kWarning = IM_COL32(245, 192, 92, 255);
-constexpr ImU32 kError = IM_COL32(255, 118, 118, 255);
-constexpr ImU32 kSuccess = IM_COL32(104, 214, 148, 255);
-// The ring in the logo.
-constexpr ImU32 kRainbow[] = {
-    IM_COL32(255, 72, 96, 255),  IM_COL32(255, 158, 54, 255), IM_COL32(248, 228, 76, 255), IM_COL32(84, 222, 122, 255),
-    IM_COL32(62, 198, 255, 255), IM_COL32(84, 110, 255, 255), IM_COL32(186, 92, 255, 255),
-};
+constexpr ImU32 Color(unsigned rgb, int alpha = 255)
+{
+    return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, alpha);
+}
+
+constexpr ImU32 kBackground = Color(theme::kBackground);
+constexpr ImU32 kSidebarColor = Color(theme::kSidebar);
+constexpr ImU32 kCard = Color(theme::kCard);
+constexpr ImU32 kCardHover = Color(theme::kCardHover);
+constexpr ImU32 kBorder = Color(theme::kBorder);
+constexpr ImU32 kBorderStrong = Color(theme::kBorderStrong);
+constexpr ImU32 kText = Color(theme::kText);
+constexpr ImU32 kDim = Color(theme::kDim);
+constexpr ImU32 kAccent = Color(theme::kAccent);
+constexpr ImU32 kAccentHover = Color(theme::kAccentHover);
+constexpr ImU32 kAccentActive = Color(theme::kAccentActive);
+constexpr ImU32 kWarning = Color(theme::kWarning);
+constexpr ImU32 kError = Color(theme::kError);
+constexpr ImU32 kSuccess = Color(theme::kSuccess);
 
 // Exit codes of a silent run. 1 is also used when the command line is invalid.
 constexpr int kExitFailed = 1;
@@ -351,12 +352,14 @@ void Title(const std::string& text)
 
 void Rainbow(ImDrawList* draw, ImVec2 min, ImVec2 max)
 {
-    constexpr int count = IM_ARRAYSIZE(kRainbow);
+    constexpr int count = IM_ARRAYSIZE(theme::kRainbow);
     for (int i = 0; i + 1 < count; ++i)
     {
         const float left = min.x + (max.x - min.x) * i / (count - 1);
         const float right = min.x + (max.x - min.x) * (i + 1) / (count - 1);
-        draw->AddRectFilledMultiColor(ImVec2(left, min.y), ImVec2(right, max.y), kRainbow[i], kRainbow[i + 1], kRainbow[i + 1], kRainbow[i]);
+        const ImU32 from = Color(theme::kRainbow[i]);
+        const ImU32 to = Color(theme::kRainbow[i + 1]);
+        draw->AddRectFilledMultiColor(ImVec2(left, min.y), ImVec2(right, max.y), from, to, to, from);
     }
 }
 
@@ -581,13 +584,13 @@ void Sidebar(std::initializer_list<const char*> steps, int current)
             draw->AddLine(dot + ImVec2(0, S(9)), dot + ImVec2(0, S(27)), kBorder, S(1.5f));
         if (index < current)
         {
-            draw->AddCircleFilled(dot, S(7), IM_COL32(104, 214, 148, 40));
+            draw->AddCircleFilled(dot, S(7), Color(theme::kSuccess, 40));
             const ImVec2 check[] = { dot + ImVec2(-S(3.2f), 0), dot + ImVec2(-S(0.8f), S(2.5f)), dot + ImVec2(S(3.5f), -S(2.5f)) };
             draw->AddPolyline(check, 3, kSuccess, S(1.8f));
         }
         else if (index == current)
         {
-            draw->AddCircleFilled(dot, S(9), IM_COL32(112, 122, 255, 60));
+            draw->AddCircleFilled(dot, S(9), Color(theme::kAccent, 60));
             draw->AddCircleFilled(dot, S(5), kAccent);
         }
         else

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "net.h"
+#include "../src/net.h"
 
 #include <atomic>
 #include <filesystem>

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "names.h"
 #include "platform.h"
 
 #include <filesystem>
@@ -28,10 +29,6 @@ bool SaveAutoGames(const std::filesystem::path& path, std::span<const AutoGame> 
 bool MatchesProcess(const AutoGame& game, const std::string& executable, const std::string& command);
 // The index of the first enabled game the process matches, or -1.
 int MatchingGame(std::span<const AutoGame> games, const std::string& executable, const std::string& command);
-
-// A game's presets are in a folder named after it, without what Windows does not allow in names, so the folder
-// also works there.
-std::string FolderName(std::string name);
 
 // Adds the game that owns the window, or turns it back on. Returns false when its process is gone.
 bool AddAutoGame(std::vector<AutoGame>& games, const platform::Window& window);

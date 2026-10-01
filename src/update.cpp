@@ -1,8 +1,8 @@
 #include "update.h"
 #include "config.h"
 #include "log.h"
-#include "../installer/net.h"
-#include "../installer/text.h"
+#include "net.h"
+#include "text.h"
 
 #include <windows.h>
 

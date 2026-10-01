@@ -94,11 +94,11 @@ add_executable(Unishade WIN32
     src/reshade_config.cpp
     src/setup_check.cpp
     src/update.cpp
-    installer/net.cpp)
+    src/net.cpp)
 target_include_directories(Unishade PRIVATE "${RESHADE_INCLUDE}" "${RESHADE_IMGUI_INCLUDE}" "${ONNXRUNTIME_INCLUDE}")
 target_compile_definitions(Unishade PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(Unishade PRIVATE UNISHADE_VERSION="${PROJECT_VERSION}")
-# installer/net.cpp sends this for the update check.
+# src/net.cpp sends this for the update check.
 target_compile_definitions(Unishade PRIVATE UNISHADE_USER_AGENT="Unishade/${PROJECT_VERSION}")
 target_compile_definitions(Unishade PRIVATE UNISHADE_VERSION_RESOURCE=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0)
 target_compile_options(Unishade PRIVATE /W4 /permissive- /EHsc /bigobj)
@@ -127,7 +127,7 @@ target_compile_definitions(setup_libraries PRIVATE IMGUI_IMPL_WIN32_DISABLE_GAME
 add_executable(installer WIN32 EXCLUDE_FROM_ALL
     installer/main.cpp
     installer/install.cpp
-    installer/net.cpp
+    src/net.cpp
     installer/setup.rc)
 # setup.rc embeds Unishade.exe, found through the include path. pinned.h comes from installer/pins.cmake.
 target_include_directories(installer PRIVATE "$<TARGET_FILE_DIR:Unishade>" "${SETUP_GENERATED_DIR}")
@@ -173,6 +173,16 @@ if(BUILD_TESTING)
     add_executable(ini_text_tests tests/ini_text_tests.cpp)
     target_compile_options(ini_text_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME ini_text_tests COMMAND ini_text_tests)
+
+    add_executable(names_tests tests/names_tests.cpp)
+    target_compile_options(names_tests PRIVATE /W4 /permissive- /EHsc)
+    add_test(NAME names_tests COMMAND names_tests)
+
+    # miniz comes with Setup's other libraries.
+    add_executable(package_files_tests tests/package_files_tests.cpp)
+    target_compile_options(package_files_tests PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(package_files_tests PRIVATE setup_libraries)
+    add_test(NAME package_files_tests COMMAND package_files_tests)
 
     add_executable(game_window_tests tests/game_window_tests.cpp src/game_integration.cpp)
     target_compile_definitions(game_window_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

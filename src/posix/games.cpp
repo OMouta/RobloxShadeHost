@@ -3,7 +3,6 @@
 #include "game_list.h"
 
 #include <algorithm>
-#include <cstring>
 #include <strings.h>
 
 namespace
@@ -40,17 +39,6 @@ int MatchingGame(std::span<const AutoGame> games, const std::string& executable,
         if (games[i].enabled && MatchesProcess(games[i], executable, command))
             return static_cast<int>(i);
     return -1;
-}
-
-std::string FolderName(std::string name)
-{
-    for (char& c : name)
-        if (static_cast<unsigned char>(c) < 32 || strchr("\\/:*?\"<>|", c))
-            c = ' ';
-    name.erase(0, name.find_first_not_of(' '));
-    // Windows drops dots and spaces from the end of names.
-    name.erase(name.find_last_not_of(". ") + 1);
-    return name;
 }
 
 std::vector<AutoGame> LoadAutoGames(const std::filesystem::path& path)

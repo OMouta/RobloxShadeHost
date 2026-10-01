@@ -1,9 +1,8 @@
 #include "setup.h"
 #include "config.h"
 #include "log.h"
+#include "package_files.h"
 #include "preset_ini.h"
-
-#include <miniz.h>
 
 #include <signal.h>
 #include <spawn.h>
@@ -11,11 +10,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <cstdio>
-#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -31,9 +28,6 @@ struct Cancelled
 // far above what effect packages and presets need.
 constexpr uintmax_t kMaxListSize = 4 << 20; // the lists and presets
 constexpr uintmax_t kMaxPackageSize = 512 << 20;
-constexpr mz_uint kMaxZipFiles = 50'000;
-constexpr uint64_t kMaxZipFileSize = 256 << 20;
-constexpr uint64_t kMaxZipTotalSize = uint64_t(1) << 30;
 
 // Downloads with curl, which macOS and nearly every Linux system have. Only https, redirects included, except for
 // the sources given on the command line, which tests can point at local files. Throws on failure or when cancelled.
@@ -83,125 +77,6 @@ fs::path MakeWorkFolder()
     if (!mkdtemp(folder.data()))
         throw std::runtime_error("Could not create a folder for downloads in " + temporary.string() + ".");
     return folder;
-}
-
-bool IsInside(const fs::path& path, const fs::path& folder)
-{
-    const fs::path relative = path.lexically_normal().lexically_relative(folder.lexically_normal());
-    return !relative.empty() && *relative.begin() != "..";
-}
-
-void ExtractZip(const fs::path& zipPath, const fs::path& destination, const std::string& name)
-{
-    std::error_code error;
-    const uintmax_t zipSize = fs::file_size(zipPath, error);
-    if (error)
-        throw std::runtime_error("Could not read the download of " + name + ".");
-    if (zipSize > kMaxPackageSize)
-        throw std::runtime_error("The download of " + name + " is larger than Unishade accepts.");
-    const std::string data = ReadFile(zipPath);
-    mz_zip_archive zip{};
-    if (!mz_zip_reader_init_mem(&zip, data.data(), data.size(), 0))
-        throw std::runtime_error("The download of " + name + " is not a zip file.");
-    struct Closer
-    {
-        mz_zip_archive* zip;
-        ~Closer() { mz_zip_reader_end(zip); }
-    } closer{ &zip };
-
-    const mz_uint count = mz_zip_reader_get_num_files(&zip);
-    if (count > kMaxZipFiles)
-        throw std::runtime_error(name + " contains too many files.");
-    uint64_t total = 0;
-    for (mz_uint index = 0; index < count; ++index)
-    {
-        mz_zip_archive_file_stat stat{};
-        if (!mz_zip_reader_file_stat(&zip, index, &stat) || stat.m_is_directory)
-            continue;
-        const fs::path target = (destination / stat.m_filename).lexically_normal();
-        if (!IsInside(target, destination))
-            throw std::runtime_error(name + " contains a file outside its own folder.");
-        // miniz unpacks no more than the size the zip states, so checking that bounds what it writes.
-        total += stat.m_uncomp_size;
-        if (stat.m_uncomp_size > kMaxZipFileSize || total > kMaxZipTotalSize)
-            throw std::runtime_error(name + " is larger than Unishade accepts when unpacked.");
-        size_t size = 0;
-        void* bytes = mz_zip_reader_extract_to_heap(&zip, index, &size, 0);
-        if (!bytes)
-            throw std::runtime_error("Could not extract " + name + ".");
-        const bool written = WriteFile(target, std::string(static_cast<const char*>(bytes), size));
-        mz_free(bytes);
-        if (!written)
-            throw std::runtime_error("Could not write " + target.string() + ".");
-    }
-}
-
-bool SameName(const fs::path& path, const char* name)
-{
-    return Lowercase(path.filename().string()) == name;
-}
-
-// Matches ReShade's own installer: folders named Shaders and Textures first, otherwise the shallowest folder
-// with effect or image files.
-void FindPackageFolders(const fs::path& directory, fs::path& shaders, fs::path& textures, fs::path& shaderFallback, fs::path& textureFallback)
-{
-    for (const auto& entry : fs::directory_iterator(directory))
-    {
-        const fs::path& path = entry.path();
-        if (entry.is_directory())
-        {
-            if (shaders.empty() && SameName(path, "shaders"))
-                shaders = path;
-            if (textures.empty() && SameName(path, "textures"))
-                textures = path;
-            FindPackageFolders(path, shaders, textures, shaderFallback, textureFallback);
-            continue;
-        }
-        const std::string extension = Lowercase(path.extension().string());
-        const auto shallower = [&](const fs::path& current) { return current.empty() || directory.native().size() < current.native().size(); };
-        if (extension == ".fx" && shallower(shaderFallback))
-            shaderFallback = directory;
-        if ((extension == ".png" || extension == ".jpg" || extension == ".jpeg") && shallower(textureFallback))
-            textureFallback = directory;
-    }
-}
-
-void CopyPackageFiles(const fs::path& source, const fs::path& destination, const std::string& denied)
-{
-    fs::create_directories(destination);
-    std::set<std::string> deniedNames;
-    for (std::string name : PresetIni::Split(denied))
-    {
-        name.erase(0, name.find_first_not_of(' '));
-        name.erase(name.find_last_not_of(' ') + 1);
-        deniedNames.insert(Lowercase(name));
-    }
-    for (const auto& entry : fs::directory_iterator(source))
-    {
-        const fs::path name = entry.path().filename();
-        if (entry.is_directory())
-        {
-            CopyPackageFiles(entry.path(), destination / name, denied);
-            continue;
-        }
-        const std::string extension = Lowercase(name.extension().string());
-        if (extension == ".addon" || extension == ".addon32" || extension == ".addon64" || extension == ".dll" || extension == ".exe" ||
-            deniedNames.count(Lowercase(name.string())))
-            continue;
-        fs::copy_file(entry.path(), destination / name, fs::copy_options::overwrite_existing);
-    }
-}
-
-// EffectPackages.ini writes Windows paths such as .\reshade-shaders\Shaders\OtisFX.
-fs::path PackageDestination(const std::string& relative, const char* kind, const std::string& package)
-{
-    std::string path = relative;
-    std::replace(path.begin(), path.end(), '\\', '/');
-    const fs::path destination = (DataDirectory() / path).lexically_normal();
-    const fs::path root = (EffectsDirectory() / kind).lexically_normal();
-    if (relative.empty() || (!IsInside(destination, root) && destination != root))
-        throw std::runtime_error("The effect package " + package + " has an invalid install folder.");
-    return destination;
 }
 
 // SHA-256, for the preset checksums.
@@ -352,18 +227,11 @@ void EffectSetup::Run()
                 const fs::path extracted = work / "package";
                 fs::remove_all(extracted);
                 Download(url, zip, cancel, kMaxPackageSize);
-                ExtractZip(zip, extracted, name);
-                fs::path shaders, textures, shaderFallback, textureFallback;
-                FindPackageFolders(extracted, shaders, textures, shaderFallback, textureFallback);
-                if (shaders.empty())
-                    shaders = shaderFallback;
-                if (textures.empty())
-                    textures = textureFallback;
-                if (shaders.empty())
-                    throw std::runtime_error("The effect package " + name + " contains no effects.");
-                CopyPackageFiles(shaders, PackageDestination(installPath, "Shaders", name), denied);
-                if (!textures.empty())
-                    CopyPackageFiles(textures, PackageDestination(texturePath, "Textures", name), "");
+                ExtractZip(ReadFile(zip), extracted, name);
+                const PackageFolders folders = FindPackageFolders(extracted, name);
+                CopyPackageFiles(folders.shaders, PackageDestination(DataDirectory(), installPath, "Shaders", name), denied);
+                if (!folders.textures.empty())
+                    CopyPackageFiles(folders.textures, PackageDestination(DataDirectory(), texturePath, "Textures", name), "");
                 fs::remove_all(extracted);
                 fs::remove(zip);
             }

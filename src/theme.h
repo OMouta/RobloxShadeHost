@@ -1,6 +1,6 @@
 #pragma once
 
-// Setup's colors, shared by the launcher and the menu. 0xRRGGBB.
+// Unishade's colors, shared by Setup, the launcher, the menu and the macOS and Linux host. 0xRRGGBB.
 namespace theme
 {
 constexpr unsigned kBackground = 0x111217;

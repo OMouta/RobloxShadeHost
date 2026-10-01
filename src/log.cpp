@@ -1,5 +1,6 @@
 #include "log.h"
 #include "config.h"
+#include "text.h"
 
 #include <windows.h>
 
@@ -8,6 +9,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
+#include <type_traits>
 
 namespace
 {
@@ -33,12 +35,23 @@ HANDLE file = INVALID_HANDLE_VALUE;
 std::wstring path;
 std::atomic<unsigned> noticeVersion = 0;
 
-std::string Utf8(const wchar_t* text)
+template <class Char>
+size_t WebAddressLengthOf(std::basic_string_view<Char> word)
 {
-    const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
-    std::string result(size > 0 ? size - 1 : 0, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
-    return result;
+    const auto startsWith = [word](std::string_view prefix) {
+        return word.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), word.begin(), [](char a, Char b) { return Char(a) == b; });
+    };
+    const auto punctuation = [](Char character) {
+        const auto code = static_cast<std::make_unsigned_t<Char>>(character);
+        return code < 128 && std::string_view(".,;:!?)'\"").find(static_cast<char>(code)) != std::string_view::npos;
+    };
+    if (!startsWith("https://") && !startsWith("http://"))
+        return 0;
+    // The slashes after http: are no punctuation, so this stops there at the latest.
+    size_t length = word.size();
+    while (punctuation(word[length - 1]))
+        --length;
+    return length;
 }
 
 // Called with the mutex held.
@@ -121,7 +134,7 @@ void InitLog()
              version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber);
     {
         std::lock_guard lock(shared.mutex);
-        WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory().c_str()) + "\r\n\r\n");
+        WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory()) + "\r\n\r\n");
     }
 
     if (file == INVALID_HANDLE_VALUE)
@@ -168,6 +181,16 @@ void ClearNotices()
 unsigned NoticeVersion()
 {
     return noticeVersion;
+}
+
+size_t WebAddressLength(std::string_view word)
+{
+    return WebAddressLengthOf(word);
+}
+
+size_t WebAddressLength(std::wstring_view word)
+{
+    return WebAddressLengthOf(word);
 }
 
 const std::wstring& LogPath()

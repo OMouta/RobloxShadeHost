@@ -1,6 +1,7 @@
 #include "config.h"
 #include "ini_text.h"
 #include "log.h"
+#include "names.h"
 
 #include <fcntl.h>
 #include <pwd.h>
@@ -151,7 +152,7 @@ fs::path UserDirectory(const std::string& userDirs, const std::string& name, con
 std::string SafeFileName(std::string name)
 {
     for (char& c : name)
-        if (static_cast<unsigned char>(c) < 32 || c == 127 || strchr("\\/:*?\"<>|", c))
+        if (name_rules::InvalidInName(c) || c == 127)
             c = ' ';
     // A name starting with a dot would be hidden, and ".." would name the folder above.
     name.erase(0, name.find_first_not_of(". "));
