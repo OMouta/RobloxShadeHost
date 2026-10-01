@@ -307,8 +307,16 @@ VkImage Import(IOSurfaceRef surface)
     VkCommandBuffer commands = gpu.BeginCommands();
     GpuImage view;
     view.image = entry.image;
-    InitLayout(commands, view);
-    gpu.SubmitAndWait(commands);
+    if (commands)
+        InitLayout(commands, view);
+    if (!gpu.SubmitAndWait(commands))
+    {
+        // Commands that failed to finish may still use the image.
+        vkDeviceWaitIdle(gpu.device);
+        vkDestroyImage(gpu.device, entry.image, nullptr);
+        vkFreeMemory(gpu.device, entry.memory, nullptr);
+        return VK_NULL_HANDLE;
+    }
     entry.surface = static_cast<IOSurfaceRef>(const_cast<void*>(CFRetain(surface)));
     imported[id] = entry;
     return entry.image;
