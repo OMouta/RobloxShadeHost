@@ -14,9 +14,18 @@ struct Cancelled
 {
 };
 
-// Downloads an HTTPS url into memory. Throws std::runtime_error with a readable message, or Cancelled.
-std::string Fetch(const std::wstring& url, const std::atomic<bool>& cancel, const DownloadProgress& progress = {});
+// The most a download may be, so a broken or hostile server cannot fill the memory or the disk.
+constexpr uint64_t kListLimit = 16ull << 20;     // download lists, presets, licenses and GitHub's JSON
+constexpr uint64_t kPackageLimit = 256ull << 20; // effect packages and ReShade's installer
+constexpr uint64_t kAddonLimit = 1ull << 30;     // add-on files, such as the depth estimation model
+
+// Downloads an HTTPS url into memory. Throws std::runtime_error with a readable message, or Cancelled, which also
+// interrupts a download that is still connecting or waiting for the server.
+std::string Fetch(const std::wstring& url, const std::atomic<bool>& cancel, uint64_t maxSize = kListLimit, const DownloadProgress& progress = {});
 
 // Downloads an HTTPS url to a file. A non-empty sha256 (lowercase hex) must match the downloaded data.
-void Download(const std::wstring& url, const std::filesystem::path& path, const std::string& sha256, const std::atomic<bool>& cancel,
-              const DownloadProgress& progress = {});
+void Download(const std::wstring& url, const std::filesystem::path& path, const std::string& sha256, uint64_t maxSize,
+              const std::atomic<bool>& cancel, const DownloadProgress& progress = {});
+
+// The SHA-256 (lowercase hex) of the rest of an open file, read through its handle.
+std::string Sha256(void* file);
