@@ -66,10 +66,10 @@ constexpr ImU32 kSuccess = Color(theme::kSuccess);
 // Layout in pixels at 1080p.
 using menu_layout::kWidth;
 using menu_layout::kMargin;
+using menu_layout::kHeader;
+using menu_layout::kTabs;
+using menu_layout::kFooter;
 constexpr float kPadding = 18;
-constexpr float kHeader = 74;
-constexpr float kTabs = 42;
-constexpr float kFooter = 64;
 constexpr ULONGLONG kHintDuration = 6000;
 constexpr ULONGLONG kToastDuration = 3000;
 
@@ -158,6 +158,8 @@ struct Menu
 {
     effect_runtime* runtime = nullptr;
     float scale = 1;
+    // The size picked in Settings.
+    float menuScale = 1;
     ImGuiMouseCursor cursor = ImGuiMouseCursor_Arrow;
     Tab tab = Tab::Presets;
     bool debugInfo = false;
@@ -1927,6 +1929,61 @@ void ShortcutRow(int index)
     ImGui::PopID();
 }
 
+// A switch with its title and description beside it. Returns true when clicked.
+bool SwitchRow(const char* id, bool on, const char* title, const char* description)
+{
+    const bool clicked = Switch(id, on);
+    ImGui::SameLine(0, S(12));
+    ImGui::BeginGroup();
+    Text(title, kText, 14.5f);
+    Text(description, kDim, 13);
+    ImGui::EndGroup();
+    return clicked;
+}
+
+// The menu's size in quarter steps, within what config.h keeps.
+constexpr float kSmallestMenu = 0.75f;
+constexpr float kLargestMenu = 2;
+
+void MenuSizeRow()
+{
+    const float x = ImGui::GetCursorPosX();
+    const float top = ImGui::GetCursorPosY();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float button = S(32);
+    const float valueWidth = S(58);
+    const float controls = button * 2 + valueWidth;
+
+    ImGui::BeginGroup();
+    Text("Menu size", kText, 14.5f, x + width - controls - S(14));
+    Text("On top of the size that follows the game's window. Changes right away.", kDim, 13, x + width - controls - S(14));
+    ImGui::EndGroup();
+    const float bottom = ImGui::GetCursorPosY();
+
+    ImGui::SetCursorPos(ImVec2(x + width - controls, top + S(2)));
+    float step = 0;
+    if (Button("-##smaller", ImVec2(button, button), false, m.menuScale > kSmallestMenu + 0.01f))
+        step = -0.25f;
+    ImGui::SameLine(0, 0);
+    const std::string value = std::to_string(std::lround(m.menuScale * 100)) + "%";
+    PushSize(14);
+    const ImVec2 valueSize = ImGui::CalcTextSize(value.c_str());
+    const ImVec2 valueStart = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddText(valueStart + ImVec2((valueWidth - valueSize.x) / 2, (button - valueSize.y) / 2), kText, value.c_str());
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(valueWidth, button));
+    ImGui::SameLine(0, 0);
+    if (Button("+##larger", ImVec2(button, button), false, m.menuScale < kLargestMenu - 0.01f))
+        step = 0.25f;
+    if (step != 0)
+    {
+        m.menuScale = std::clamp(std::round((m.menuScale + step) * 4) / 4, kSmallestMenu, kLargestMenu);
+        SetMenuScale(m.menuScale);
+    }
+    ImGui::SetCursorPos(ImVec2(x, std::max(bottom, top + S(40)) + S(6)));
+    ImGui::Dummy(ImVec2(0, 0));
+}
+
 void SettingsTab()
 {
     Heading("SHORTCUTS");
@@ -1960,7 +2017,7 @@ void SettingsTab()
 
     ImGui::Dummy(ImVec2(0, S(14)));
     Heading("PRESETS");
-    if (Switch("autosave", m.autoSave))
+    if (SwitchRow("autosave", m.autoSave, "Save changes automatically", "Turn off to try changes first and save them with the icon at the top."))
     {
         m.autoSave = !m.autoSave;
         SetAutoSavePresets(m.autoSave);
@@ -1968,24 +2025,18 @@ void SettingsTab()
         if (m.autoSave && m.unsaved)
             SavePreset();
     }
-    ImGui::SameLine(0, S(12));
-    ImGui::BeginGroup();
-    Text("Save changes automatically", kText, 14.5f);
-    Text("Turn off to try changes first and save them with the icon at the top.", kDim, 13);
-    ImGui::EndGroup();
+
+    ImGui::Dummy(ImVec2(0, S(14)));
+    Heading("MENU");
+    MenuSizeRow();
 
     ImGui::Dummy(ImVec2(0, S(14)));
     Heading("DEBUG");
-    if (Switch("debug_info", m.debugInfo))
+    if (SwitchRow("debug_info", m.debugInfo, "Show debug info", "Captured game FPS, output FPS and frame loss."))
     {
         m.debugInfo = !m.debugInfo;
         SetDebugInfoEnabled(m.debugInfo);
     }
-    ImGui::SameLine(0, S(12));
-    ImGui::BeginGroup();
-    Text("Show debug info", kText, 14.5f);
-    Text("Captured game FPS, output FPS and frame loss.", kDim, 13);
-    ImGui::EndGroup();
 }
 
 // Status
@@ -2260,13 +2311,16 @@ void DrawMenu()
 {
     const ImGuiIO& io = ImGui::GetIO();
     const float width = std::min(S(kWidth), io.DisplaySize.x - S(kMargin) * 2);
-    const ImVec2 size(width, io.DisplaySize.y - S(kMargin) * 2);
+    const float available = std::max(io.DisplaySize.y - S(kMargin) * 2, 1.0f);
+    // A window too short for the menu scrolls all of it, so the text keeps a readable size.
+    const ImVec2 size(width, std::max(available, S(menu_layout::MinHeight())));
+    const bool scrolls = size.y > available;
     ImGui::SetNextWindowPos(ImVec2(S(kMargin), S(kMargin)));
-    ImGui::SetNextWindowSize(size);
+    ImGui::SetNextWindowSize(ImVec2(width, available));
     ImGui::Begin("Unishade##menu", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
-                     ImGuiWindowFlags_NoScrollWithMouse);
-    const ImVec2 origin = ImGui::GetWindowPos();
+                     (scrolls ? ImGuiWindowFlags_None : ImGuiWindowFlags_NoScrollWithMouse));
+    const ImVec2 origin = ImGui::GetWindowPos() - ImVec2(0, ImGui::GetScrollY());
     Header(origin, width);
     Tabs(origin, width);
 
@@ -2284,6 +2338,12 @@ void DrawMenu()
     }
     ImGui::EndChild();
     Footer(origin, size);
+    if (scrolls)
+    {
+        // Lets the window scroll down to the footer.
+        ImGui::SetCursorScreenPos(origin + ImVec2(0, size.y));
+        ImGui::Dummy(ImVec2(0, 0));
+    }
     ImGui::End();
 }
 
@@ -2552,7 +2612,7 @@ void OnOverlay(effect_runtime* runtime)
         return;
 
     const ImVec2 display = ImGui::GetIO().DisplaySize;
-    m.scale = menu_layout::Scale(display.x, display.y);
+    m.scale = menu_layout::Scale(display.x, display.y, m.menuScale);
     if (m.scale <= 0)
         return;
     // The menu's look only applies to its own windows, so ReShade's is restored after.
@@ -2615,6 +2675,7 @@ void InitMenu()
         return;
     m.autoSave = AutoSavePresets();
     m.debugInfo = DebugInfoEnabled();
+    m.menuScale = MenuScale();
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
     reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
