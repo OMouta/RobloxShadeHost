@@ -53,8 +53,8 @@ const others = [
       </dl>
       {note && <p>{note}</p>}
       <p class="dim">
-        Setup isn't code-signed yet, so the first time Windows may say <strong>Windows protected your PC</strong>. Click
-        <strong>More info</strong>, then <strong>Run anyway</strong>.
+        Setup isn't code-signed yet, so the first time Windows may say <strong>Windows protected your PC</strong>.{' '}
+        Click <strong>More info</strong>, then <strong>Run anyway</strong>.
       </p>
       <p>
         {
@@ -93,19 +93,21 @@ const others = [
             <div>
               <dt>{name}</dt>
               <dd>
-                {file ? (
-                  <>
-                    <a href={file.url}>Download for {name}</a> ({file.name}{size(file)}).
-                  </>
-                ) : release.version ? (
-                  <>
-                    Not in {release.version} yet. Look on <a href={links.releases}>GitHub Releases</a>, or{' '}
-                    <a href={links.build}>build it yourself</a>.
-                  </>
-                ) : (
-                  <a href={links.releases}>Download from GitHub Releases</a>
-                )}{' '}
-                Needs {needs}.
+                <p>
+                  {file ? (
+                    <>
+                      <a href={file.url}>Download for {name}</a> ({file.name}{size(file)})
+                    </>
+                  ) : release.version ? (
+                    <>
+                      Not in {release.version} yet. Look on <a href={links.releases}>GitHub Releases</a>, or{' '}
+                      <a href={links.build}>build it yourself</a>.
+                    </>
+                  ) : (
+                    <a href={links.releases}>Download from GitHub Releases</a>
+                  )}
+                </p>
+                <p class="dim">Needs {needs}.</p>
               </dd>
             </div>
           ))
