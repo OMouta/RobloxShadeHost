@@ -4,11 +4,13 @@ description: Download Setup, pick add-ons and start Unishade.
 order: 1
 ---
 
-You need 64-bit Windows 10 version 1903 or newer, or Windows 11.
+You need 64-bit Windows 10 version 1903 or newer, or Windows 11. For a Mac or Linux, see [macOS and Linux](/docs/macos-linux/).
 
 ## Run Setup
 
-[Download Setup](/download/) and run it. Keep the suggested folder or pick your own, as long as it isn't inside a game's folder.
+[Download Setup](/download/) and run it. Keep the suggested folder, `%LOCALAPPDATA%\Programs\Unishade`, or pick your own, as long as it isn't inside a game's folder.
+
+Setup isn't code-signed yet, so the first time Windows may say **Windows protected your PC**. Click **More info**, then **Run anyway**.
 
 ![Setup's first page](./images/setup-welcome.png)
 
@@ -39,7 +41,9 @@ Next, [add your game](/docs/games/#add-a-game).
 
 ## Updating
 
-Only the newest version is supported. When one is out, the Unishade window and the menu's **Status** tab link to it. Run the new Setup and your presets, settings, shortcuts and games stay.
+Only the newest version is supported. On Windows, the Unishade window and the menu's **Status** tab link to a new version when one is out. If you'd rather check yourself, turn off **Check for updates** in the menu's **Settings**. Run the new Setup and your presets, settings, shortcuts and games stay.
+
+On macOS and Linux, Unishade doesn't check for updates. Get new versions from the [download page](/download/#macos-and-linux).
 
 ### Coming from RobloxShadeHost
 
