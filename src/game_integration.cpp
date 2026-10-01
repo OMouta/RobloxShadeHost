@@ -80,10 +80,15 @@ bool MatchesExecutable(const AutoGame& game, const fs::path& executable)
     return _wcsicmp((game.executable.has_parent_path() ? executable : executable.filename()).c_str(), game.executable.c_str()) == 0;
 }
 
+std::vector<AutoGame> DefaultAutoGames()
+{
+    return { { L"RobloxPlayerBeta.exe", L"Roblox" } };
+}
+
 std::vector<AutoGame> LoadAutoGames(const fs::path& path)
 {
     if (!fs::exists(path))
-        return { { L"RobloxPlayerBeta.exe", L"Roblox" } };
+        return DefaultAutoGames();
     std::ifstream input(path, std::ios::binary);
     if (!input)
         throw std::runtime_error("Could not read the saved game list");

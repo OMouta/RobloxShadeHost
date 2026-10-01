@@ -25,6 +25,28 @@ void ShowError(const std::wstring& message)
     MessageBoxW(g.launcher, (message + L"\n\nMore details are in " + LogPath() + L".").c_str(), L"Unishade", MB_ICONERROR);
 }
 
+// A damaged list is kept beside it, since the next change to the list replaces the file.
+void LoadGames()
+{
+    const std::wstring path = ExeDirectory() + L"games.ini";
+    try
+    {
+        g.autoGames = LoadAutoGames(path);
+    }
+    catch (const std::exception& e)
+    {
+        g.autoGames = DefaultAutoGames();
+        if (CopyFileW(path.c_str(), (path + L".damaged").c_str(), FALSE))
+            Report(LogLevel::Warning, L"Your saved games could not be loaded (%hs), so Unishade is using the default list. The old list "
+                                      L"was kept as games.ini.damaged.",
+                   e.what());
+        else
+            Report(LogLevel::Warning, L"Your saved games could not be loaded (%hs), so Unishade is using the default list. Changing "
+                                      L"the list replaces games.ini.",
+                   e.what());
+    }
+}
+
 int Run()
 {
     if (!GraphicsCaptureSession::IsSupported())
@@ -37,14 +59,7 @@ int Run()
     }
 
     LoadInputHotkeys();
-    try
-    {
-        g.autoGames = LoadAutoGames(ExeDirectory() + L"games.ini");
-    }
-    catch (const std::exception& e)
-    {
-        Log(LogLevel::Warning, L"Could not load games.ini: %hs", e.what());
-    }
+    LoadGames();
     if (ReShadeLoaded())
         PrepareReShadeConfig();
     CreateOverlayWindow();

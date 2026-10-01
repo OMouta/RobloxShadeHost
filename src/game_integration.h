@@ -14,6 +14,9 @@ struct AutoGame
     bool enabled = true;
 };
 
+// Roblox, which is detected until the user turns it off.
+std::vector<AutoGame> DefaultAutoGames();
+// The defaults when the file does not exist. Throws when it cannot be read or is damaged.
 std::vector<AutoGame> LoadAutoGames(const std::filesystem::path& path);
 void SaveAutoGames(const std::filesystem::path& path, std::span<const AutoGame> games);
 // Games saved with a folder match that exact file. Games saved by filename, like Roblox, match it in any folder.
