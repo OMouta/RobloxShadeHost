@@ -154,8 +154,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # To start the website workflow.
-      actions: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -207,10 +205,15 @@ jobs:
           SHA256SUMS.txt lists the SHA-256 of each file. To check a download, run `sha256sum -c SHA256SUMS.txt --ignore-missing` in the folder you downloaded to, or compare the output of `Get-FileHash <file>` in PowerShell, or `shasum -a 256 <file>` on a Mac.
           NOTES
           gh release create "$RELEASE_TAG" upload/* --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md
-      # A release made with the workflow's token doesn't start other workflows, so the website's release trigger doesn't
-      # fire. The website is started by hand instead, to point its download buttons at the new files.
+      # Cloudflare builds the site from main, and a release changes nothing there. A release made with the workflow's token
+      # doesn't start other workflows either, so the website workflow's release trigger doesn't fire. The deploy hook
+      # asks Cloudflare to build the site again, to point its download buttons at the new files.
       - name: Update the website
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: gh workflow run pages.yml
+          DEPLOY_HOOK: ${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "::warning::The CLOUDFLARE_DEPLOY_HOOK secret is not set, so Cloudflare was not asked to build the site."
+            exit 0
+          fi
+          curl --fail --silent --show-error --max-time 30 -X POST "$DEPLOY_HOOK" > /dev/null

@@ -2,6 +2,7 @@
   "name": "unishade-site",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.1.2",
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",

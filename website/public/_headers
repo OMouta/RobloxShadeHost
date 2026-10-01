@@ -1,0 +1,12 @@
+# Cloudflare sends these with the site's files. The Content-Security-Policy <meta> Astro puts on each page can't say who
+# may show the site in a frame, so that part is here.
+/*
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+
+# Astro names these files after their content, so a name never gets new content.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
