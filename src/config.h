@@ -74,10 +74,25 @@ void SetAutoSavePresets(bool enabled);
 bool DebugInfoEnabled();
 void SetDebugInfoEnabled(bool enabled);
 
+// The user's size for the menu, on top of the size that follows the game's window, from RobloxShadeHost.ini. 1 unless
+// changed, and kept between 0.75 and 2.
+float MenuScale();
+void SetMenuScale(float scale);
+
+// Whether the host asks GitHub for a newer version when it starts, from RobloxShadeHost.ini. On unless turned off.
+bool UpdateChecksEnabled();
+void SetUpdateChecksEnabled(bool enabled);
+
+// Whether effects stay over the game while another window is in front, from RobloxShadeHost.ini. Off unless turned on.
+bool KeepEffectsVisible();
+void SetKeepEffectsVisible(bool enabled);
+
 // The preset last used in a saved game, relative to the presets folder, from RobloxShadeHost.ini. Empty when the
 // game has none yet.
 std::wstring GamePreset(const std::wstring& game);
 void SetGamePreset(const std::wstring& game, const std::wstring& preset);
+// Forgets the game's preset, such as when the game is removed or renamed.
+void RemoveGamePreset(const std::wstring& game);
 
 // Folder of Unishade.exe, with a trailing backslash.
 std::wstring ExeDirectory();

@@ -754,4 +754,9 @@ std::string UiFont()
             return path;
     return {};
 }
+
+bool DisplayDrmDevice(int64_t&, int64_t&)
+{
+    return false;
+}
 } // namespace platform

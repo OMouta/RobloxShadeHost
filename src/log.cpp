@@ -108,6 +108,13 @@ std::vector<Notice> Notices()
     return shared.notices;
 }
 
+void ClearNotices()
+{
+    std::lock_guard lock(shared.mutex);
+    shared.notices.clear();
+    ++noticeVersion;
+}
+
 unsigned NoticeVersion()
 {
     return noticeVersion;

@@ -32,7 +32,10 @@ void Report(LogLevel level, const wchar_t* format, ...);
 // What Report and warnings and errors have shown so far, oldest first. A repeated message is shown once.
 std::vector<Notice> Notices();
 
-// Changes whenever a notice is added.
+// Forgets the notices shown so far, when the user dismisses them. The log file keeps them.
+void ClearNotices();
+
+// Changes whenever a notice is added or the notices are cleared.
 unsigned NoticeVersion();
 
 const std::wstring& LogPath();

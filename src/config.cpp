@@ -2,6 +2,8 @@
 #include "log.h"
 #include "state.h"
 
+#include <algorithm>
+#include <cwchar>
 #include <iterator>
 
 namespace
@@ -175,6 +177,44 @@ void SetDebugInfoEnabled(bool enabled)
         Log(LogLevel::Warning, L"Could not save the debug info setting to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
+float MenuScale()
+{
+    wchar_t value[32]{};
+    GetPrivateProfileStringW(L"Menu", L"Scale", L"1", value, static_cast<DWORD>(std::size(value)), IniPath().c_str());
+    const float scale = wcstof(value, nullptr);
+    return scale > 0 ? std::clamp(scale, 0.75f, 2.0f) : 1.0f;
+}
+
+void SetMenuScale(float scale)
+{
+    wchar_t value[32]{};
+    swprintf_s(value, L"%.2f", std::clamp(scale, 0.75f, 2.0f));
+    if (!WritePrivateProfileStringW(L"Menu", L"Scale", value, IniPath().c_str()))
+        Log(LogLevel::Warning, L"Could not save the menu size to RobloxShadeHost.ini. It applies until Unishade closes.");
+}
+
+bool UpdateChecksEnabled()
+{
+    return GetPrivateProfileIntW(L"Menu", L"CheckForUpdates", 1, IniPath().c_str()) != 0;
+}
+
+void SetUpdateChecksEnabled(bool enabled)
+{
+    if (!WritePrivateProfileStringW(L"Menu", L"CheckForUpdates", enabled ? L"1" : L"0", IniPath().c_str()))
+        Log(LogLevel::Warning, L"Could not save the update check setting to RobloxShadeHost.ini.");
+}
+
+bool KeepEffectsVisible()
+{
+    return GetPrivateProfileIntW(L"Menu", L"KeepEffectsVisible", 0, IniPath().c_str()) != 0;
+}
+
+void SetKeepEffectsVisible(bool enabled)
+{
+    if (!WritePrivateProfileStringW(L"Menu", L"KeepEffectsVisible", enabled ? L"1" : L"0", IniPath().c_str()))
+        Log(LogLevel::Warning, L"Could not save the effects visibility setting to RobloxShadeHost.ini. It applies until Unishade closes.");
+}
+
 std::wstring GamePreset(const std::wstring& game)
 {
     std::wstring value(32768, L'\0');
@@ -186,6 +226,11 @@ void SetGamePreset(const std::wstring& game, const std::wstring& preset)
 {
     if (!WritePrivateProfileStringW(L"GamePresets", game.c_str(), preset.c_str(), IniPath().c_str()))
         Log(LogLevel::Warning, L"Could not save the preset for %ls to RobloxShadeHost.ini.", game.c_str());
+}
+
+void RemoveGamePreset(const std::wstring& game)
+{
+    WritePrivateProfileStringW(L"GamePresets", game.c_str(), nullptr, IniPath().c_str());
 }
 
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys)

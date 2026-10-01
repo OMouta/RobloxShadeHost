@@ -5,6 +5,7 @@
 
 #include <effect_module.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -84,6 +85,22 @@ struct PresetDefinitions
     bool operator==(const PresetDefinitions&) const = default;
 };
 
+// What effects can read through uniform sources such as "key", "mousebutton" and "overlay_active", and what
+// technique shortcuts react to. Key codes are Windows virtual-key codes, as ReShade's annotations and presets
+// write them. The host fills this in every frame before Render.
+struct EffectInput
+{
+    std::array<bool, 256> keysDown{};
+    std::array<bool, 256> keysPressed{}; // went down since the previous frame
+    std::array<bool, 5> buttonsDown{};   // left, right, middle, back, forward
+    std::array<bool, 5> buttonsPressed{};
+    float cursorDeltaX = 0; // in frame pixels since the previous frame
+    float cursorDeltaY = 0;
+    float wheelDelta = 0;
+    bool overlayActive = false;  // a menu control is being used
+    bool overlayHovered = false; // the cursor is over the menu
+};
+
 // "Name@File.fx", as presets list techniques.
 std::string TechniqueKey(const Technique& technique, const Effect& effect);
 
@@ -156,6 +173,7 @@ public:
     bool menuOpen = false;
     float mouseX = 0;
     float mouseY = 0;
+    EffectInput input;
 
 private:
     struct SharedTexture

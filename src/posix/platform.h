@@ -117,6 +117,10 @@ void PollHotkeys();
 // Opens a folder or a web page with the system's default program.
 void Open(const std::string& target);
 
+// The DRM device the display server draws with, as the major and minor numbers of its primary or render node, so
+// the Vulkan device can be the same GPU. False when unknown, as on macOS.
+bool DisplayDrmDevice(int64_t& major, int64_t& minor);
+
 // A sans-serif font for the menu, or empty to use Dear ImGui's own.
 std::string UiFont();
 } // namespace platform
