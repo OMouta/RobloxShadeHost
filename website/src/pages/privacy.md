@@ -21,6 +21,6 @@ What those sites do with a request is up to their own privacy policies.
 
 ## This website
 
-unishade.me is hosted on GitHub Pages, so GitHub sees your IP address when you visit and handles it as [GitHub's privacy statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement) says. The site itself has no cookies, analytics or trackers. The download buttons link to files on GitHub.
+unishade.me is hosted on GitHub Pages, so GitHub sees your IP address when you visit and handles it as [GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) says. The site itself has no cookies, analytics or trackers. The download buttons link to files on GitHub.
 
 Questions go to [tiago@mouta.me](mailto:tiago@mouta.me).
