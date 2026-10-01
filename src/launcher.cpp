@@ -15,6 +15,7 @@ using std::min;
 #include "capture.h"
 #include "config.h"
 #include "log.h"
+#include "overlay.h"
 #include "resource.h"
 #include "shell.h"
 #include "state.h"
@@ -56,7 +57,21 @@ enum Timer : UINT_PTR
 {
     kUndoTimer = 1,
     kTipTimer,
+    kTrayTimer,
 };
+
+// Sent to the launcher by its notification area icon.
+constexpr UINT kTrayMessage = WM_APP + 16;
+constexpr UINT kTrayIcon = 1;
+
+enum TrayCommand : UINT
+{
+    kOpenCommand = 1,
+    kEffectsCommand,
+    kQuitCommand,
+};
+
+constexpr wchar_t kTrayNote[] = L"Minimize to keep the effects running from the notification area. Closing Unishade turns them off.";
 
 enum class Action
 {
@@ -219,6 +234,7 @@ struct Launcher
     RECT noticesTitle{};
     std::vector<Row> rows;
     int footer = 0;
+    RECT trayNote{};
     std::vector<Target> targets;
     int hovered = -1;
     bool tracking = false;
@@ -244,6 +260,11 @@ struct Launcher
     bool pickerTracking = false;
     HWND pickerPressed = nullptr; // the window whose row the click was pressed on
     HWND pickerFocus = nullptr;   // the window whose row has the keyboard focus
+
+    // Explorer forgets the notification area icon when it restarts, and then sends TaskbarCreated.
+    UINT taskbarCreated = 0;
+    HICON trayIcon = nullptr;
+    bool trayAdded = false;
 };
 Launcher l;
 // The scaling of the window being laid out or painted, which P, F and the fonts follow.
@@ -657,9 +678,11 @@ void Layout(HDC dc)
         y += P(8);
     }
 
-    // The links stay at the bottom of the window when the content is shorter.
-    l.footer = std::max(y, P(kMinHeight) - P(51) - l.scroll);
-    int linkY = l.footer + P(15);
+    // The footer stays at the bottom of the window when the content is shorter.
+    const int noteHeight = TextHeight(dc, ui->note, kTrayNote, right - pad);
+    l.footer = std::max(y, P(kMinHeight) - (P(14) + noteHeight + P(12) + P(20) + P(16)) - l.scroll);
+    l.trayNote = { pad, l.footer + P(14), right, l.footer + P(14) + noteHeight };
+    int linkY = l.trayNote.bottom + P(12);
     int x = pad;
     const auto link = [&](Action action, const wchar_t* label) {
         const int linkWidth = TextWidth(dc, ui->body, label);
@@ -1090,6 +1113,7 @@ void Paint(HDC output)
         PaintText(dc, ui->body, theme::kDim, L"No games yet. Open one and click Add game.", Inset(l.list, P(18)),
                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
+    PaintText(dc, ui->note, theme::kDim, kTrayNote, l.trayNote);
     if (!l.rows.empty())
         PaintText(dc, ui->semibold, theme::kText, L"Messages", l.noticesTitle, DT_SINGLELINE | DT_VCENTER);
     for (const Row& row : l.rows)
@@ -1473,6 +1497,90 @@ void Choose(size_t index)
     Refresh();
 }
 
+NOTIFYICONDATAW TrayData()
+{
+    NOTIFYICONDATAW data{ sizeof(data) };
+    data.hWnd = g.launcher;
+    data.uID = kTrayIcon;
+    return data;
+}
+
+// Shows Unishade in the notification area while it runs. Tried again later when the notification area is not
+// ready, such as right after signing in.
+void AddTrayIcon()
+{
+    if (!l.trayIcon)
+        l.trayIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                                   GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    NOTIFYICONDATAW data = TrayData();
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    data.uCallbackMessage = kTrayMessage;
+    data.hIcon = l.trayIcon;
+    wcscpy_s(data.szTip, std::size(data.szTip), L"Unishade");
+    // TaskbarCreated also comes when the taskbar's scaling changes, while the icon is still there.
+    Shell_NotifyIconW(NIM_DELETE, &data);
+    l.trayAdded = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+    if (l.trayAdded)
+    {
+        data.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &data);
+    }
+    else
+        SetTimer(g.launcher, kTrayTimer, 5000, nullptr);
+}
+
+void RemoveTrayIcon()
+{
+    if (l.trayAdded)
+    {
+        NOTIFYICONDATAW data = TrayData();
+        Shell_NotifyIconW(NIM_DELETE, &data);
+        l.trayAdded = false;
+    }
+    if (l.trayIcon)
+        DestroyIcon(l.trayIcon);
+    l.trayIcon = nullptr;
+}
+
+// Brings the launcher back from the notification area or the taskbar.
+void ShowLauncher()
+{
+    if (!IsWindowVisible(g.launcher) || IsIconic(g.launcher))
+        ShowWindow(g.launcher, SW_RESTORE);
+    SetForegroundWindow(l.pickerWindow ? l.pickerWindow : g.launcher);
+}
+
+void TrayMenu(int x, int y)
+{
+    const HMENU menu = CreatePopupMenu();
+    if (!menu)
+        return;
+    AppendMenuW(menu, MF_STRING, kOpenCommand, L"Open Unishade");
+    AppendMenuW(menu, MF_STRING | (g.captureEnabled ? MF_CHECKED : MF_UNCHECKED), kEffectsCommand, L"Show effects");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kQuitCommand, L"Quit");
+    SetMenuDefaultItem(menu, kOpenCommand, FALSE);
+    // Otherwise the menu stays open when clicking elsewhere.
+    SetForegroundWindow(g.launcher);
+    const UINT align = GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN;
+    const UINT command =
+        static_cast<UINT>(TrackPopupMenuEx(menu, align | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, x, y, g.launcher, nullptr));
+    PostMessageW(g.launcher, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    switch (command)
+    {
+    case kOpenCommand:
+        ShowLauncher();
+        break;
+    case kEffectsCommand:
+        ToggleOverlay();
+        break;
+    case kQuitCommand:
+        DestroyWindow(g.launcher);
+        break;
+    }
+}
+
 // Scrolls the launcher so a control is in view.
 void ScrollTo(RECT rect)
 {
@@ -1703,6 +1811,11 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (message == l.taskbarCreated && l.taskbarCreated)
+    {
+        AddTrayIcon();
+        return 0;
+    }
     switch (message)
     {
     case WM_PAINT:
@@ -1804,6 +1917,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             ForgetRemoved();
             Refresh();
         }
+        else if (wParam == kTrayTimer)
+        {
+            KillTimer(hwnd, kTrayTimer);
+            AddTrayIcon();
+        }
         else if (wParam == kTipTimer)
         {
             KillTimer(hwnd, kTipTimer);
@@ -1822,10 +1940,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         const bool restored = l.minimized && wParam != SIZE_MINIMIZED;
         l.minimized = wParam == SIZE_MINIMIZED;
+        // Minimized, it waits in the notification area while the effects keep running.
+        if (l.minimized && l.trayAdded)
+        {
+            ClosePicker();
+            ShowWindow(hwnd, SW_HIDE);
+        }
         if (restored)
             Refresh();
         return 0;
     }
+    case kTrayMessage:
+        switch (LOWORD(lParam))
+        {
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+            ShowLauncher();
+            break;
+        case WM_CONTEXTMENU:
+            TrayMenu(static_cast<short>(LOWORD(wParam)), static_cast<short>(HIWORD(wParam)));
+            break;
+        }
+        return 0;
     case WM_DPICHANGED:
     {
         Scale(l.launcherScaling, HIWORD(wParam));
@@ -1837,6 +1973,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_DESTROY:
+        RemoveTrayIcon();
         g.launcher = nullptr;
         PostQuitMessage(0);
         return 0;
@@ -1876,10 +2013,15 @@ void CreateLauncher()
     wc.lpszClassName = kPickerClass;
     RegisterClassExW(&wc);
     constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    l.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     g.launcher = CreateWindowExW(0, kLauncherClass, L"Unishade", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr,
                                  wc.hInstance, nullptr);
     winrt::check_bool(g.launcher != nullptr);
     DarkFrame(g.launcher);
+    // Explorer runs without administrator rights, so Unishade running with them must accept its messages.
+    ChangeWindowMessageFilterEx(g.launcher, l.taskbarCreated, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(g.launcher, kTrayMessage, MSGFLT_ALLOW, nullptr);
+    AddTrayIcon();
 
     Scale(l.launcherScaling, GetDpiForWindow(g.launcher));
     Refresh();
