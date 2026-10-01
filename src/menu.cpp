@@ -747,7 +747,7 @@ void RequestEffectCheck()
         reshade::get_config_value(m.runtime, "GENERAL", "EffectSearchPaths", value.data(), &size);
         value.resize(std::min(size, value.size()));
         // One path after another, each ended by a zero.
-        for (size_t start = 0, end; start < value.size(); start = end + 1)
+        for (size_t start = 0, end = 0; start < value.size(); start = end + 1)
         {
             end = std::min(value.find('\0', start), value.size());
             if (end > start)
@@ -1096,7 +1096,7 @@ bool ReservedName(const std::wstring& name)
         if (_wcsicmp(base.c_str(), reserved) == 0)
             return true;
     const bool port = base.size() == 4 && (_wcsnicmp(base.c_str(), L"COM", 3) == 0 || _wcsnicmp(base.c_str(), L"LPT", 3) == 0);
-    return port && ((base[3] >= L'0' && base[3] <= L'9') || base[3] == L'¹' || base[3] == L'²' || base[3] == L'³');
+    return port && ((base[3] >= L'0' && base[3] <= L'9') || base[3] == L'\u00B9' || base[3] == L'\u00B2' || base[3] == L'\u00B3');
 }
 
 // Why a name typed for a preset or folder cannot be used, or empty when it can. Trims spaces from both ends first.
@@ -1249,8 +1249,8 @@ bool SetPreset(const fs::path& preset)
         m.leftBehind = { left, GetTickCount64() };
         // ReShade cannot write the preset it left when its folder is gone, such as after the launcher renamed the
         // game, and reports that until it loads a preset again.
-        std::error_code error;
-        m.reloadAfterWrite = !left.empty() && !fs::is_directory(left.parent_path(), error);
+        if (std::error_code error; !left.empty() && !fs::is_directory(left.parent_path(), error))
+            m.reloadAfterWrite = true;
     }
     return SamePath(m.current, preset);
 }
@@ -3595,12 +3595,6 @@ void UpdateFrame(bool menu)
     for (PendingWrite* write : { &m.unwritten, &m.leftBehind })
         if (!write->preset.empty() && m.lastFrame > write->since + kReShadeWriteDelay)
             *write = {};
-    // The values on screen are the ones loading gives, unless there are changes the reload would drop.
-    if (m.reloadAfterWrite && m.leftBehind.preset.empty() && !m.unsaved && !m.presetChanged)
-    {
-        m.reloadAfterWrite = false;
-        m.runtime->set_current_preset_path(Utf8(m.current.wstring()).c_str());
-    }
     m.lastFrame = GetTickCount64();
     // ReShade's own menu and shortcuts can switch presets too, saving the one they leave.
     if (const fs::path current = CurrentPreset(); !SamePath(current, m.current))
@@ -3608,6 +3602,12 @@ void UpdateFrame(bool menu)
         m.leftBehind = { m.current, m.lastFrame };
         m.current = current;
         m.foldersDirty = true;
+    }
+    // The values on screen are the ones loading gives, unless there are changes the reload would drop.
+    if (m.reloadAfterWrite && m.leftBehind.preset.empty() && !m.unsaved && !m.presetChanged)
+    {
+        m.reloadAfterWrite = false;
+        m.runtime->set_current_preset_path(Utf8(m.current.wstring()).c_str());
     }
     TakeScan();
     FinishDelete();
