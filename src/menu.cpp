@@ -1067,82 +1067,102 @@ bool ApplyName(const fs::path& current)
     return true;
 }
 
-void NamePopup(const fs::path& current)
+// A dialog in the middle of the screen, opened when open is set. Call EndDialog when this returns true.
+bool BeginDialog(const char* id, bool& open, float width)
 {
-    if (m.openNamePopup)
+    if (open)
     {
-        ImGui::OpenPopup("##name");
-        m.openNamePopup = false;
+        ImGui::OpenPopup(id);
+        open = false;
     }
     const ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(S(380), 0));
+    ImGui::SetNextWindowSize(ImVec2(S(width), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(20), S(18)));
-    if (ImGui::BeginPopupModal("##name", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        const char* titles[] = { "New preset", "Duplicate preset", "Rename preset", "Save as new preset", "Move to a new folder" };
-        const char* actions[] = { "Create", "Duplicate", "Rename", "Save", "Move" };
-        const int action = static_cast<int>(m.nameAction);
-        Text(titles[action], kText, 16.5f);
-        if (m.nameAction == NameAction::New)
-            Text("Starts with every effect off.", kDim, 13.5f);
-        if (ImGui::IsWindowAppearing())
-            ImGui::SetKeyboardFocusHere();
-        ImGui::SetNextItemWidth(-FLT_MIN);
-        const bool enter = ImGui::InputText("##value", m.name, sizeof(m.name), ImGuiInputTextFlags_EnterReturnsTrue);
-        if (!m.nameError.empty())
-            Text(m.nameError, kError, 13.5f);
-        ImGui::Dummy(ImVec2(0, S(2)));
-        const float buttonWidth = S(100);
-        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - S(20) - buttonWidth * 2 - S(8));
-        const bool cancel = Button("Cancel", ImVec2(buttonWidth, S(32)));
-        ImGui::SameLine(0, S(8));
-        if ((Button(actions[action], ImVec2(buttonWidth, S(32)), true) || enter) && ApplyName(current))
-            ImGui::CloseCurrentPopup();
-        if (cancel || ImGui::IsKeyPressed(ImGuiKey_Escape))
-            ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
+    if (ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize))
+        return true;
+    ImGui::PopStyleVar();
+    return false;
+}
+
+void EndDialog()
+{
+    ImGui::EndPopup();
     ImGui::PopStyleVar();
 }
 
-void DeletePopup()
+// The dialog's title and the line below it.
+void DialogText(const std::string& title, const std::string& detail)
 {
-    if (m.openDeletePopup)
+    Text(title, kText, 16.5f);
+    if (!detail.empty())
+        Text(detail, kDim, 13.5f);
+}
+
+// The dialog's buttons, on the right with the last one primary. Returns the index of the one clicked, or -1.
+int DialogButtons(std::initializer_list<const char*> labels, bool primaryEnabled = true)
+{
+    ImGui::Dummy(ImVec2(0, S(2)));
+    const float buttonWidth = S(100);
+    const int count = static_cast<int>(labels.size());
+    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - S(20) - buttonWidth * count - S(8) * (count - 1));
+    int clicked = -1;
+    int index = 0;
+    for (const char* label : labels)
     {
-        ImGui::OpenPopup("##delete");
-        m.openDeletePopup = false;
+        if (index)
+            ImGui::SameLine(0, S(8));
+        const bool primary = index == count - 1;
+        if (Button(label, ImVec2(buttonWidth, S(32)), primary, !primary || primaryEnabled))
+            clicked = index;
+        ++index;
     }
-    const ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(S(380), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(20), S(18)));
-    if (ImGui::BeginPopupModal("##delete", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize))
+    return clicked;
+}
+
+void NameDialog(const fs::path& current)
+{
+    if (!BeginDialog("##name", m.openNamePopup, 380))
+        return;
+    const char* titles[] = { "New preset", "Duplicate preset", "Rename preset", "Save as new preset", "Move to a new folder" };
+    const char* actions[] = { "Create", "Duplicate", "Rename", "Save", "Move" };
+    const int action = static_cast<int>(m.nameAction);
+    DialogText(titles[action], m.nameAction == NameAction::New ? "Starts with every effect off." : "");
+    if (ImGui::IsWindowAppearing())
+        ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    const bool enter = ImGui::InputText("##value", m.name, sizeof(m.name), ImGuiInputTextFlags_EnterReturnsTrue);
+    if (!m.nameError.empty())
+        Text(m.nameError, kError, 13.5f);
+    const int clicked = DialogButtons({ "Cancel", actions[action] });
+    if ((clicked == 1 || enter) && ApplyName(current))
+        ImGui::CloseCurrentPopup();
+    if (clicked == 0 || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        ImGui::CloseCurrentPopup();
+    EndDialog();
+}
+
+void DeleteDialog()
+{
+    if (!BeginDialog("##delete", m.openDeletePopup, 380))
+        return;
+    DialogText("Delete " + Utf8(m.deleteTarget.stem().wstring()) + "?", "The preset goes to the Recycle Bin.");
+    if (!m.deleteError.empty())
+        Text(m.deleteError, kError, 13.5f);
+    const int clicked = DialogButtons({ "Cancel", "Delete" });
+    if (clicked == 1)
     {
-        Text("Delete " + Utf8(m.deleteTarget.stem().wstring()) + "?", kText, 16.5f);
-        Text("The preset goes to the Recycle Bin.", kDim, 13.5f);
-        if (!m.deleteError.empty())
-            Text(m.deleteError, kError, 13.5f);
-        ImGui::Dummy(ImVec2(0, S(2)));
-        const float buttonWidth = S(100);
-        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - S(20) - buttonWidth * 2 - S(8));
-        const bool cancel = Button("Cancel", ImVec2(buttonWidth, S(32)));
-        ImGui::SameLine(0, S(8));
-        if (Button("Delete", ImVec2(buttonWidth, S(32)), true))
+        if (Recycle(m.deleteTarget.wstring()))
         {
-            if (Recycle(m.deleteTarget.wstring()))
-            {
-                m.presetsScanned = 0;
-                ImGui::CloseCurrentPopup();
-            }
-            else
-                m.deleteError = "Windows could not delete the preset.";
-        }
-        if (cancel || ImGui::IsKeyPressed(ImGuiKey_Escape))
+            m.presetsScanned = 0;
             ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
+        }
+        else
+            m.deleteError = "Windows could not delete the preset.";
     }
-    ImGui::PopStyleVar();
+    if (clicked == 0 || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        ImGui::CloseCurrentPopup();
+    EndDialog();
 }
 
 // The folders a preset can move to: the ones listed, then saved games that have no presets yet.
@@ -1335,45 +1355,33 @@ void FolderSection(const PresetFolder& folder, const fs::path& current)
 }
 
 // Asks what to do with unsaved changes when switching presets. The switch waits for the answer.
-void UnsavedPopup(const fs::path& current)
+void UnsavedDialog(const fs::path& current)
 {
-    if (m.openUnsavedPopup)
+    if (!BeginDialog("##unsaved", m.openUnsavedPopup, 420))
     {
-        ImGui::OpenPopup("##unsaved");
-        m.openUnsavedPopup = false;
+        // ImGui closes the dialog while the menu is hidden, so a switch still waiting asks again.
+        m.askingUnsaved = false;
+        return;
     }
-    const ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(S(420), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(20), S(18)));
-    if (ImGui::BeginPopupModal("##unsaved", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize))
+    DialogText("Save your changes to " + Utf8(current.stem().wstring()) + "?", "Discarding goes back to how the preset was last saved.");
+    const int clicked = DialogButtons({ "Discard", "Cancel", "Save" });
+    if (clicked == 0)
+        m.unsavedChoice = UnsavedChoice::Discard;
+    else if (clicked == 1 || ImGui::IsKeyPressed(ImGuiKey_Escape))
     {
-        Text("Save your changes to " + Utf8(current.stem().wstring()) + "?", kText, 16.5f);
-        Text("Discarding goes back to how the preset was last saved.", kDim, 13.5f);
-        ImGui::Dummy(ImVec2(0, S(2)));
-        const float buttonWidth = S(100);
-        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - S(20) - buttonWidth * 3 - S(16));
-        if (Button("Discard", ImVec2(buttonWidth, S(32))))
-            m.unsavedChoice = UnsavedChoice::Discard;
-        ImGui::SameLine(0, S(8));
-        if (Button("Cancel", ImVec2(buttonWidth, S(32))) || ImGui::IsKeyPressed(ImGuiKey_Escape))
-        {
-            m.pendingPreset.clear();
-            m.saveNewPreset = false;
-            m.pendingKeepsEdits = false;
-        }
-        ImGui::SameLine(0, S(8));
-        if (Button("Save", ImVec2(buttonWidth, S(32)), true))
-            m.unsavedChoice = UnsavedChoice::Save;
-        // Answered, or the menu closed and dropped the switch.
-        if (m.unsavedChoice != UnsavedChoice::Ask || m.pendingPreset.empty())
-        {
-            m.askingUnsaved = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
+        m.pendingPreset.clear();
+        m.saveNewPreset = false;
+        m.pendingKeepsEdits = false;
     }
-    ImGui::PopStyleVar();
+    else if (clicked == 2)
+        m.unsavedChoice = UnsavedChoice::Save;
+    // Answered, or the menu closed and dropped the switch.
+    if (m.unsavedChoice != UnsavedChoice::Ask || m.pendingPreset.empty())
+    {
+        m.askingUnsaved = false;
+        ImGui::CloseCurrentPopup();
+    }
+    EndDialog();
 }
 
 void LoadTechniques();
@@ -1422,9 +1430,6 @@ void PresetsTab()
     if (Link("Open presets folder"))
         ShellOpen(PresetsRoot(current).wstring());
     ImGui::PopFont();
-    NamePopup(current);
-    DeletePopup();
-    UnsavedPopup(current);
 }
 
 // Effects
@@ -2338,6 +2343,11 @@ void DrawMenu()
     }
     ImGui::EndChild();
     Footer(origin, size);
+    // Dialogs show over any tab.
+    const fs::path current = CurrentPreset();
+    NameDialog(current);
+    DeleteDialog();
+    UnsavedDialog(current);
     if (scrolls)
     {
         // Lets the window scroll down to the footer.
@@ -2751,6 +2761,8 @@ void ResetMenu()
     m.saveNewPreset = false;
     m.pendingKeepsEdits = false;
     m.unsavedChoice = UnsavedChoice::Ask;
+    m.askingUnsaved = false;
+    m.openUnsavedPopup = false;
 }
 
 LPCWSTR MenuCursor()
