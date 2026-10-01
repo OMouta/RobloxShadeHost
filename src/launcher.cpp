@@ -71,6 +71,13 @@ enum TrayCommand : UINT
     kQuitCommand,
 };
 
+// Windows starts Unishade at sign-in with this entry, giving it kMinimizedFlag.
+constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+// Task Manager's Startup apps turn entries off here, without removing them.
+constexpr wchar_t kStartupApprovedKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+constexpr wchar_t kRunValue[] = L"Unishade";
+constexpr wchar_t kMinimizedFlag[] = L"--minimized";
+
 constexpr wchar_t kTrayNote[] = L"Minimize to keep the effects running from the notification area. Closing Unishade turns them off.";
 
 enum class Action
@@ -87,6 +94,7 @@ enum class Action
     UndoRemove,
     DismissNotices,
     OpenUrl,
+    StartWithWindows,
 };
 
 enum class Look
@@ -95,6 +103,7 @@ enum class Look
     Button,
     PrimaryButton,
     Switch,
+    Setting, // a switch with its label after it
     Remove,
 };
 
@@ -217,6 +226,7 @@ struct Launcher
     fs::path activeExecutable;
     Update update;
     std::wstring setup;
+    bool startWithWindows = false;
     std::vector<Entry> entries;
 
     // Layout in client pixels, moved up by scroll.
@@ -428,6 +438,74 @@ void LocateGames()
     CloseHandle(snapshot);
 }
 
+// What Windows runs at sign-in: this exe, starting in the notification area.
+std::wstring StartCommand()
+{
+    std::wstring path(32768, L'\0');
+    path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
+    return L"\"" + path + L"\" " + kMinimizedFlag;
+}
+
+// Only while the entry starts this exe, so it shows off after Unishade moves, until it is turned on again.
+bool StartsWithWindows()
+{
+    std::wstring command(32768, L'\0');
+    DWORD size = static_cast<DWORD>(command.size() * sizeof(wchar_t));
+    if (RegGetValueW(HKEY_CURRENT_USER, kRunKey, kRunValue, RRF_RT_REG_SZ, nullptr, command.data(), &size) != ERROR_SUCCESS ||
+        _wcsicmp(command.c_str(), StartCommand().c_str()) != 0)
+        return false;
+    // The first byte is odd when Task Manager turned it off.
+    BYTE approved[64]{};
+    size = sizeof(approved);
+    return RegGetValueW(HKEY_CURRENT_USER, kStartupApprovedKey, kRunValue, RRF_RT_REG_BINARY, nullptr, approved, &size) != ERROR_SUCCESS ||
+           !(approved[0] & 1);
+}
+
+void SetStartWithWindows(bool start)
+{
+    LSTATUS status = ERROR_SUCCESS;
+    if (start)
+    {
+        const std::wstring command = StartCommand();
+        HKEY key = nullptr;
+        status = RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
+        if (status == ERROR_SUCCESS)
+        {
+            status = RegSetValueExW(key, kRunValue, 0, REG_SZ, reinterpret_cast<const BYTE*>(command.c_str()),
+                                    static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(key);
+        }
+        // Turned on here, it should not stay off in Task Manager.
+        if (status == ERROR_SUCCESS)
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, kStartupApprovedKey, kRunValue);
+    }
+    else
+    {
+        status = RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, kRunValue);
+        if (status == ERROR_FILE_NOT_FOUND)
+            status = ERROR_SUCCESS;
+    }
+    if (status != ERROR_SUCCESS)
+        Log(LogLevel::Warning, L"Could not change whether Unishade starts with Windows (error %ld).", status);
+    else
+        Log(LogLevel::Info, start ? L"Unishade starts with Windows." : L"Unishade no longer starts with Windows.");
+}
+
+// Whether Windows started Unishade at sign-in, which starts it in the notification area.
+bool StartedWithWindows()
+{
+    int count = 0;
+    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!arguments)
+        return false;
+    bool found = false;
+    for (int i = 1; i < count; ++i)
+        if (_wcsicmp(arguments[i], kMinimizedFlag) == 0)
+            found = true;
+    LocalFree(arguments);
+    return found;
+}
+
 void Describe()
 {
     l.activeExecutable = g.activeGame ? Executable(g.activeGame->processId) : fs::path{};
@@ -488,6 +566,7 @@ void Describe()
         removed(l.removed->index);
 
     l.update = AvailableUpdate();
+    l.startWithWindows = StartsWithWindows();
     const std::wstring setup = ExeDirectory() + L"Unishade-Setup.exe";
     l.setup = GetFileAttributesW(setup.c_str()) != INVALID_FILE_ATTRIBUTES ? setup : L"";
 }
@@ -680,8 +759,12 @@ void Layout(HDC dc)
 
     // The footer stays at the bottom of the window when the content is shorter.
     const int noteHeight = TextHeight(dc, ui->note, kTrayNote, right - pad);
-    l.footer = std::max(y, P(kMinHeight) - (P(14) + noteHeight + P(12) + P(20) + P(16)) - l.scroll);
-    l.trayNote = { pad, l.footer + P(14), right, l.footer + P(14) + noteHeight };
+    l.footer = std::max(y, P(kMinHeight) - (P(14) + P(24) + P(8) + noteHeight + P(12) + P(20) + P(16)) - l.scroll);
+    const int settingTop = l.footer + P(14);
+    const wchar_t* start = L"Start with Windows";
+    l.targets.push_back({ { pad, settingTop, pad + P(36) + P(10) + TextWidth(dc, ui->body, start), settingTop + P(24) }, Action::StartWithWindows,
+                          Look::Setting, 0, start, l.startWithWindows });
+    l.trayNote = { pad, settingTop + P(24) + P(8), right, settingTop + P(24) + P(8) + noteHeight };
     int linkY = l.trayNote.bottom + P(12);
     int x = pad;
     const auto link = [&](Action action, const wchar_t* label) {
@@ -886,6 +969,13 @@ void StatusIcon(Gdiplus::Graphics& graphics)
     graphics.FillEllipse(&solid, dot.X - F(4.5f), dot.Y - F(4.5f), F(9.0f), F(9.0f));
 }
 
+// The switch of a setting, before its label.
+RECT SettingSwitch(const RECT& setting)
+{
+    const int middle = (setting.top + setting.bottom) / 2;
+    return { setting.left, middle - P(10), setting.left + P(36), middle + P(10) };
+}
+
 void Switch(Gdiplus::Graphics& graphics, const RECT& rect, bool on, bool hovered)
 {
     const unsigned track = on ? (hovered ? theme::kAccentHover : theme::kAccent) : (hovered ? theme::kBorderStrong : theme::kBorder);
@@ -1056,6 +1146,9 @@ void Paint(HDC output)
             case Look::Switch:
                 Switch(graphics, target.rect, target.on, hovered);
                 break;
+            case Look::Setting:
+                Switch(graphics, SettingSwitch(target.rect), target.on, hovered);
+                break;
             case Look::Remove:
                 RemoveIcon(graphics, target.rect, hovered);
                 break;
@@ -1139,6 +1232,12 @@ void Paint(HDC output)
         case Look::PrimaryButton:
             PaintText(dc, ui->strong, 0xFFFFFF, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             break;
+        case Look::Setting:
+        {
+            const RECT label{ SettingSwitch(target.rect).right + P(10), target.rect.top, target.rect.right, target.rect.bottom };
+            PaintText(dc, ui->body, theme::kText, target.label, label, DT_SINGLELINE | DT_VCENTER);
+            break;
+        }
         default:
             break;
         }
@@ -1483,6 +1582,9 @@ void Run(const Target& target)
         break;
     case Action::DismissNotices:
         ClearNotices();
+        break;
+    case Action::StartWithWindows:
+        SetStartWithWindows(!l.startWithWindows);
         break;
     }
     Refresh();
@@ -2035,7 +2137,11 @@ void CreateLauncher()
     const int height = window.bottom - window.top;
     SetWindowPos(g.launcher, nullptr, (monitor.rcWork.left + monitor.rcWork.right - width) / 2,
                  (monitor.rcWork.top + monitor.rcWork.bottom - height) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    ShowWindow(g.launcher, SW_SHOWNORMAL);
+    // Started with Windows, it waits in the notification area, or on the taskbar until there is one.
+    if (!StartedWithWindows())
+        ShowWindow(g.launcher, SW_SHOWNORMAL);
+    else if (!l.trayAdded)
+        ShowWindow(g.launcher, SW_SHOWMINNOACTIVE);
 }
 
 void UpdateLauncher()
