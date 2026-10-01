@@ -164,6 +164,15 @@ enum class NameAction
     NewFolder,
 };
 
+// A preset ReShade saved into its cache, which it writes to disk from its present once a second has passed since.
+constexpr ULONGLONG kReShadeWriteDelay = 1100;
+
+struct PendingWrite
+{
+    fs::path preset;
+    ULONGLONG since = 0;
+};
+
 // What to do with unsaved changes before switching presets.
 enum class UnsavedChoice
 {
@@ -229,6 +238,12 @@ struct Menu
     bool askingUnsaved = false;
     // Set when the changes went into the preset being switched to, so the one left behind is reverted.
     bool pendingKeepsEdits = false;
+    // Saved changes to the active preset that only ReShade's cache holds yet, and the preset switched away from,
+    // which ReShade saves on the switch. Renaming, moving or deleting that one waits for ReShade's write, or ReShade
+    // would write it back where it was.
+    PendingWrite unwritten;
+    PendingWrite leftBehind;
+    ULONGLONG lastFrame = 0;
 
     // The active preset, read from ReShade at the start of every frame and after every switch.
     fs::path current;
@@ -247,6 +262,9 @@ struct Menu
     DWORD gameProcess = 0;
     std::wstring game;
     fs::path gamePreset;
+    // The game's preset, when switching to it waits for the changes to the preset in followFrom.
+    fs::path followPreset;
+    fs::path followFrom;
     // Switching presets can reload effects, so it waits until the frame is drawn.
     fs::path pendingPreset;
     bool saveNewPreset = false;
@@ -1023,19 +1041,76 @@ void UpdateGamePresets(const fs::path& from, const fs::path& to)
     }
 }
 
-void SavePreset()
+// Saves the runtime's values into ReShade's cache of the active preset.
+void SaveToCache()
 {
     m.runtime->save_current_preset();
+    m.unwritten = { m.current, GetTickCount64() };
+}
+
+void SavePreset()
+{
+    SaveToCache();
     m.presetChanged = false;
     m.unsaved = false;
+}
+
+// Whether ReShade has effects loaded. It lists none while loading them, when a saved preset would lose them.
+bool EffectsLoaded()
+{
+    bool any = false;
+    m.runtime->enumerate_techniques(nullptr, [&any](effect_runtime*, effect_technique) { any = true; });
+    return any;
+}
+
+// Writes the active preset to disk now instead of from a later present. ReShade only writes at once when exporting
+// to a file outside its cache, so the preset is exported beside itself and moved over it. Only done while the
+// values on screen are the saved ones.
+void WriteActivePreset()
+{
+    if (m.unwritten.preset.empty() || !SamePath(m.unwritten.preset, m.current) || m.unsaved || m.presetChanged || !EffectsLoaded())
+        return;
+    const fs::path& preset = m.current;
+    fs::path temporary = preset;
+    temporary += L".unishade";
+    std::error_code error;
+    // Starting from the file keeps what ReShade only writes for effects that are on, like settings of others.
+    if (fs::exists(preset, error))
+        fs::copy_file(preset, temporary, fs::copy_options::overwrite_existing, error);
+    else
+        fs::remove(temporary, error);
+    if (error)
+        return;
+    m.runtime->export_current_preset(Utf8(temporary.wstring()).c_str());
+    fs::rename(temporary, preset, error);
+    if (error)
+    {
+        fs::remove(temporary, error);
+        return;
+    }
+    m.unwritten = {};
+    // ReShade still writes the same values from its cache later. Saving into the cache again dates them after this
+    // file, which ReShade would otherwise take for a change made elsewhere and report that it could not save.
+    m.runtime->save_current_preset();
+}
+
+// Whether ReShade has yet to write a preset that is not the active one.
+bool WritePending(const fs::path& preset)
+{
+    return SamePath(m.leftBehind.preset, preset) || (SamePath(m.unwritten.preset, preset) && !SamePath(preset, m.current));
 }
 
 // Switches ReShade to a preset. Returns false when ReShade did not, such as for a file that is not a preset.
 bool SetPreset(const fs::path& preset)
 {
+    // ReShade saves the preset it leaves into its cache. Writing it first keeps the file right meanwhile.
+    WriteActivePreset();
+    const fs::path left = m.current;
     m.runtime->set_current_preset_path(Utf8(preset.wstring()).c_str());
     m.current = CurrentPreset();
     m.foldersDirty = true;
+    if (!SamePath(m.current, left))
+        m.leftBehind = { left, GetTickCount64() };
     return SamePath(m.current, preset);
 }
 
@@ -1109,7 +1184,7 @@ SwitchResult SwitchNow(const fs::path& target)
 // is remembered for it. Only presets in the presets folder are remembered.
 void FollowGame()
 {
-    const fs::path& current = m.current;
+    const fs::path current = m.current;
     const DWORD process = g.activeGame ? g.activeGame->processId : 0;
     if (process == m.gameProcess)
     {
@@ -1119,11 +1194,21 @@ void FollowGame()
             if (const std::wstring relative = LibraryPath(current); !relative.empty())
                 SetGamePreset(m.game, relative);
         }
+        // The game's preset follows once the changes that held it up are saved, unless another preset was picked.
+        if (!m.followPreset.empty() && !SamePath(current, m.followFrom))
+            m.followPreset.clear();
+        else if (!m.followPreset.empty() && !m.unsaved && !(m.presetChanged && !m.autoSave))
+        {
+            const fs::path preset = std::exchange(m.followPreset, {});
+            if (SwitchNow(preset) == SwitchResult::Switched)
+                ShowToast(Utf8(preset.stem().wstring()));
+        }
         return;
     }
 
     m.gameProcess = process;
     m.game.clear();
+    m.followPreset.clear();
     m.foldersDirty = true;
     fs::path executable;
     try
@@ -1153,7 +1238,11 @@ void FollowGame()
             SetGamePreset(m.game, relative);
     }
     else if (std::error_code error; !SamePath(preset, current) && fs::exists(preset, error) && SwitchNow(preset) == SwitchResult::Unsaved)
+    {
         ShowToast("Save or discard the changes to " + Utf8(current.stem().wstring()) + " to switch to " + Utf8(preset.stem().wstring()));
+        m.followPreset = preset;
+        m.followFrom = current;
+    }
     m.gamePreset = m.current;
 }
 
@@ -1168,6 +1257,8 @@ void ForgetPreset(const fs::path& preset)
 // Moves a preset into a folder, creating it. Returns what went wrong, if anything.
 std::string MovePreset(const fs::path& preset, const fs::path& folder)
 {
+    if (WritePending(preset))
+        return "ReShade is still saving " + Utf8(preset.stem().wstring()) + ". Try again in a moment.";
     const fs::path target = folder / preset.filename();
     std::error_code error;
     if (fs::exists(target, error))
@@ -1365,8 +1456,19 @@ void OpenNamePopup(NameAction action, const fs::path& target)
     m.openNamePopup = true;
 }
 
+// Whether the dialog's preset must wait for ReShade to write it first. The active one is copied from the screen.
+bool NameWaits(const fs::path& current)
+{
+    return m.nameAction != NameAction::New && !SamePath(m.nameTarget, current) && WritePending(m.nameTarget);
+}
+
 bool ApplyName(const fs::path& current)
 {
+    if (NameWaits(current))
+    {
+        m.nameError = "ReShade is still saving " + Utf8(m.nameTarget.stem().wstring()) + ". Try again in a moment.";
+        return false;
+    }
     std::wstring name = Wide(m.name);
     m.nameError = NameProblem(name);
     if (!m.nameError.empty())
@@ -1497,7 +1599,7 @@ void NameDialog(const fs::path& current)
     const bool enter = ImGui::InputText("##value", m.name, sizeof(m.name), ImGuiInputTextFlags_EnterReturnsTrue);
     if (!m.nameError.empty())
         Text(m.nameError, kError, 13.5f);
-    const int clicked = DialogButtons({ "Cancel", actions[action] });
+    const int clicked = DialogButtons({ "Cancel", actions[action] }, !NameWaits(current));
     if ((clicked == 1 || enter) && ApplyName(current))
         ImGui::CloseCurrentPopup();
     if (clicked == 0 || ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -1512,7 +1614,7 @@ void DeleteDialog()
     DialogText("Delete " + Utf8(m.deleteTarget.stem().wstring()) + "?", "The preset goes to the Recycle Bin.");
     if (!m.deleteError.empty())
         Text(m.deleteError, kError, 13.5f);
-    const int clicked = DialogButtons({ "Cancel", "Delete" });
+    const int clicked = DialogButtons({ "Cancel", "Delete" }, !WritePending(m.deleteTarget));
     if (clicked == 1)
     {
         if (Recycle(m.deleteTarget.wstring()))
@@ -1602,16 +1704,18 @@ void PresetRow(const fs::path& path, bool active)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(6), S(6)));
     if (ImGui::BeginPopup("actions"))
     {
-        if (ImGui::MenuItem("Duplicate"))
+        // The active preset is duplicated from what is on screen. Others wait until ReShade has written them.
+        const bool writing = !active && WritePending(path);
+        if (ImGui::MenuItem("Duplicate", nullptr, false, !writing))
             OpenNamePopup(NameAction::Duplicate, path);
-        if (ImGui::MenuItem("Rename", nullptr, false, !active))
+        if (ImGui::MenuItem("Rename", nullptr, false, !active && !writing))
             OpenNamePopup(NameAction::Rename, path);
-        if (ImGui::BeginMenu("Move to", !active))
+        if (ImGui::BeginMenu("Move to", !active && !writing))
         {
             MoveMenu(path);
             ImGui::EndMenu();
         }
-        if (ImGui::MenuItem("Delete", nullptr, false, !active))
+        if (ImGui::MenuItem("Delete", nullptr, false, !active && !writing))
         {
             m.deleteTarget = path;
             m.deleteError.clear();
@@ -1622,6 +1726,13 @@ void PresetRow(const fs::path& path, bool active)
             ImGui::Separator();
             PushSize(12.5f);
             ImGui::TextDisabled("Switch to another preset to\nrename, move or delete this one.");
+            ImGui::PopFont();
+        }
+        else if (writing)
+        {
+            ImGui::Separator();
+            PushSize(12.5f);
+            ImGui::TextDisabled("ReShade is still saving this preset.");
             ImGui::PopFont();
         }
         ImGui::EndPopup();
@@ -2910,7 +3021,7 @@ void DrawMenuFrame()
             if (!SetPreset(m.pendingPreset))
                 ShowToast("ReShade could not load " + Utf8(m.pendingPreset.stem().wstring()));
             else if (m.saveNewPreset)
-                m.runtime->save_current_preset();
+                SaveToCache();
             m.pendingPreset.clear();
             m.saveNewPreset = false;
             m.pendingKeepsEdits = false;
@@ -2986,9 +3097,16 @@ void OnOverlay(effect_runtime* runtime)
         ImGui::SetWindowFocus(kDlssWindow);
         m.focusDlss = false;
     }
-    // ReShade's own menu and shortcuts can switch presets too.
+    // ReShade writes its cache from the end of a present a second after the last change, so once a frame has passed
+    // that point, the files are written.
+    for (PendingWrite* write : { &m.unwritten, &m.leftBehind })
+        if (!write->preset.empty() && m.lastFrame > write->since + kReShadeWriteDelay)
+            *write = {};
+    m.lastFrame = GetTickCount64();
+    // ReShade's own menu and shortcuts can switch presets too, saving the one they leave.
     if (const fs::path current = CurrentPreset(); !SamePath(current, m.current))
     {
+        m.leftBehind = { m.current, m.lastFrame };
         m.current = current;
         m.foldersDirty = true;
     }
@@ -3183,5 +3301,35 @@ LPCWSTR MenuCursor()
     case ImGuiMouseCursor_ResizeNS: return IDC_SIZENS;
     case ImGuiMouseCursor_NotAllowed: return IDC_NO;
     default: return IDC_ARROW;
+    }
+}
+
+bool MenuHasUnsavedChanges()
+{
+    return m.runtime && (m.unsaved || (m.presetChanged && !m.autoSave));
+}
+
+std::wstring ActivePresetName()
+{
+    return m.runtime ? m.current.stem().wstring() : std::wstring();
+}
+
+void FlushPresets(bool saveUnsaved)
+{
+    if (!m.runtime)
+        return;
+    // Changes made while a slider was still held are saved with auto-save on. Unsaved ones only when asked to.
+    const bool save = (saveUnsaved && (m.unsaved || m.presetChanged)) || (m.autoSave && m.presetChanged);
+    if (!save && m.unwritten.preset.empty())
+        return;
+    try
+    {
+        if (save)
+            SavePreset();
+        WriteActivePreset();
+    }
+    catch (const std::exception& e)
+    {
+        Log(LogLevel::Error, L"Could not write %ls: %hs", m.current.filename().c_str(), e.what());
     }
 }
