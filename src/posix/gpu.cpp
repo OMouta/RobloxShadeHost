@@ -573,15 +573,10 @@ bool Surface::CreateSwapchain()
     vkGetPhysicalDeviceSurfacePresentModesKHR(gpu.physicalDevice, surface, &count, nullptr);
     std::vector<VkPresentModeKHR> modes(count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(gpu.physicalDevice, surface, &count, modes.data());
-    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
-    // The overlay shows each frame as soon as it is ready, since the game already waited for the display.
-    if (lowLatency)
-        for (VkPresentModeKHR wanted : { VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR })
-            if (std::find(modes.begin(), modes.end(), wanted) != modes.end())
-            {
-                mode = wanted;
-                break;
-            }
+    // The overlay shows each frame as soon as it is ready, since the game already waited for the display. Without
+    // mailbox it waits for the display too, in FIFO mode, which every device has and which never tears.
+    const bool mailbox = std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != modes.end();
+    const VkPresentModeKHR mode = lowLatency && mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
 
     minImageCount = std::max(caps.minImageCount, 2u);
     if (caps.maxImageCount)
