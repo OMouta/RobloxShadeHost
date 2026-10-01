@@ -45,6 +45,8 @@ void OnDestroyRuntime(reshade::api::effect_runtime* destroyed)
     if (runtime != destroyed)
         return;
     runtime = nullptr;
+    // Its menu goes with it, such as when the device is lost, and the next runtime starts with it closed.
+    reshadeMenuOpen = false;
     loadingSince = 0;
 }
 

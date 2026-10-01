@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <utility>
 
 using winrt::Windows::Foundation::AsyncStatus;
 using winrt::Windows::Foundation::Metadata::ApiInformation;
@@ -26,18 +27,44 @@ std::atomic<bool> borderRequired = false;
 
 void CreateDevice()
 {
+    // Made in locals, so a failure leaves no half-made device behind.
+    winrt::com_ptr<ID3D11Device> device;
+    winrt::com_ptr<ID3D11DeviceContext> context;
     winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                                           D3D11_SDK_VERSION, g.device.put(), nullptr, g.context.put()));
+                                           D3D11_SDK_VERSION, device.put(), nullptr, context.put()));
 
     // The capture pool uses the device from its own worker threads.
-    g.device.as<ID3D11Multithread>()->SetMultithreadProtected(TRUE);
+    device.as<ID3D11Multithread>()->SetMultithreadProtected(TRUE);
 
-    auto dxgiDevice = g.device.as<IDXGIDevice1>();
+    auto dxgiDevice = device.as<IDXGIDevice1>();
     dxgiDevice->SetMaximumFrameLatency(1);
 
     winrt::com_ptr<::IInspectable> inspectable;
     winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.get(), inspectable.put()));
     g.captureDevice = inspectable.as<IDirect3DDevice>();
+    g.device = std::move(device);
+    g.context = std::move(context);
+}
+
+bool DeviceLost(HRESULT error)
+{
+    return error == DXGI_ERROR_DEVICE_REMOVED || error == DXGI_ERROR_DEVICE_RESET || error == DXGI_ERROR_DEVICE_HUNG ||
+           (g.device && FAILED(g.device->GetDeviceRemovedReason()));
+}
+
+void ReleaseDevice()
+{
+    StopCapture();
+    g.swapchain = nullptr;
+    ReleaseDepthDevice();
+    g.captureDevice = nullptr;
+    if (g.context)
+    {
+        g.context->ClearState();
+        g.context->Flush();
+    }
+    g.context = nullptr;
+    g.device = nullptr;
 }
 
 void RequestBorderlessCapture()
