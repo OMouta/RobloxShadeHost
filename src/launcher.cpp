@@ -29,6 +29,7 @@ using std::min;
 
 #include <cmath>
 #include <cstdint>
+#include <cwctype>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -62,6 +63,17 @@ enum Timer : UINT_PTR
 
 // Sent to the launcher by its notification area icon.
 constexpr UINT kTrayMessage = WM_APP + 16;
+// Posted by the rename box when it is done, so it is not destroyed while it handles a message. lParam is the box.
+constexpr UINT kRenameMessage = WM_APP + 17;
+// Longer names would not fit in the list.
+constexpr int kMaxNameLength = 100;
+
+enum RenameEnd : WPARAM
+{
+    kSaveName,   // Enter, which keeps the box open when the name is not allowed
+    kLeaveName,  // leaving the box, which drops a name that is not allowed
+    kCancelName, // Escape
+};
 constexpr UINT kTrayIcon = 1;
 
 enum TrayCommand : UINT
@@ -90,6 +102,7 @@ enum class Action
     PickWindow,
     DetectAutomatically,
     ToggleGame,
+    RenameGame,
     RemoveGame,
     UndoRemove,
     DismissNotices,
@@ -104,6 +117,7 @@ enum class Look
     PrimaryButton,
     Switch,
     Setting, // a switch with its label after it
+    Rename,
     Remove,
 };
 
@@ -138,6 +152,7 @@ struct Entry
     bool running = false;
     size_t game = 0;      // its index in g.autoGames
     bool removed = false; // until it can no longer be put back
+    bool renaming = false;
     RECT rect{};
     RECT iconRect{};
     RECT nameRect{};
@@ -270,6 +285,15 @@ struct Launcher
     bool pickerTracking = false;
     HWND pickerPressed = nullptr; // the window whose row the click was pressed on
     HWND pickerFocus = nullptr;   // the window whose row has the keyboard focus
+
+    // Renaming a game in a box over its name. The game is told by its executable, which a rename keeps.
+    HWND edit = nullptr;
+    WNDPROC editProc = nullptr;
+    fs::path renaming;
+    std::wstring renameProblem;
+    RECT editBox{}; // drawn around the edit control
+    RECT editRect{};
+    HBRUSH editBrush = nullptr;
 
     // Explorer forgets the notification area icon when it restarts, and then sends TaskbarCreated.
     UINT taskbarCreated = 0;
@@ -560,7 +584,8 @@ void Describe()
                                                                         : fs::path{},
                               .enabled = saved.enabled,
                               .running = g.target && MatchesExecutable(saved, l.activeExecutable),
-                              .game = i });
+                              .game = i,
+                              .renaming = l.edit && saved.executable == l.renaming });
     }
     if (l.removed && l.removed->index >= g.autoGames.size())
         removed(l.removed->index);
@@ -721,9 +746,11 @@ void Layout(HDC dc)
             continue;
         }
         const RECT toggle{ remove.left - P(10) - P(36), middle - P(10), remove.left - P(10), middle + P(10) };
+        const RECT pencil{ toggle.left - P(8) - P(28), middle - P(14), toggle.left - P(8), middle + P(14) };
+        l.targets.push_back({ pencil, Action::RenameGame, Look::Rename, entry.game, L"", false, L"Rename" });
         l.targets.push_back({ toggle, Action::ToggleGame, Look::Switch, entry.game, L"", entry.enabled });
         l.targets.push_back({ remove, Action::RemoveGame, Look::Remove, entry.game, L"", false, L"Remove from list" });
-        int nameRight = toggle.left - P(14);
+        int nameRight = pencil.left - P(14);
         entry.badge = {};
         if (entry.running)
         {
@@ -731,6 +758,19 @@ void Layout(HDC dc)
             nameRight = entry.badge.left - P(12);
         }
         PlaceEntry(entry, { pad, top, right, top + rowHeight }, P(32), nameRight);
+        if (entry.renaming)
+        {
+            // The box covers the name, and the edit control sits in it, moved only when its place changes.
+            l.editBox = { entry.nameRect.left - P(6), middle - P(23), entry.nameRect.right, middle + P(1) };
+            const int line = TextHeight(dc, ui->strong, L"Ag", entry.nameRect.right - entry.nameRect.left);
+            const int editTop = (l.editBox.top + l.editBox.bottom - line) / 2;
+            const RECT edit{ l.editBox.left + P(6), editTop, l.editBox.right - P(6), editTop + line };
+            if (!EqualRect(&edit, &l.editRect))
+            {
+                l.editRect = edit;
+                SetWindowPos(l.edit, nullptr, edit.left, edit.top, edit.right - edit.left, edit.bottom - edit.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
     }
     y = l.list.bottom + P(26);
 
@@ -876,8 +916,26 @@ Shown CurrentShown()
     return shown;
 }
 
+// Closes the rename box without saving.
+void CloseRename()
+{
+    const HWND edit = l.edit;
+    if (!edit)
+        return;
+    // Cleared first, so the box losing the focus does not end the rename again.
+    l.edit = nullptr;
+    l.renameProblem.clear();
+    l.editRect = {};
+    if (GetFocus() == edit)
+        SetFocus(g.launcher);
+    DestroyWindow(edit);
+}
+
 void Refresh()
 {
+    // The game being renamed was removed.
+    if (l.edit && std::none_of(g.autoGames.begin(), g.autoGames.end(), [](const AutoGame& game) { return game.executable == l.renaming; }))
+        CloseRename();
     l.shown = CurrentShown();
     Describe();
     Resize();
@@ -987,6 +1045,27 @@ void Switch(Gdiplus::Graphics& graphics, const RECT& rect, bool on, bool hovered
     graphics.FillEllipse(&brush, x, F(rect.top) + F(3.0f), knob, knob);
 }
 
+// A pencil.
+void RenameIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
+{
+    const Gdiplus::PointF center(F(rect.left + rect.right) / 2, F(rect.top + rect.bottom) / 2);
+    const float r = F(rect.right - rect.left) / 2;
+    if (hovered)
+    {
+        Gdiplus::SolidBrush background(Plus(theme::kBorder));
+        graphics.FillEllipse(&background, center.X - r, center.Y - r, r * 2, r * 2);
+    }
+    const float s = ui->scale;
+    Gdiplus::Pen pen(Plus(hovered ? theme::kText : theme::kDim), 1.4f * s);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    // From the tip at the bottom left to the end at the top right, with a band below the end.
+    const Gdiplus::PointF outline[] = { { center.X - 5.0f * s, center.Y + 5.0f * s }, { center.X - 4.5f * s, center.Y + 2.5f * s },
+                                        { center.X + 2.5f * s, center.Y - 4.5f * s }, { center.X + 4.5f * s, center.Y - 2.5f * s },
+                                        { center.X - 2.5f * s, center.Y + 4.5f * s } };
+    graphics.DrawPolygon(&pen, outline, 5);
+    graphics.DrawLine(&pen, center.X + 1.0f * s, center.Y - 3.0f * s, center.X + 3.0f * s, center.Y - 1.0f * s);
+}
+
 void RemoveIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
 {
     const Gdiplus::PointF center(F(rect.left + rect.right) / 2, F(rect.top + rect.bottom) / 2);
@@ -1083,6 +1162,14 @@ void EntryText(HDC dc, const Entry& entry)
     const unsigned color = entry.enabled ? theme::kText : theme::kDim;
     if (!ExecutableIcon(entry.icon, entry.iconRect.right - entry.iconRect.left))
         PaintText(dc, ui->semibold, color, Initial(entry.name), entry.iconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    // The rename box covers the name, and what is wrong with the new one shows below it.
+    if (entry.renaming)
+    {
+        const bool problem = !l.renameProblem.empty();
+        PaintText(dc, ui->note, problem ? theme::kError : theme::kDim, problem ? l.renameProblem : L"Enter saves the name. Esc cancels.",
+                  entry.detailRect, DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
     PaintText(dc, ui->strong, color, entry.name, entry.nameRect, DT_SINGLELINE | (entry.detail.empty() ? DT_VCENTER : DT_BOTTOM) | DT_END_ELLIPSIS);
     PaintText(dc, ui->note, theme::kDim, entry.detail, entry.detailRect, DT_SINGLELINE | DT_PATH_ELLIPSIS);
 }
@@ -1149,6 +1236,9 @@ void Paint(HDC output)
             case Look::Setting:
                 Switch(graphics, SettingSwitch(target.rect), target.on, hovered);
                 break;
+            case Look::Rename:
+                RenameIcon(graphics, target.rect, hovered);
+                break;
             case Look::Remove:
                 RemoveIcon(graphics, target.rect, hovered);
                 break;
@@ -1169,6 +1259,9 @@ void Paint(HDC output)
 
         for (const Row& row : l.rows)
             Icon(graphics, Gdiplus::PointF(F(row.rect.left) - F(18.0f), F(row.rect.top) + F(9.0f)), row.level);
+
+        if (l.edit)
+            FillRounded(graphics, l.editBox, F(6.0f), Plus(theme::kCardHover), Plus(l.renameProblem.empty() ? theme::kAccent : theme::kError));
 
         if (const int focused = FindTarget(l.focus); focused >= 0 && focusShown)
             FocusRing(graphics, l.targets[focused].rect);
@@ -1518,6 +1611,156 @@ void UndoRemove()
     l.removed.reset();
 }
 
+// Why a game cannot have this name, or nothing. The name also names its presets folder and its entry in
+// RobloxShadeHost.ini.
+std::wstring NameProblem(const std::wstring& name, size_t index)
+{
+    if (name.empty())
+        return L"Type a name.";
+    if (name.back() == L'.' || name.back() == L' ')
+        return L"A name can't end with a dot or a space.";
+    for (const wchar_t character : name)
+    {
+        if (iswcntrl(character))
+            return L"A name can't contain control characters.";
+        if (wcschr(L"\\/:*?\"<>|=;[]", character))
+            return L"A name can't contain \\ / : * ? \" < > | = ; [ or ].";
+    }
+    // Windows keeps these for devices, even with an extension.
+    std::wstring device = name.substr(0, name.find(L'.'));
+    device.erase(device.find_last_not_of(L' ') + 1);
+    constexpr const wchar_t* kDevices[] = { L"CON", L"PRN", L"AUX", L"NUL" };
+    const bool numbered = device.size() == 4 && (_wcsnicmp(device.c_str(), L"COM", 3) == 0 || _wcsnicmp(device.c_str(), L"LPT", 3) == 0) &&
+                          wcschr(L"0123456789\u00B9\u00B2\u00B3", device[3]);
+    if (numbered || std::any_of(std::begin(kDevices), std::end(kDevices), [&](const wchar_t* reserved) { return _wcsicmp(device.c_str(), reserved) == 0; }))
+        return L"Windows keeps " + device + L" for devices.";
+    for (size_t i = 0; i < g.autoGames.size(); ++i)
+        if (i != index && _wcsicmp(FolderName(g.autoGames[i].name).c_str(), name.c_str()) == 0)
+            return L"Another game has this name.";
+    return {};
+}
+
+// Renames a saved game, with its presets folder and its remembered preset. Returns why it could not, or nothing.
+std::wstring RenameGame(const fs::path& executable, const std::wstring& name)
+{
+    const auto game = std::find_if(g.autoGames.begin(), g.autoGames.end(), [&](const AutoGame& saved) { return saved.executable == executable; });
+    if (game == g.autoGames.end() || game->name == name)
+        return {};
+    const size_t index = static_cast<size_t>(game - g.autoGames.begin());
+    if (std::wstring problem = NameProblem(name, index); !problem.empty())
+        return problem;
+    const std::wstring previous = game->name;
+    const std::wstring key = FolderName(previous);
+    // Windows and RobloxShadeHost.ini ignore case, so a name that only changes case keeps both.
+    const bool sameKey = _wcsicmp(key.c_str(), name.c_str()) == 0;
+    const fs::path root = fs::path(ExeDirectory()) / L"presets";
+    std::error_code error;
+    const bool move = !sameKey && !key.empty() && fs::is_directory(root / key, error) && !fs::exists(root / name, error);
+    if (move)
+    {
+        fs::rename(root / key, root / name, error);
+        if (error)
+        {
+            Log(LogLevel::Warning, L"Could not rename %ls: %hs", (root / key).c_str(), error.message().c_str());
+            return L"Could not rename its presets folder.";
+        }
+    }
+    auto games = g.autoGames;
+    games[index].name = name;
+    if (!SaveGames(std::move(games)))
+    {
+        if (move)
+            fs::rename(root / name, root / key, error);
+        return L"Could not save the game list.";
+    }
+    if (std::wstring preset = sameKey ? L"" : GamePreset(key); !preset.empty())
+    {
+        // A preset in the game's folder moved with it.
+        if (move && preset.size() > key.size() && _wcsnicmp(preset.c_str(), key.c_str(), key.size()) == 0 &&
+            (preset[key.size()] == L'\\' || preset[key.size()] == L'/'))
+            preset = name + preset.substr(key.size());
+        SetGamePreset(name, preset);
+        RemoveGamePreset(key);
+    }
+    // The game being played shows the new name. A picked window keeps its title.
+    if (g.target && g.activeGame && !g.selectedGame && MatchesExecutable(g.autoGames[index], l.activeExecutable))
+        g.activeGame->name = name;
+    Log(LogLevel::Info, L"Renamed %ls to %ls.", previous.c_str(), name.c_str());
+    return {};
+}
+
+// Saves the name in the rename box, unless it is cancelled or the name is not allowed.
+void EndRename(WPARAM how)
+{
+    if (!l.edit)
+        return;
+    if (how != kCancelName)
+    {
+        const int length = GetWindowTextLengthW(l.edit);
+        std::wstring name(static_cast<size_t>(length) + 1, L'\0');
+        name.resize(static_cast<size_t>(GetWindowTextW(l.edit, name.data(), length + 1)));
+        // Spaces around it would not survive as a folder name or an ini key.
+        name.erase(0, name.find_first_not_of(L' '));
+        name.erase(name.find_last_not_of(L' ') + 1);
+        l.renameProblem = RenameGame(l.renaming, name);
+        if (!l.renameProblem.empty() && how == kSaveName)
+        {
+            InvalidateRect(g.launcher, nullptr, FALSE);
+            return;
+        }
+    }
+    CloseRename();
+    Refresh();
+}
+
+// Enter saves the name, Escape cancels, and Tab or clicking elsewhere leaves the box.
+LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message)
+    {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB)
+        {
+            const WPARAM how = wParam == VK_RETURN ? kSaveName : wParam == VK_ESCAPE ? kCancelName : kLeaveName;
+            PostMessageW(g.launcher, kRenameMessage, how, reinterpret_cast<LPARAM>(hwnd));
+            return 0;
+        }
+        break;
+    // They would beep.
+    case WM_CHAR:
+        if (wParam == L'\r' || wParam == L'\x1B' || wParam == L'\t')
+            return 0;
+        break;
+    case WM_KILLFOCUS:
+        PostMessageW(g.launcher, kRenameMessage, kLeaveName, reinterpret_cast<LPARAM>(hwnd));
+        break;
+    }
+    return CallWindowProcW(l.editProc, hwnd, message, wParam, lParam);
+}
+
+void StartRename(size_t index)
+{
+    if (index >= g.autoGames.size())
+        return;
+    CloseRename();
+    l.edit = CreateWindowExW(0, L"EDIT", g.autoGames[index].name.c_str(), WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, g.launcher, nullptr,
+                             GetModuleHandleW(nullptr), nullptr);
+    if (!l.edit)
+    {
+        Log(LogLevel::Error, L"Could not rename %ls (error %lu).", g.autoGames[index].name.c_str(), GetLastError());
+        return;
+    }
+    l.renaming = g.autoGames[index].executable;
+    l.editProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(l.edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(EditProc)));
+    SendMessageW(l.edit, EM_SETLIMITTEXT, kMaxNameLength, 0);
+    SendMessageW(l.edit, WM_SETFONT, reinterpret_cast<WPARAM>(l.launcherScaling.strong), FALSE);
+    // Laid out first, which places the box.
+    Refresh();
+    ShowWindow(l.edit, SW_SHOW);
+    SendMessageW(l.edit, EM_SETSEL, 0, -1);
+    SetFocus(l.edit);
+}
+
 void UseWindow(Picker picker, const GameWindow& window)
 {
     if (picker == Picker::Add)
@@ -1566,6 +1809,9 @@ void Run(const Target& target)
         if (g.target)
             StopCapture();
         break;
+    case Action::RenameGame:
+        StartRename(target.index);
+        return;
     case Action::ToggleGame:
         if (target.index < g.autoGames.size())
         {
@@ -1728,6 +1974,15 @@ bool LauncherKey(WPARAM key, LPARAM flags)
             Run(target);
             return true;
         }
+    // F2 renames the game whose control has the focus, like in Explorer.
+    if (key == VK_F2)
+        if (const int index = FindTarget(l.focus); index >= 0)
+            if (const Target& target = l.targets[index];
+                target.action == Action::RenameGame || target.action == Action::ToggleGame || target.action == Action::RemoveGame)
+            {
+                StartRename(target.index);
+                return true;
+            }
     return false;
 }
 
@@ -1973,6 +2228,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             l.tip.reset();
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        // Clicking outside the rename box leaves it.
+        if (l.edit)
+            SetFocus(hwnd);
         // Clicking hides the focus until a key is used again.
         if (l.focusShown)
         {
@@ -2046,11 +2304,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (l.minimized && l.trayAdded)
         {
             ClosePicker();
+            CloseRename();
             ShowWindow(hwnd, SW_HIDE);
         }
         if (restored)
             Refresh();
         return 0;
+    }
+    case kRenameMessage:
+        // Not when it was sent by a box that is already closed.
+        if (l.edit && reinterpret_cast<HWND>(lParam) == l.edit)
+            EndRename(wParam);
+        return 0;
+    // Typing again hides what was wrong with the name.
+    case WM_COMMAND:
+        if (HIWORD(wParam) == EN_CHANGE && l.edit && reinterpret_cast<HWND>(lParam) == l.edit && !l.renameProblem.empty())
+        {
+            l.renameProblem.clear();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        break;
+    case WM_CTLCOLOREDIT:
+    {
+        const HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, Gdi(theme::kText));
+        SetBkColor(dc, Gdi(theme::kCardHover));
+        if (!l.editBrush)
+            l.editBrush = CreateSolidBrush(Gdi(theme::kCardHover));
+        return reinterpret_cast<LRESULT>(l.editBrush);
     }
     case kTrayMessage:
         switch (LOWORD(lParam))
@@ -2067,6 +2348,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_DPICHANGED:
     {
         Scale(l.launcherScaling, HIWORD(wParam));
+        if (l.edit)
+            SendMessageW(l.edit, WM_SETFONT, reinterpret_cast<WPARAM>(l.launcherScaling.strong), TRUE);
         ClearIcons();
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top,
@@ -2076,6 +2359,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_DESTROY:
         RemoveTrayIcon();
+        // Destroyed with the launcher.
+        l.edit = nullptr;
         g.launcher = nullptr;
         PostQuitMessage(0);
         return 0;
@@ -2114,7 +2399,8 @@ void CreateLauncher()
     wc.lpfnWndProc = PickerProc;
     wc.lpszClassName = kPickerClass;
     RegisterClassExW(&wc);
-    constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    // Clipping keeps the launcher's drawing off the rename box.
+    constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     l.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     g.launcher = CreateWindowExW(0, kLauncherClass, L"Unishade", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr,
                                  wc.hInstance, nullptr);
@@ -2160,6 +2446,9 @@ void DestroyLauncher()
     DeleteFonts(l.launcherScaling);
     DeleteFonts(l.pickerScaling);
     ClearIcons();
+    if (l.editBrush)
+        DeleteObject(l.editBrush);
+    l.editBrush = nullptr;
     l.logo.reset();
     l.logoStream = nullptr;
     if (l.gdiplus)
