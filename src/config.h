@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <vector>
 
 struct InputHotkeys
 {
@@ -38,17 +39,26 @@ struct Shortcut
     // Held for as long as the host runs. The others only while the game or the menu is in front, so other
     // programs keep the keys.
     bool always;
+    // What Settings calls it, in the menu and in the launcher.
+    const char* title;
+    const char* description;
 };
 
-// Every shortcut, in the order the menu's Settings lists them.
+// Every shortcut, in the order Settings lists them.
 inline constexpr Shortcut kShortcuts[] = {
-    { &InputHotkeys::input, kEditModeHotkey, L"ToggleKey", L"Home", false },
-    { &InputHotkeys::overlay, kOverlayToggleHotkey, L"OverlayToggleKey", L"Ctrl+F8", true },
-    { &InputHotkeys::compare, kCompareHotkey, L"CompareKey", L"F7", false },
-    { &InputHotkeys::screenshot, kScreenshotHotkey, L"ScreenshotKey", L"Ctrl+F9", false },
-    { &InputHotkeys::beforeAfter, kBeforeAfterHotkey, L"BeforeAfterKey", L"Ctrl+F10", false },
-    { &InputHotkeys::nextPreset, kNextPresetHotkey, L"NextPresetKey", L"Ctrl+PageDown", false },
-    { &InputHotkeys::previousPreset, kPreviousPresetHotkey, L"PreviousPresetKey", L"Ctrl+PageUp", false },
+    { &InputHotkeys::input, kEditModeHotkey, L"ToggleKey", L"Home", false, "Open the menu",
+      "Press it again, or Escape, to go back to the game." },
+    { &InputHotkeys::overlay, kOverlayToggleHotkey, L"OverlayToggleKey", L"Ctrl+F8", true, "Overlay off and on",
+      "Shows the game without effects and stops capturing it." },
+    { &InputHotkeys::compare, kCompareHotkey, L"CompareKey", L"F7", false, "Compare while held",
+      "Shows the game without effects for as long as you hold it." },
+    { &InputHotkeys::screenshot, kScreenshotHotkey, L"ScreenshotKey", L"Ctrl+F9", false, "Screenshot", "Saves what you see, without the menu." },
+    { &InputHotkeys::beforeAfter, kBeforeAfterHotkey, L"BeforeAfterKey", L"Ctrl+F10", false, "Before and after screenshots",
+      "Saves the same moment with and without effects." },
+    { &InputHotkeys::nextPreset, kNextPresetHotkey, L"NextPresetKey", L"Ctrl+PageDown", false, "Next preset",
+      "Switches to the next preset in the Presets tab." },
+    { &InputHotkeys::previousPreset, kPreviousPresetHotkey, L"PreviousPresetKey", L"Ctrl+PageUp", false, "Previous preset",
+      "Switches to the preset before it." },
 };
 
 // Two shortcuts on the same keys, by their index in kShortcuts.
@@ -76,9 +86,22 @@ void UpdateInputHotkey();
 // Unregisters every shortcut until called with false, so the menu can read them as ordinary keys.
 void SuspendHotkeys(bool suspended);
 
-// Switches to new shortcuts and saves them. Returns what went wrong, and keeps the current shortcuts, when
-// another program holds one of them or the file cannot be written.
+// Switches to new shortcuts and saves them. Returns what went wrong, and keeps the current shortcuts, when two
+// of them are on the same keys, another program holds one of them or the file cannot be written.
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys);
+
+// The shortcuts Unishade starts with.
+InputHotkeys DefaultHotkeys();
+
+// What to tell someone who pressed a key no shortcut can be on.
+std::wstring UnusableKeyText();
+
+// The keys other programs or the game no longer receive because a shortcut is on them without a modifier, one
+// line each.
+std::vector<std::wstring> ShortcutWarnings();
+
+// Goes up whenever a setting or a shortcut changes, so the launcher shows what was changed in the menu.
+unsigned SettingsVersion();
 
 // Whether the menu saves preset changes as they happen, from RobloxShadeHost.ini. On unless turned off.
 bool AutoSavePresets();
@@ -88,7 +111,9 @@ bool DebugInfoEnabled();
 void SetDebugInfoEnabled(bool enabled);
 
 // The user's size for the menu, on top of the size that follows the game's window, from RobloxShadeHost.ini. 1 unless
-// changed, and kept between 0.75 and 2.
+// changed, and kept between kSmallestMenuScale and kLargestMenuScale.
+constexpr float kSmallestMenuScale = 0.75f;
+constexpr float kLargestMenuScale = 2;
 float MenuScale();
 void SetMenuScale(float scale);
 
@@ -105,17 +130,21 @@ void SetKeepEffectsVisible(bool enabled);
 // slowest still leaves the menu usable.
 constexpr int kSlowestFrameRate = 30;
 constexpr int kFastestFrameRate = 500;
+// The limits Settings offers, besides a custom one.
+inline constexpr int kFrameRates[] = { 0, 120, 60 };
 int FrameRateLimit();
 void SetFrameRateLimit(int fps);
 
 // The percentage of the game's resolution that effects run at, from RobloxShadeHost.ini. 100 unless changed, and never
 // under 25.
+inline constexpr int kEffectResolutions[] = { 100, 75, 50 };
 int EffectResolution();
 void SetEffectResolution(int percent);
 
 // The longest side of the picture depth is estimated from, from RobloxShadeHost.ini. Depth Anything V2 expects multiples
 // of 14 around 518, which it is unless changed, and it is never larger.
 constexpr int kLargestDepthSize = 518;
+inline constexpr int kDepthSizes[] = { kLargestDepthSize, 392, 266 };
 int DepthSize();
 void SetDepthSize(int size);
 

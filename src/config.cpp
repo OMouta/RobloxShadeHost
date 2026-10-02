@@ -1,6 +1,7 @@
 #include "config.h"
 #include "log.h"
 #include "state.h"
+#include "text.h"
 
 #include <algorithm>
 #include <atomic>
@@ -11,12 +12,15 @@ namespace
 {
 // Read from the file once, since the menu and the overlay ask for them every frame. -1, or 0 for the scale, until
 // read. Atomic because the update check may ask from its own thread.
+std::atomic<int> autoSavePresets = -1;
+std::atomic<int> debugInfo = -1;
 std::atomic<int> updateChecks = -1;
 std::atomic<int> keepEffectsVisible = -1;
 std::atomic<float> menuScale = 0.0f;
 std::atomic<int> frameRateLimit = -1;
 std::atomic<int> effectResolution = -1;
 std::atomic<int> depthSize = -1;
+std::atomic<unsigned> settingsVersion = 0;
 
 std::wstring IniPath()
 {
@@ -39,13 +43,14 @@ bool CachedFlag(std::atomic<int>& cached, const wchar_t* name, bool fallback)
 bool SaveFlag(std::atomic<int>& cached, const wchar_t* name, bool enabled)
 {
     cached = enabled;
+    ++settingsVersion;
     return WritePrivateProfileStringW(L"Menu", name, enabled ? L"1" : L"0", IniPath().c_str()) != FALSE;
 }
 
 // Also turns a scale that is not a number into the default.
 float ValidScale(float scale)
 {
-    return scale > 0 ? std::clamp(scale, 0.75f, 2.0f) : 1.0f;
+    return scale > 0 ? std::clamp(scale, kSmallestMenuScale, kLargestMenuScale) : 1.0f;
 }
 
 // A number under [Performance], read from the file once. valid turns what the file holds into a value the setting
@@ -65,6 +70,7 @@ void SaveNumber(std::atomic<int>& cached, const wchar_t* name, int value)
 {
     if (cached.exchange(value) == value)
         return;
+    ++settingsVersion;
     if (!WritePrivateProfileStringW(L"Performance", name, std::to_wstring(value).c_str(), IniPath().c_str()))
         Log(LogLevel::Warning, L"Could not save %ls to RobloxShadeHost.ini. It applies until Unishade closes.", name);
 }
@@ -235,25 +241,30 @@ void SuspendHotkeys(bool suspended)
     }
 }
 
+unsigned SettingsVersion()
+{
+    return settingsVersion;
+}
+
 bool AutoSavePresets()
 {
-    return GetPrivateProfileIntW(L"Menu", L"AutoSavePresets", 1, IniPath().c_str()) != 0;
+    return CachedFlag(autoSavePresets, L"AutoSavePresets", true);
 }
 
 void SetAutoSavePresets(bool enabled)
 {
-    if (!WritePrivateProfileStringW(L"Menu", L"AutoSavePresets", enabled ? L"1" : L"0", IniPath().c_str()))
+    if (!SaveFlag(autoSavePresets, L"AutoSavePresets", enabled))
         Log(LogLevel::Warning, L"Could not save the auto-save setting to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
 bool DebugInfoEnabled()
 {
-    return GetPrivateProfileIntW(L"Menu", L"ShowDebugInfo", 0, IniPath().c_str()) != 0;
+    return CachedFlag(debugInfo, L"ShowDebugInfo", false);
 }
 
 void SetDebugInfoEnabled(bool enabled)
 {
-    if (!WritePrivateProfileStringW(L"Menu", L"ShowDebugInfo", enabled ? L"1" : L"0", IniPath().c_str()))
+    if (!SaveFlag(debugInfo, L"ShowDebugInfo", enabled))
         Log(LogLevel::Warning, L"Could not save the debug info setting to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
@@ -277,6 +288,7 @@ void SetMenuScale(float scale)
     if (scale == MenuScale())
         return;
     menuScale = scale;
+    ++settingsVersion;
     wchar_t value[32]{};
     swprintf_s(value, L"%.2f", scale);
     if (!WritePrivateProfileStringW(L"Menu", L"Scale", value, IniPath().c_str()))
@@ -355,6 +367,14 @@ void RemoveGamePreset(const std::wstring& game)
 
 std::wstring ChangeHotkeys(const InputHotkeys& hotkeys)
 {
+    if (const auto clash = FindShortcutClash(hotkeys))
+    {
+        // Names the shortcut that already had these keys, not the one just changed.
+        const Hotkey& hotkey = hotkeys.*kShortcuts[clash->later].member;
+        const bool changed = !Same(hotkey, g.hotkeys.*kShortcuts[clash->later].member);
+        const char* holder = kShortcuts[changed ? clash->earlier : clash->later].title;
+        return FormatHotkey(hotkey) + L" is already used by \"" + Wide(holder) + L"\".";
+    }
     const InputHotkeys previous = g.hotkeys;
     UnregisterAll();
 
@@ -373,8 +393,48 @@ std::wstring ChangeHotkeys(const InputHotkeys& hotkeys)
 
     UseHotkeys(error.empty() ? hotkeys : previous);
     if (error.empty())
+    {
+        ++settingsVersion;
         Log(LogLevel::Info, L"Shortcuts changed.");
+    }
     RegisterSet(true, g.hotkeys);
     UpdateInputHotkey();
     return error;
+}
+
+InputHotkeys DefaultHotkeys()
+{
+    InputHotkeys hotkeys;
+    for (const Shortcut& shortcut : kShortcuts)
+        ParseHotkey(shortcut.fallback, hotkeys.*shortcut.member);
+    return hotkeys;
+}
+
+std::wstring UnusableKeyText()
+{
+    // Any key a shortcut can be written with works, so the list of keys comes from there too.
+    std::wstring keys;
+    for (const NamedKey& named : kNamedKeys)
+        keys += (keys.empty() ? L"" : L", ") + std::wstring(named.name);
+    return L"That key cannot be used. Use a letter, a number, an F key other than F12 or one of these: " + keys +
+           L". Ctrl, Alt, Shift and Win can go with any of them.";
+}
+
+std::vector<std::wstring> ShortcutWarnings()
+{
+    std::vector<std::wstring> warnings;
+    for (const Shortcut& shortcut : kShortcuts)
+    {
+        const Hotkey& hotkey = g.hotkeys.*shortcut.member;
+        if (!hotkey.key || (hotkey.modifiers & (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN)))
+            continue;
+        const std::wstring key = FormatHotkey(hotkey);
+        const bool typing = hotkey.key == VK_SPACE || hotkey.key == VK_TAB || (hotkey.key >= '0' && hotkey.key <= 'Z') ||
+                            (hotkey.key >= VK_NUMPAD0 && hotkey.key <= VK_DIVIDE);
+        if (shortcut.always)
+            warnings.push_back(L"Other programs will not receive " + key + L" while Unishade runs.");
+        else if (typing)
+            warnings.push_back(L"The game will not receive " + key + L" while Unishade runs.");
+    }
+    return warnings;
 }

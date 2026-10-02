@@ -211,11 +211,8 @@ struct Menu
     // The runtime's device, which the logos are made on.
     reshade::api::device* device = nullptr;
     float scale = 1;
-    // The size picked in Settings.
-    float menuScale = 1;
     ImGuiMouseCursor cursor = ImGuiMouseCursor_Arrow;
     Tab tab = Tab::Presets;
-    bool debugInfo = false;
     // Errors caught on the way back to ReShade are logged once.
     bool errorReported = false;
 
@@ -265,7 +262,6 @@ struct Menu
     bool presetChanged = false;
     // With auto-save off, changes wait for the save icon. ReShade saves the current preset whenever it switches
     // to another one, so a switch first asks what to do with them.
-    bool autoSave = true;
     bool unsaved = false;
     UnsavedChoice unsavedChoice = UnsavedChoice::Ask;
     bool openUnsavedPopup = false;
@@ -328,11 +324,11 @@ struct Menu
     SettingsPage settingsPage = SettingsPage::General;
     int capturing = -1;
     std::wstring shortcutError;
-    bool updateChecks = true;
-    bool keepEffects = false;
     // The frame rate typed for Custom, and whether Custom was picked for a rate that another choice also gives.
     int customRate = 0;
     bool customRatePicked = false;
+    // The limit these two go with. The launcher changes it too.
+    int frameRate = 0;
 
     bool openConfirmPopup = false;
     Confirmation confirm = Confirmation::ResetEffect;
@@ -394,22 +390,6 @@ constexpr ULONGLONG kImportWait = 3000;
 // compiling before an empty list counts as no effects.
 constexpr ULONGLONG kLoadRetry = 250;
 constexpr ULONGLONG kCreateWait = 5000;
-
-// Settings lists the shortcuts in the order of kShortcuts.
-constexpr struct
-{
-    const char* title;
-    const char* description;
-} kShortcutText[] = {
-    { "Open the menu", "Press it again, or Escape, to go back to the game." },
-    { "Overlay off and on", "Shows the game without effects and stops capturing it." },
-    { "Compare while held", "Shows the game without effects for as long as you hold it." },
-    { "Screenshot", "Saves what you see, without the menu." },
-    { "Before and after screenshots", "Saves the same moment with and without effects." },
-    { "Next preset", "Switches to the next preset in the Presets tab." },
-    { "Previous preset", "Switches to the preset before it." },
-};
-static_assert(std::size(kShortcutText) == std::size(kShortcuts));
 
 float S(float value)
 {
@@ -1338,7 +1318,7 @@ enum class SwitchResult
 // Switches presets right away, for shortcuts, which cannot ask about unsaved changes.
 SwitchResult SwitchNow(const fs::path& target)
 {
-    if (m.unsaved || (m.presetChanged && !m.autoSave))
+    if (m.unsaved || (m.presetChanged && !AutoSavePresets()))
         return SwitchResult::Unsaved;
     // ReShade would take a preset deleted since the last scan for a new one.
     if (std::error_code error; !fs::exists(target, error))
@@ -1372,7 +1352,7 @@ void FollowRenamedFolder(const std::wstring& previous)
         return;
     // With auto-save on, the values on screen are the saved ones, including any ReShade had yet to write. Unsaved
     // changes cannot come along, since switching loads the preset from its file.
-    if (m.autoSave && EffectsLoaded())
+    if (AutoSavePresets() && EffectsLoaded())
         m.runtime->export_current_preset(Utf8(moved.wstring()).c_str());
     else if (m.unsaved || m.presetChanged)
         ShowToast("Unsaved changes to " + Utf8(moved.stem().wstring()) + " were dropped, since its game was renamed");
@@ -1402,7 +1382,7 @@ void FollowGame()
         // The game's preset follows once the changes that held it up are saved, unless another preset was picked.
         if (!m.followPreset.empty() && !SamePath(current, m.followFrom))
             m.followPreset.clear();
-        else if (!m.followPreset.empty() && !m.unsaved && !(m.presetChanged && !m.autoSave))
+        else if (!m.followPreset.empty() && !m.unsaved && !(m.presetChanged && !AutoSavePresets()))
         {
             const fs::path preset = std::exchange(m.followPreset, {});
             if (SwitchNow(preset) == SwitchResult::Switched)
@@ -2155,7 +2135,7 @@ void PresetsTab()
     ImGui::SameLine(0, S(8));
     if (Button("Import", ImVec2(S(90), S(32)), false, !importDialog.open))
         OpenImportDialog();
-    if (!m.autoSave)
+    if (!AutoSavePresets())
     {
         ImGui::SameLine(0, S(8));
         if (Button("Save as new", ImVec2(S(120), S(32))))
@@ -2189,7 +2169,7 @@ void PresetsTab()
         Text("No presets match.", kDim, 13.5f);
 
     ImGui::Dummy(ImVec2(0, S(4)));
-    Text(m.autoSave ? "Changes save to the active preset as you make them."
+    Text(AutoSavePresets() ? "Changes save to the active preset as you make them."
                     : "Changes apply right away. Save them with the icon at the top.",
          kDim, 13);
     PushSize(13.5f);
@@ -2665,21 +2645,6 @@ void StopCapture()
     SuspendHotkeys(false);
 }
 
-void ApplyHotkeys(const InputHotkeys& hotkeys)
-{
-    if (const auto clash = FindShortcutClash(hotkeys))
-    {
-        // Names the shortcut that already had these keys, not the one just changed.
-        const Hotkey& hotkey = hotkeys.*kShortcuts[clash->later].member;
-        const Hotkey& before = g.hotkeys.*kShortcuts[clash->later].member;
-        const bool changed = hotkey.key != before.key || hotkey.modifiers != before.modifiers;
-        const char* holder = kShortcutText[changed ? clash->earlier : clash->later].title;
-        m.shortcutError = FormatHotkey(hotkey) + L" is already used by \"" + Wide(holder) + L"\".";
-        return;
-    }
-    m.shortcutError = ChangeHotkeys(hotkeys);
-}
-
 // While the menu waits for a shortcut, the next key pressed with any modifiers becomes it.
 void CaptureShortcut()
 {
@@ -2704,27 +2669,22 @@ void CaptureShortcut()
         return;
     }
     hotkey.key = key;
-    // Any key a shortcut can be written with works, so the list of keys comes from there too.
     if (FormatHotkey(hotkey).empty())
     {
-        std::wstring keys;
-        for (const NamedKey& named : kNamedKeys)
-            keys += (keys.empty() ? L"" : L", ") + std::wstring(named.name);
-        m.shortcutError = L"That key cannot be used. Use a letter, a number, an F key other than F12 or one of these: " + keys +
-                          L". Ctrl, Alt, Shift and Win can go with any of them.";
+        m.shortcutError = UnusableKeyText();
         return;
     }
     InputHotkeys hotkeys = g.hotkeys;
     hotkeys.*kShortcuts[m.capturing].member = hotkey;
     StopCapture();
-    ApplyHotkeys(hotkeys);
+    m.shortcutError = ChangeHotkeys(hotkeys);
 }
 
 void ShortcutRow(int index)
 {
     const Shortcut& shortcut = kShortcuts[index];
-    const char* title = kShortcutText[index].title;
-    const char* description = kShortcutText[index].description;
+    const char* title = shortcut.title;
+    const char* description = shortcut.description;
     const Hotkey& hotkey = g.hotkeys.*shortcut.member;
     // Without the menu shortcut there would be no way back into the menu.
     const bool clearable = shortcut.member != &InputHotkeys::input;
@@ -2765,7 +2725,7 @@ void ShortcutRow(int index)
             InputHotkeys hotkeys = g.hotkeys;
             hotkeys.*shortcut.member = {};
             StopCapture();
-            ApplyHotkeys(hotkeys);
+            m.shortcutError = ChangeHotkeys(hotkeys);
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Leave unassigned");
@@ -2787,10 +2747,7 @@ bool SwitchRow(const char* id, bool on, const char* title, const char* descripti
     return clicked;
 }
 
-// The menu's size in quarter steps, within what config.h keeps.
-constexpr float kSmallestMenu = 0.75f;
-constexpr float kLargestMenu = 2;
-
+// The menu's size in quarter steps.
 void MenuSizeRow()
 {
     const float x = ImGui::GetCursorPosX();
@@ -2808,10 +2765,10 @@ void MenuSizeRow()
 
     ImGui::SetCursorPos(ImVec2(x + width - controls, top + S(2)));
     float step = 0;
-    if (Button("-##smaller", ImVec2(button, button), false, m.menuScale > kSmallestMenu + 0.01f))
+    if (Button("-##smaller", ImVec2(button, button), false, MenuScale() > kSmallestMenuScale + 0.01f))
         step = -0.25f;
     ImGui::SameLine(0, 0);
-    const std::string value = std::to_string(std::lround(m.menuScale * 100)) + "%";
+    const std::string value = std::to_string(std::lround(MenuScale() * 100)) + "%";
     PushSize(14);
     const ImVec2 valueSize = ImGui::CalcTextSize(value.c_str());
     const ImVec2 valueStart = ImGui::GetCursorScreenPos();
@@ -2819,13 +2776,10 @@ void MenuSizeRow()
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(valueWidth, button));
     ImGui::SameLine(0, 0);
-    if (Button("+##larger", ImVec2(button, button), false, m.menuScale < kLargestMenu - 0.01f))
+    if (Button("+##larger", ImVec2(button, button), false, MenuScale() < kLargestMenuScale - 0.01f))
         step = 0.25f;
     if (step != 0)
-    {
-        m.menuScale = std::clamp(std::round((m.menuScale + step) * 4) / 4, kSmallestMenu, kLargestMenu);
-        SetMenuScale(m.menuScale);
-    }
+        SetMenuScale(std::round((MenuScale() + step) * 4) / 4);
     ImGui::SetCursorPos(ImVec2(x, std::max(bottom, top + S(40)) + S(6)));
     ImGui::Dummy(ImVec2(0, 0));
 }
@@ -2847,23 +2801,29 @@ int ChoiceOf(const int (&values)[N], int value)
 
 void FrameRateRow()
 {
-    static constexpr int kRates[] = { 0, 120, 60 };
-    constexpr int kCustom = static_cast<int>(std::size(kRates));
+    constexpr int kCustom = static_cast<int>(std::size(kFrameRates));
     const int limit = FrameRateLimit();
-    const int choice = ChoiceOf(kRates, limit);
+    // Changed in the launcher, so what was picked and typed here no longer goes with it.
+    if (limit != m.frameRate)
+    {
+        m.frameRate = m.customRate = limit;
+        m.customRatePicked = false;
+    }
+    const int choice = ChoiceOf(kFrameRates, limit);
     const bool custom = m.customRatePicked || choice == kCustom;
     const int clicked = ChoiceRow("Frame rate", "The most frames a second Unishade shows. A lower limit leaves more of the GPU to the game.",
                                   { "Follow game", "120 FPS", "60 FPS", "Custom" }, custom ? kCustom : choice);
     if (clicked == kCustom)
     {
         m.customRatePicked = true;
-        m.customRate = limit ? limit : 60;
+        m.frameRate = m.customRate = limit ? limit : 60;
         SetFrameRateLimit(m.customRate);
     }
     else if (clicked >= 0)
     {
         m.customRatePicked = false;
-        SetFrameRateLimit(kRates[clicked]);
+        m.frameRate = kFrameRates[clicked];
+        SetFrameRateLimit(m.frameRate);
     }
     if (!custom)
         return;
@@ -2873,7 +2833,7 @@ void FrameRateRow()
     // Applies once typing ends, so a number is not limited while it is still being typed.
     if (ImGui::IsItemDeactivatedAfterEdit())
     {
-        m.customRate = std::clamp(m.customRate, kSlowestFrameRate, kFastestFrameRate);
+        m.frameRate = m.customRate = std::clamp(m.customRate, kSlowestFrameRate, kFastestFrameRate);
         SetFrameRateLimit(m.customRate);
     }
     ImGui::SameLine(0, S(10));
@@ -2886,31 +2846,26 @@ void PerformanceSettings()
     FrameRateRow();
 
     ImGui::Dummy(ImVec2(0, S(8)));
-    static constexpr int kResolutions[] = { 100, 75, 50 };
     int clicked = ChoiceRow("Effect resolution",
                             "Effects run on a smaller picture, stretched back to the game's size. Lower is faster and blurrier. The menu "
                             "blurs too, and screenshots get smaller.",
-                            { "100%", "75%", "50%" }, ChoiceOf(kResolutions, EffectResolution()));
+                            { "100%", "75%", "50%" }, ChoiceOf(kEffectResolutions, EffectResolution()));
     if (clicked >= 0)
-        SetEffectResolution(kResolutions[clicked]);
+        SetEffectResolution(kEffectResolutions[clicked]);
 
     if (DepthEnabled())
     {
         ImGui::Dummy(ImVec2(0, S(8)));
-        static constexpr int kSizes[] = { kLargestDepthSize, 392, 266 };
         clicked = ChoiceRow("Depth detail", "Depth is estimated from a smaller picture. Lower is faster, and effects that use depth lose fine detail.",
-                            { "High", "Medium", "Low" }, ChoiceOf(kSizes, DepthSize()));
+                            { "High", "Medium", "Low" }, ChoiceOf(kDepthSizes, DepthSize()));
         if (clicked >= 0)
-            SetDepthSize(kSizes[clicked]);
+            SetDepthSize(kDepthSizes[clicked]);
     }
 
     ImGui::Dummy(ImVec2(0, S(14)));
     Heading("DEBUG");
-    if (SwitchRow("debug_info", m.debugInfo, "Show debug info", "Captured game FPS, output FPS and frame loss."))
-    {
-        m.debugInfo = !m.debugInfo;
-        SetDebugInfoEnabled(m.debugInfo);
-    }
+    if (SwitchRow("debug_info", DebugInfoEnabled(), "Show debug info", "Captured game FPS, output FPS and frame loss."))
+        SetDebugInfoEnabled(!DebugInfoEnabled());
 }
 
 void ShortcutSettings()
@@ -2922,19 +2877,8 @@ void ShortcutSettings()
 
     if (!m.shortcutError.empty())
         Text(Utf8(m.shortcutError), kError, 13.5f);
-    for (const Shortcut& shortcut : kShortcuts)
-    {
-        const Hotkey& hotkey = g.hotkeys.*shortcut.member;
-        if (!hotkey.key || (hotkey.modifiers & (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN)))
-            continue;
-        const std::string key = Utf8(FormatHotkey(hotkey));
-        const bool typing = hotkey.key == VK_SPACE || hotkey.key == VK_TAB || (hotkey.key >= '0' && hotkey.key <= 'Z') ||
-                            (hotkey.key >= VK_NUMPAD0 && hotkey.key <= VK_DIVIDE);
-        if (shortcut.always)
-            Text("Other programs will not receive " + key + " while Unishade runs.", kWarning, 13.5f);
-        else if (typing)
-            Text("The game will not receive " + key + " while Unishade runs.", kWarning, 13.5f);
-    }
+    for (const std::wstring& warning : ShortcutWarnings())
+        Text(Utf8(warning), kWarning, 13.5f);
     if (Link("Reset to defaults", kDim))
     {
         StopCapture();
@@ -2946,32 +2890,25 @@ void ShortcutSettings()
 void GeneralSettings()
 {
     Heading("PRESETS");
-    if (SwitchRow("autosave", m.autoSave, "Save changes automatically", "Turn off to try changes first and save them with the icon at the top."))
+    if (SwitchRow("autosave", AutoSavePresets(), "Save changes automatically", "Turn off to try changes first and save them with the icon at the top."))
     {
-        m.autoSave = !m.autoSave;
-        SetAutoSavePresets(m.autoSave);
+        SetAutoSavePresets(!AutoSavePresets());
         // From here on every change saves as it happens, so changes that were waiting are saved too.
-        if (m.autoSave && m.unsaved)
+        if (AutoSavePresets() && m.unsaved)
             SavePreset();
     }
 
     ImGui::Dummy(ImVec2(0, S(14)));
     Heading("DISPLAY");
     MenuSizeRow();
-    if (SwitchRow("keep_effects", m.keepEffects, "Keep effects visible when another window is in front",
+    if (SwitchRow("keep_effects", KeepEffectsVisible(), "Keep effects visible when another window is in front",
                   "Effects stay over the game while another window, such as a chat or a browser, is in front of it."))
-    {
-        m.keepEffects = !m.keepEffects;
-        SetKeepEffectsVisible(m.keepEffects);
-    }
+        SetKeepEffectsVisible(!KeepEffectsVisible());
 
     ImGui::Dummy(ImVec2(0, S(14)));
     Heading("UPDATES");
-    if (SwitchRow("update_checks", m.updateChecks, "Check for updates", "Asks GitHub for a newer version when Unishade starts. Applies from the next start."))
-    {
-        m.updateChecks = !m.updateChecks;
-        SetUpdateChecksEnabled(m.updateChecks);
-    }
+    if (SwitchRow("update_checks", UpdateChecksEnabled(), "Check for updates", "Asks GitHub for a newer version when Unishade starts. Applies from the next start."))
+        SetUpdateChecksEnabled(!UpdateChecksEnabled());
 }
 
 void SettingsTab()
@@ -2992,14 +2929,6 @@ void SettingsTab()
     }
 }
 
-void ResetShortcuts()
-{
-    InputHotkeys hotkeys;
-    for (const Shortcut& shortcut : kShortcuts)
-        ParseHotkey(shortcut.fallback, hotkeys.*shortcut.member);
-    ApplyHotkeys(hotkeys);
-}
-
 // Asks before resetting what cannot be got back, such as an effect's settings with auto-save on.
 void ConfirmDialog()
 {
@@ -3007,7 +2936,7 @@ void ConfirmDialog()
         return;
     if (m.confirm == Confirmation::ResetEffect)
         DialogText("Reset every setting of " + m.confirmEffect + "?",
-                   m.autoSave ? "They go back to their defaults and the preset is saved." : "They go back to their defaults.");
+                   AutoSavePresets() ? "They go back to their defaults and the preset is saved." : "They go back to their defaults.");
     else
         DialogText("Reset every shortcut?", "They go back to the keys Unishade starts with.");
     const int clicked = DialogButtons({ "Cancel", "Reset" });
@@ -3016,7 +2945,7 @@ void ConfirmDialog()
         if (m.confirm == Confirmation::ResetEffect)
             ResetEffect(m.confirmEffect);
         else
-            ResetShortcuts();
+            m.shortcutError = ChangeHotkeys(DefaultHotkeys());
     }
     if (clicked >= 0 || ImGui::IsKeyPressed(ImGuiKey_Escape))
         ImGui::CloseCurrentPopup();
@@ -3160,14 +3089,14 @@ void Header(ImVec2 origin, float width)
 
     const std::string preset = Utf8(m.current.stem().wstring());
     const ImVec2 nameSize = ImGui::CalcTextSize(preset.c_str());
-    draw->PushClipRect(origin, origin + ImVec2((m.autoSave ? labelX : saveX) - S(12), S(kHeader)), true);
+    draw->PushClipRect(origin, origin + ImVec2((AutoSavePresets() ? labelX : saveX) - S(12), S(kHeader)), true);
     draw->AddText(origin + ImVec2(textX, S(39)), kDim, preset.c_str());
     if (m.unsaved)
         draw->AddCircleFilled(origin + ImVec2(textX + nameSize.x + S(7), S(39) + ImGui::GetFontSize() / 2 + S(1)), S(3), kWarning);
     draw->PopClipRect();
     ImGui::PopFont();
 
-    if (!m.autoSave)
+    if (!AutoSavePresets())
     {
         const ImVec2 start = origin + ImVec2(saveX, S(22));
         ImGui::SetCursorScreenPos(start);
@@ -3545,7 +3474,7 @@ void SaveChanges()
 {
     if (!m.presetChanged || (ImGui::IsAnyItemActive() && m.pendingPreset.empty()))
         return;
-    if (m.autoSave)
+    if (AutoSavePresets())
         SavePreset();
     else
         m.unsaved = true;
@@ -3729,11 +3658,11 @@ void DrawOverlay(bool menu)
         m.toastStart = 0;
     const ULONGLONG elapsed = GetTickCount64() - m.toastStart;
     const bool toast = m.toastStart && elapsed < m.toastDuration;
-    if (!menu && !toast && !m.debugInfo)
+    if (!menu && !toast && !DebugInfoEnabled())
         return;
 
     const ImVec2 display = ImGui::GetIO().DisplaySize;
-    m.scale = menu_layout::Scale(display.x, display.y, m.menuScale);
+    m.scale = menu_layout::Scale(display.x, display.y, MenuScale());
     if (m.scale <= 0)
         return;
     ApplyStyle(ImGui::GetStyle());
@@ -3745,7 +3674,7 @@ void DrawOverlay(bool menu)
     }
     if (toast)
         DrawToast(elapsed);
-    if (m.debugInfo)
+    if (DebugInfoEnabled())
         DrawDebugInfo();
     ImGui::PopFont();
     m.cursor = menu ? ImGui::GetMouseCursor() : ImGuiMouseCursor_Arrow;
@@ -3792,7 +3721,7 @@ void OnDestroyRuntime(effect_runtime* runtime)
         return;
     DestroyTextures();
     // Effects load again from the preset, without the changes that were not saved.
-    if (m.unsaved || (m.presetChanged && !m.autoSave))
+    if (m.unsaved || (m.presetChanged && !AutoSavePresets()))
         ShowToast("ReShade loaded the effects again, so the unsaved changes to " + Utf8(m.current.stem().wstring()) + " are gone");
     m.unsaved = false;
     m.presetChanged = false;
@@ -3853,12 +3782,6 @@ void InitMenu()
 {
     if (!AddonRegistered())
         return;
-    m.autoSave = AutoSavePresets();
-    m.debugInfo = DebugInfoEnabled();
-    m.menuScale = MenuScale();
-    m.updateChecks = UpdateChecksEnabled();
-    m.keepEffects = KeepEffectsVisible();
-    m.customRate = FrameRateLimit();
     reshade::register_event<reshade::addon_event::init_effect_runtime>(
         [](effect_runtime* runtime) { Guarded([runtime] { OnInitRuntime(runtime); }); });
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(
@@ -3937,7 +3860,7 @@ void ResetMenu()
         m.runtime->set_effects_state(m.effectsBeforeCompare);
         m.comparing = false;
     }
-    if (m.presetChanged && m.autoSave)
+    if (m.presetChanged && AutoSavePresets())
         SavePreset();
     else if (m.presetChanged)
         m.unsaved = true;
@@ -3971,7 +3894,7 @@ LPCWSTR MenuCursor()
 
 bool MenuHasUnsavedChanges()
 {
-    return m.runtime && (m.unsaved || (m.presetChanged && !m.autoSave));
+    return m.runtime && (m.unsaved || (m.presetChanged && !AutoSavePresets()));
 }
 
 std::wstring ActivePresetName()
@@ -3984,7 +3907,7 @@ void FlushPresets(bool saveUnsaved)
     if (!m.runtime)
         return;
     // Changes made while a slider was still held are saved with auto-save on. Unsaved ones only when asked to.
-    const bool save = (saveUnsaved && (m.unsaved || m.presetChanged)) || (m.autoSave && m.presetChanged);
+    const bool save = (saveUnsaved && (m.unsaved || m.presetChanged)) || (AutoSavePresets() && m.presetChanged);
     if (!save && m.unwritten.preset.empty())
         return;
     try

@@ -14,6 +14,7 @@ using std::min;
 #include "addon.h"
 #include "capture.h"
 #include "config.h"
+#include "depth/depth.h"
 #include "log.h"
 #include "menu.h"
 #include "names.h"
@@ -21,6 +22,7 @@ using std::min;
 #include "resource.h"
 #include "shell.h"
 #include "state.h"
+#include "text.h"
 #include "theme.h"
 #include "update.h"
 
@@ -46,8 +48,9 @@ namespace fs = std::filesystem;
 namespace
 {
 // Size in pixels at 100% scaling. Longer content makes the window taller, up to the screen, and then scrolls.
+// The height fits every page of Settings, so the window keeps its size from tab to tab.
 constexpr float kWidth = 620;
-constexpr float kMinHeight = 540;
+constexpr float kMinHeight = 672;
 // The picker scrolls past its height.
 constexpr float kPickerWidth = 480;
 constexpr float kPickerMaxHeight = 520;
@@ -66,7 +69,8 @@ enum Timer : UINT_PTR
 // Sent to the launcher by its notification area icon.
 constexpr UINT kTrayMessage = WM_APP + 16;
 constexpr UINT kTrayIcon = 1;
-// Posted by the rename box when it is done, so it is not destroyed while it handles a message. lParam is the box.
+// Posted by the rename box or the frame rate box when it is done, so it is not destroyed while it handles a message.
+// lParam is the box.
 constexpr UINT kRenameMessage = WM_APP + 17;
 // Longer names would not fit in the list.
 constexpr WPARAM kMaxNameLength = 100;
@@ -76,6 +80,20 @@ enum RenameEnd : WPARAM
     kSaveName,   // Enter, which keeps the box open when the name is not allowed
     kLeaveName,  // leaving the box, which drops a name that is not allowed
     kCancelName, // Escape
+};
+
+enum class Tab
+{
+    Games,
+    Settings,
+};
+
+// The pages of Settings, which are the menu's.
+enum class Page
+{
+    General,
+    Performance,
+    Shortcuts,
 };
 
 enum TrayCommand : UINT
@@ -92,12 +110,15 @@ constexpr wchar_t kStartupApprovedKey[] = L"Software\\Microsoft\\Windows\\Curren
 constexpr wchar_t kRunValue[] = L"Unishade";
 constexpr wchar_t kMinimizedFlag[] = L"--minimized";
 
+constexpr wchar_t kSupportUrl[] = L"https://ko-fi.com/omouta";
+
 constexpr wchar_t kTrayNote[] = L"Minimize to keep the effects running from the notification area. Closing Unishade turns them off.";
 
 enum class Action
 {
     OpenLog,
     Help,
+    Support,
     RunSetup,
     Download,
     AddGame,
@@ -109,7 +130,20 @@ enum class Action
     UndoRemove,
     DismissNotices,
     OpenUrl,
+    ShowTab,
+    ShowPage,
     StartWithWindows,
+    AutoSave,
+    MenuSize,
+    KeepEffects,
+    UpdateChecks,
+    FrameRate,
+    EffectResolution,
+    DepthDetail,
+    DebugInfo,
+    SetShortcut,
+    ClearShortcut,
+    ResetShortcuts,
 };
 
 enum class Look
@@ -118,12 +152,13 @@ enum class Look
     Button,
     PrimaryButton,
     Switch,
-    Setting, // a switch with its label after it
+    Tab,
+    Segment, // one choice of several side by side
     Rename,
     Remove,
 };
 
-// Something that can be clicked. index is the game or window it acts on.
+// Something that can be clicked. index is the game, window, tab, choice or shortcut it acts on.
 struct Target
 {
     RECT rect;
@@ -133,6 +168,17 @@ struct Target
     std::wstring label;
     bool on = false;
     const wchar_t* tip = nullptr; // for buttons that are only an icon
+    bool enabled = true;
+};
+
+// Text that is not a control, such as a setting's title.
+struct Label
+{
+    RECT rect;
+    HFONT font;
+    unsigned color;
+    std::wstring text;
+    UINT format = DT_WORDBREAK;
 };
 
 // Which control a target is. The targets are made again with every layout, so they are told apart by this.
@@ -189,6 +235,7 @@ struct Shown
     UINT inputModifiers = 0;
     UINT overlayKey = 0;
     UINT overlayModifiers = 0;
+    unsigned settings = 0;
 
     bool operator==(const Shown&) const = default;
 };
@@ -233,6 +280,8 @@ struct Launcher
     std::map<std::wstring, fs::path> located;
 
     Shown shown;
+    Tab tab = Tab::Games;
+    Page page = Page::General;
     bool minimized = false;
     std::wstring statusTitle;
     std::wstring statusDetail;
@@ -250,6 +299,7 @@ struct Launcher
     int height = 0; // of everything, unscrolled
     int scroll = 0;
     RECT logoRect{};
+    int tabLine = 0; // under the tabs
     RECT statusCard{};
     RECT statusIconRect{};
     RECT statusTitleRect{};
@@ -260,6 +310,8 @@ struct Launcher
     RECT list{};
     RECT noticesTitle{};
     std::vector<Row> rows;
+    std::vector<Label> labels;
+    std::vector<RECT> groups; // behind each row of segments
     int footer = 0;
     RECT trayNote{};
     std::vector<Target> targets;
@@ -296,6 +348,14 @@ struct Launcher
     RECT editBox{}; // drawn around the edit control
     RECT editRect{};
     HBRUSH editBrush = nullptr;
+
+    // The shortcut waiting for its keys, by its index in kShortcuts, or -1.
+    int capturing = -1;
+    std::wstring shortcutError;
+    // A custom frame rate is typed in a box, which is there while the limit is a custom one or one is being typed.
+    HWND rate = nullptr;
+    RECT rateBox{};
+    RECT rateRect{};
 
     // Explorer forgets the notification area icon when it restarts, and then sends TaskbarCreated.
     UINT taskbarCreated = 0;
@@ -648,17 +708,10 @@ void PlaceEntry(Entry& entry, const RECT& row, int iconSize, int textRight)
     entry.detailRect = { nameLeft, middle + P(1), textRight, middle + P(19) };
 }
 
-void Layout(HDC dc)
+// The Games tab between pad and right, from y down. Returns where it ends.
+int GamesLayout(HDC dc, int pad, int right, int y)
 {
-    const int width = P(kWidth);
-    const int pad = P(28);
-    const int right = width - pad;
     const int inner = P(18);
-    int y = P(3) + P(24) - l.scroll;
-    l.targets.clear();
-
-    l.logoRect = { pad, y, pad + P(44), y + P(44) };
-    y += P(44) + P(22);
 
     // The game's icon, what is happening, and switching between detection and a picked window, stacked when the
     // picked window closed.
@@ -780,17 +833,219 @@ void Layout(HDC dc)
         }
         y += P(8);
     }
+    return y;
+}
+
+// A setting's title with its description under it, between left and right. Returns the bottom.
+int PlaceSetting(HDC dc, int left, int right, int top, const std::wstring& title, const std::wstring& description)
+{
+    const int titleHeight = TextHeight(dc, ui->body, title, right - left);
+    l.labels.push_back({ { left, top, right, top + titleHeight }, ui->body, theme::kText, title });
+    const int detailTop = top + titleHeight + P(2);
+    const int detailHeight = TextHeight(dc, ui->note, description, right - left);
+    l.labels.push_back({ { left, detailTop, right, detailTop + detailHeight }, ui->note, theme::kDim, description });
+    return detailTop + detailHeight;
+}
+
+void PlaceHeading(int left, int right, int& y, const wchar_t* text)
+{
+    l.labels.push_back({ { left, y, right, y + P(16) }, ui->note, theme::kDim, text, DT_SINGLELINE });
+    y += P(16) + P(10);
+}
+
+// A switch with its title and description beside it.
+void PlaceSwitch(HDC dc, int left, int right, int& y, Action action, bool on, const wchar_t* title, const wchar_t* description)
+{
+    l.targets.push_back({ { left, y, left + P(36), y + P(20) }, action, Look::Switch, 0, L"", on });
+    y = PlaceSetting(dc, left + P(36) + P(12), right, y, title, description) + P(18);
+}
+
+// Choices side by side in one control, each as wide as the others, with the selected one filled.
+void PlaceSegments(int left, int right, int& y, Action action, std::initializer_list<const wchar_t*> choices, int selected)
+{
+    const int count = static_cast<int>(choices.size());
+    l.groups.push_back({ left, y, right, y + P(32) });
+    int index = 0;
+    for (const wchar_t* choice : choices)
+    {
+        l.targets.push_back({ { left + (right - left) * index / count, y, left + (right - left) * (index + 1) / count, y + P(32) }, action,
+                              Look::Segment, static_cast<size_t>(index), choice, index == selected });
+        ++index;
+    }
+    y += P(32);
+}
+
+// A setting with its choices under it.
+void PlaceChoices(HDC dc, int left, int right, int& y, Action action, const wchar_t* title, const wchar_t* description,
+                  std::initializer_list<const wchar_t*> choices, int selected)
+{
+    y = PlaceSetting(dc, left, right, y, title, description) + P(8);
+    PlaceSegments(left, right, y, action, choices, selected);
+    y += P(18);
+}
+
+// The place of value among a setting's choices, or past the last one for a value that is none of them.
+template <size_t N>
+int ChoiceOf(const int (&values)[N], int value)
+{
+    return static_cast<int>(std::find(std::begin(values), std::end(values), value) - std::begin(values));
+}
+
+void GeneralLayout(HDC dc, int pad, int right, int& y)
+{
+    PlaceHeading(pad, right, y, L"STARTUP");
+    PlaceSwitch(dc, pad, right, y, Action::StartWithWindows, l.startWithWindows, L"Start with Windows",
+                L"Starts in the notification area when you sign in.");
+
+    PlaceHeading(pad, right, y, L"PRESETS");
+    PlaceSwitch(dc, pad, right, y, Action::AutoSave, AutoSavePresets(), L"Save changes automatically",
+                L"Turn off to try changes first and save them with the icon at the top of the menu.");
+
+    PlaceHeading(pad, right, y, L"DISPLAY");
+    // The menu's size in quarter steps.
+    const int button = P(32);
+    const int valueWidth = P(58);
+    const float scale = MenuScale();
+    const int bottom = PlaceSetting(dc, pad, right - button * 2 - valueWidth - P(14), y, L"Menu size",
+                                    L"On top of the size that follows the game's window. Changes right away.");
+    l.targets.push_back({ { right - button * 2 - valueWidth, y, right - button - valueWidth, y + button }, Action::MenuSize, Look::Button, 0, L"-",
+                          false, nullptr, scale > kSmallestMenuScale + 0.01f });
+    l.labels.push_back({ { right - button - valueWidth, y, right - button, y + button }, ui->body, theme::kText,
+                         std::to_wstring(std::lround(scale * 100)) + L"%", DT_SINGLELINE | DT_CENTER | DT_VCENTER });
+    l.targets.push_back({ { right - button, y, right, y + button }, Action::MenuSize, Look::Button, 1, L"+", false, nullptr,
+                          scale < kLargestMenuScale - 0.01f });
+    y = std::max(bottom, y + button) + P(18);
+    PlaceSwitch(dc, pad, right, y, Action::KeepEffects, KeepEffectsVisible(), L"Keep effects visible when another window is in front",
+                L"Effects stay over the game while another window, such as a chat or a browser, is in front of it.");
+
+    PlaceHeading(pad, right, y, L"UPDATES");
+    PlaceSwitch(dc, pad, right, y, Action::UpdateChecks, UpdateChecksEnabled(), L"Check for updates",
+                L"Asks GitHub for a newer version when Unishade starts. Applies from the next start.");
+}
+
+void PerformanceLayout(HDC dc, int pad, int right, int& y)
+{
+    y = PlaceSetting(dc, pad, right, y, L"Frame rate", L"The most frames a second Unishade shows. A lower limit leaves more of the GPU to the game.") +
+        P(8);
+    PlaceSegments(pad, right, y, Action::FrameRate, { L"Follow game", L"120 FPS", L"60 FPS", L"Custom" },
+                  l.rate ? static_cast<int>(std::size(kFrameRates)) : ChoiceOf(kFrameRates, FrameRateLimit()));
+    if (l.rate)
+    {
+        // The box holds the edit control, which is moved only when its place changes.
+        y += P(8);
+        l.rateBox = { pad, y, pad + P(84), y + P(30) };
+        const int line = TextHeight(dc, ui->body, L"0", P(84));
+        const int editTop = (l.rateBox.top + l.rateBox.bottom - line) / 2;
+        const RECT edit{ l.rateBox.left + P(10), editTop, l.rateBox.right - P(10), editTop + line };
+        if (!EqualRect(&edit, &l.rateRect))
+        {
+            l.rateRect = edit;
+            SetWindowPos(l.rate, nullptr, edit.left, edit.top, edit.right - edit.left, edit.bottom - edit.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        l.labels.push_back({ { l.rateBox.right + P(10), y, right, y + P(30) }, ui->note, theme::kDim,
+                             L"frames a second, from " + std::to_wstring(kSlowestFrameRate) + L" to " + std::to_wstring(kFastestFrameRate),
+                             DT_SINGLELINE | DT_VCENTER });
+        y += P(30);
+    }
+    y += P(18);
+
+    PlaceChoices(dc, pad, right, y, Action::EffectResolution, L"Effect resolution",
+                 L"Effects run on a smaller picture, stretched back to the game's size. Lower is faster and blurrier. The menu blurs too, and "
+                 L"screenshots get smaller.",
+                 { L"100%", L"75%", L"50%" }, ChoiceOf(kEffectResolutions, EffectResolution()));
+    if (DepthEnabled())
+        PlaceChoices(dc, pad, right, y, Action::DepthDetail, L"Depth detail",
+                     L"Depth is estimated from a smaller picture. Lower is faster, and effects that use depth lose fine detail.",
+                     { L"High", L"Medium", L"Low" }, ChoiceOf(kDepthSizes, DepthSize()));
+
+    PlaceHeading(pad, right, y, L"DEBUG");
+    PlaceSwitch(dc, pad, right, y, Action::DebugInfo, DebugInfoEnabled(), L"Show debug info", L"Captured game FPS, output FPS and frame loss.");
+}
+
+void ShortcutsLayout(HDC dc, int pad, int right, int& y)
+{
+    const wchar_t* intro = L"Click a shortcut, then press the keys you want. They work right away.";
+    const int introHeight = TextHeight(dc, ui->note, intro, right - pad);
+    l.labels.push_back({ { pad, y, right, y + introHeight }, ui->note, theme::kDim, intro });
+    y += introHeight + P(14);
+
+    // The keys line up, also on the menu's shortcut, which cannot be left without them.
+    const int keyRight = right - P(28) - P(6);
+    const int keyLeft = keyRight - P(130);
+    for (size_t i = 0; i < std::size(kShortcuts); ++i)
+    {
+        const Shortcut& shortcut = kShortcuts[i];
+        const Hotkey& hotkey = g.hotkeys.*shortcut.member;
+        const bool capturing = l.capturing == static_cast<int>(i);
+        const int bottom = PlaceSetting(dc, pad, keyLeft - P(14), y, Wide(shortcut.title), Wide(shortcut.description));
+        l.targets.push_back({ { keyLeft, y + P(1), keyRight, y + P(33) }, Action::SetShortcut, Look::Button, i,
+                              capturing ? L"Press keys..." : hotkey.key ? FormatHotkey(hotkey) : L"Not set", capturing });
+        if (shortcut.member != &InputHotkeys::input)
+            l.targets.push_back({ { right - P(28), y + P(3), right, y + P(31) }, Action::ClearShortcut, Look::Remove, i, L"", false,
+                                  L"Leave unassigned", hotkey.key != 0 });
+        y = std::max(bottom, y + P(34)) + P(12);
+    }
+
+    const auto line = [&](const std::wstring& text, unsigned color) {
+        const int height = TextHeight(dc, ui->body, text, right - pad);
+        l.labels.push_back({ { pad, y, right, y + height }, ui->body, color, text });
+        y += height + P(6);
+    };
+    if (!l.shortcutError.empty())
+        line(l.shortcutError, theme::kError);
+    for (const std::wstring& warning : ShortcutWarnings())
+        line(warning, theme::kWarning);
+    const wchar_t* reset = L"Reset to defaults";
+    l.targets.push_back({ { pad, y, pad + TextWidth(dc, ui->body, reset), y + P(20) }, Action::ResetShortcuts, Look::Link, 0, reset });
+    y += P(20) + P(18);
+}
+
+// The Settings tab between pad and right, from y down. Returns where it ends.
+int SettingsLayout(HDC dc, int pad, int right, int y)
+{
+    PlaceSegments(pad, right, y, Action::ShowPage, { L"General", L"Performance", L"Shortcuts" }, static_cast<int>(l.page));
+    y += P(20);
+    switch (l.page)
+    {
+    case Page::General: GeneralLayout(dc, pad, right, y); break;
+    case Page::Performance: PerformanceLayout(dc, pad, right, y); break;
+    case Page::Shortcuts: ShortcutsLayout(dc, pad, right, y); break;
+    }
+    return y;
+}
+
+void Layout(HDC dc)
+{
+    const int width = P(kWidth);
+    const int pad = P(28);
+    const int right = width - pad;
+    int y = P(3) + P(24) - l.scroll;
+    l.targets.clear();
+    l.labels.clear();
+    l.groups.clear();
+
+    l.logoRect = { pad, y, pad + P(44), y + P(44) };
+    y += P(44) + P(12);
+
+    // The tabs' names line up with the logo, and each is clicked a little past its name.
+    int x = pad - P(8);
+    for (const auto& [tab, name] : { std::pair{ Tab::Games, L"Games" }, std::pair{ Tab::Settings, L"Settings" } })
+    {
+        const int tabWidth = TextWidth(dc, ui->strong, name) + P(16);
+        l.targets.push_back({ { x, y, x + tabWidth, y + P(36) }, Action::ShowTab, Look::Tab, static_cast<size_t>(tab), name, l.tab == tab });
+        x += tabWidth + P(10);
+    }
+    l.tabLine = y + P(36);
+    y = l.tabLine + P(20);
+
+    y = l.tab == Tab::Games ? GamesLayout(dc, pad, right, y) : SettingsLayout(dc, pad, right, y);
 
     // The footer stays at the bottom of the window when the content is shorter.
     const int noteHeight = TextHeight(dc, ui->note, kTrayNote, right - pad);
-    l.footer = std::max(y, P(kMinHeight) - (P(14) + P(24) + P(8) + noteHeight + P(12) + P(20) + P(16)) - l.scroll);
-    const int settingTop = l.footer + P(14);
-    const wchar_t* start = L"Start with Windows";
-    l.targets.push_back({ { pad, settingTop, pad + P(36) + P(10) + TextWidth(dc, ui->body, start), settingTop + P(24) }, Action::StartWithWindows,
-                          Look::Setting, 0, start, l.startWithWindows });
-    l.trayNote = { pad, settingTop + P(24) + P(8), right, settingTop + P(24) + P(8) + noteHeight };
+    l.footer = std::max(y, P(kMinHeight) - (P(14) + noteHeight + P(12) + P(20) + P(16)) - l.scroll);
+    l.trayNote = { pad, l.footer + P(14), right, l.footer + P(14) + noteHeight };
     int linkY = l.trayNote.bottom + P(12);
-    int x = pad;
+    x = pad;
     const auto link = [&](Action action, const wchar_t* label) {
         const int linkWidth = TextWidth(dc, ui->body, label);
         if (x + linkWidth > right)
@@ -805,6 +1060,7 @@ void Layout(HDC dc)
     link(Action::Help, L"Get help on Discord");
     if (!l.setup.empty())
         link(Action::RunSetup, L"Run Setup");
+    link(Action::Support, L"Support on Ko-fi");
     l.height = linkY + P(20) + P(16) + l.scroll;
 }
 
@@ -848,7 +1104,7 @@ Control ControlOf(const Target& target)
 int TargetAt(POINT point)
 {
     for (size_t i = 0; i < l.targets.size(); ++i)
-        if (PtInRect(&l.targets[i].rect, point))
+        if (l.targets[i].enabled && PtInRect(&l.targets[i].rect, point))
             return static_cast<int>(i);
     return -1;
 }
@@ -893,7 +1149,8 @@ Shown CurrentShown()
                  .inputKey = g.hotkeys.input.key,
                  .inputModifiers = g.hotkeys.input.modifiers,
                  .overlayKey = g.hotkeys.overlay.key,
-                 .overlayModifiers = g.hotkeys.overlay.modifiers };
+                 .overlayModifiers = g.hotkeys.overlay.modifiers,
+                 .settings = SettingsVersion() };
     // Only shown while waiting for the picked window. The main loop notices the game's window closing.
     if (g.captureEnabled && !g.target && g.selectedGame)
         shown.selectedOpen = GameWindowExists(*g.selectedGame);
@@ -915,6 +1172,64 @@ void CloseRename()
     DestroyWindow(edit);
 }
 
+// Closes the frame rate box without using the number in it.
+void CloseRate()
+{
+    const HWND rate = l.rate;
+    if (!rate)
+        return;
+    // Cleared first, so the box losing the focus does not use its number.
+    l.rate = nullptr;
+    l.rateRect = {};
+    if (GetFocus() == rate)
+        SetFocus(g.launcher);
+    DestroyWindow(rate);
+}
+
+LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+
+// Opens the box a custom frame rate is typed in, holding the limit, or 60 without one.
+void OpenRate()
+{
+    const int limit = FrameRateLimit();
+    l.rate = CreateWindowExW(0, L"EDIT", std::to_wstring(limit ? limit : 60).c_str(), WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL, 0, 0, 0,
+                             0, g.launcher, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!l.rate)
+    {
+        Log(LogLevel::Error, L"Could not open the frame rate box (error %lu).", GetLastError());
+        return;
+    }
+    l.editProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(l.rate, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(EditProc)));
+    SendMessageW(l.rate, EM_SETLIMITTEXT, 3, 0);
+    SendMessageW(l.rate, WM_SETFONT, reinterpret_cast<WPARAM>(l.launcherScaling.body), FALSE);
+}
+
+// Keeps the frame rate box for as long as Performance shows a custom limit or one is being typed. The menu may
+// have changed the limit.
+void SyncRate()
+{
+    const int limit = FrameRateLimit();
+    const bool typing = l.rate && GetFocus() == l.rate;
+    if (l.tab != Tab::Settings || l.page != Page::Performance || (ChoiceOf(kFrameRates, limit) < static_cast<int>(std::size(kFrameRates)) && !typing))
+    {
+        CloseRate();
+        return;
+    }
+    if (!l.rate)
+        OpenRate();
+    else if (!typing)
+        SetWindowTextW(l.rate, std::to_wstring(limit).c_str());
+}
+
+// Stops waiting for a shortcut's keys.
+void StopShortcut()
+{
+    if (l.capturing < 0)
+        return;
+    l.capturing = -1;
+    SuspendHotkeys(false);
+}
+
 void Refresh()
 {
     // The game being renamed was removed.
@@ -922,6 +1237,7 @@ void Refresh()
         CloseRename();
     l.shown = CurrentShown();
     Describe();
+    SyncRate();
     Resize();
     UpdateHover();
 }
@@ -1011,13 +1327,6 @@ void StatusIcon(Gdiplus::Graphics& graphics)
     graphics.FillEllipse(&solid, dot.X - F(4.5f), dot.Y - F(4.5f), F(9.0f), F(9.0f));
 }
 
-// The switch of a setting, before its label.
-RECT SettingSwitch(const RECT& setting)
-{
-    const int middle = (setting.top + setting.bottom) / 2;
-    return { setting.left, middle - P(10), setting.left + P(36), middle + P(10) };
-}
-
 void Switch(Gdiplus::Graphics& graphics, const RECT& rect, bool on, bool hovered)
 {
     const unsigned track = on ? (hovered ? theme::kAccentHover : theme::kAccent) : (hovered ? theme::kBorderStrong : theme::kBorder);
@@ -1050,7 +1359,7 @@ void RenameIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
     graphics.DrawLine(&pen, center.X + 1.0f * s, center.Y - 3.0f * s, center.X + 3.0f * s, center.Y - 1.0f * s);
 }
 
-void RemoveIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
+void RemoveIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered, bool enabled)
 {
     const Gdiplus::PointF center(F(rect.left + rect.right) / 2, F(rect.top + rect.bottom) / 2);
     const float r = F(rect.right - rect.left) / 2;
@@ -1059,7 +1368,7 @@ void RemoveIcon(Gdiplus::Graphics& graphics, const RECT& rect, bool hovered)
         Gdiplus::SolidBrush background(Plus(theme::kError, 0x24));
         graphics.FillEllipse(&background, center.X - r, center.Y - r, r * 2, r * 2);
     }
-    Gdiplus::Pen pen(Plus(hovered ? theme::kError : theme::kDim), 1.6f * ui->scale);
+    Gdiplus::Pen pen(Plus(hovered ? theme::kError : enabled ? theme::kDim : theme::kBorderStrong), 1.6f * ui->scale);
     pen.SetStartCap(Gdiplus::LineCapRound);
     pen.SetEndCap(Gdiplus::LineCapRound);
     const float s = F(4.5f);
@@ -1166,6 +1475,7 @@ void Paint(HDC output)
     const int height = client.bottom;
     l.scroll = std::clamp(l.scroll, 0, std::max(0, l.height - height));
     const bool focusShown = l.focusShown && GetFocus() == g.launcher;
+    const bool games = l.tab == Tab::Games;
     const HDC dc = CreateCompatibleDC(output);
     const HBITMAP bitmap = CreateCompatibleBitmap(output, width, height);
     const HGDIOBJ previousBitmap = SelectObject(dc, bitmap);
@@ -1184,19 +1494,27 @@ void Paint(HDC output)
             graphics.DrawImage(l.logo.get(), F(l.logoRect.left), F(l.logoRect.top), F(l.logoRect.right - l.logoRect.left),
                                F(l.logoRect.bottom - l.logoRect.top));
 
-        FillRounded(graphics, l.statusCard, F(10.0f), Plus(theme::kCard), Plus(theme::kBorder));
-        StatusIcon(graphics);
-
-        if (!l.update.version.empty())
-            FillRounded(graphics, l.updateCard, F(10.0f), Plus(theme::kAccent, 0x22), Plus(theme::kAccent, 0x90));
-
-        FillRounded(graphics, l.list, F(10.0f), Plus(theme::kCard), Plus(theme::kBorder));
         Gdiplus::Pen line(Plus(theme::kBorder), 1.0f);
-        for (size_t i = 1; i < l.entries.size(); ++i)
+        graphics.DrawLine(&line, 0, l.tabLine, width, l.tabLine);
+        if (games)
         {
-            const int top = l.entries[i].rect.top;
-            graphics.DrawLine(&line, static_cast<int>(l.list.left) + P(14), top, static_cast<int>(l.list.right) - P(14), top);
+            FillRounded(graphics, l.statusCard, F(10.0f), Plus(theme::kCard), Plus(theme::kBorder));
+            StatusIcon(graphics);
+
+            if (!l.update.version.empty())
+                FillRounded(graphics, l.updateCard, F(10.0f), Plus(theme::kAccent, 0x22), Plus(theme::kAccent, 0x90));
+
+            FillRounded(graphics, l.list, F(10.0f), Plus(theme::kCard), Plus(theme::kBorder));
+            for (size_t i = 1; i < l.entries.size(); ++i)
+            {
+                const int top = l.entries[i].rect.top;
+                graphics.DrawLine(&line, static_cast<int>(l.list.left) + P(14), top, static_cast<int>(l.list.right) - P(14), top);
+            }
         }
+        for (const RECT& group : l.groups)
+            FillRounded(graphics, group, F(7.0f), Plus(theme::kSidebar), Plus(theme::kBorder));
+        if (l.rate)
+            FillRounded(graphics, l.rateBox, F(6.0f), Plus(theme::kCardHover), Plus(GetFocus() == l.rate ? theme::kAccent : theme::kBorderStrong));
 
         for (size_t i = 0; i < l.targets.size(); ++i)
         {
@@ -1205,8 +1523,9 @@ void Paint(HDC output)
             switch (target.look)
             {
             case Look::Button:
+                // A shortcut's button is outlined while it waits for keys.
                 FillRounded(graphics, target.rect, F(8.0f), Plus(hovered ? theme::kBorder : theme::kCardHover),
-                            Plus(hovered ? theme::kBorderStrong : theme::kBorder));
+                            Plus(target.on ? theme::kAccent : hovered ? theme::kBorderStrong : theme::kBorder));
                 break;
             case Look::PrimaryButton:
             {
@@ -1217,35 +1536,51 @@ void Paint(HDC output)
             case Look::Switch:
                 Switch(graphics, target.rect, target.on, hovered);
                 break;
-            case Look::Setting:
-                Switch(graphics, SettingSwitch(target.rect), target.on, hovered);
+            case Look::Tab:
+                if (target.on)
+                {
+                    Gdiplus::SolidBrush underline(Plus(theme::kAccent));
+                    graphics.FillRectangle(&underline, F(target.rect.left) + F(2.0f), F(target.rect.bottom) - F(2.0f),
+                                           F(target.rect.right - target.rect.left) - F(4.0f), F(2.0f));
+                }
+                break;
+            case Look::Segment:
+                if (target.on)
+                {
+                    // The pages of Settings are quieter than a setting's choices, like in the menu.
+                    const unsigned fill = target.action == Action::ShowPage ? theme::kBorder : theme::kAccent;
+                    FillRounded(graphics, Inset(target.rect, P(3)), F(5.0f), Plus(fill), Plus(fill));
+                }
                 break;
             case Look::Rename:
                 RenameIcon(graphics, target.rect, hovered);
                 break;
             case Look::Remove:
-                RemoveIcon(graphics, target.rect, hovered);
+                RemoveIcon(graphics, target.rect, hovered, target.enabled);
                 break;
             case Look::Link:
                 break;
             }
         }
 
-        for (const Entry& entry : l.entries)
+        if (games)
         {
-            if (entry.removed)
-                continue;
-            EntryIcon(graphics, entry);
-            if (entry.running)
-                FillRounded(graphics, entry.badge, F(entry.badge.bottom - entry.badge.top) / 2, Plus(theme::kSuccess, 0x26),
-                            Plus(theme::kSuccess, 0x26));
+            for (const Entry& entry : l.entries)
+            {
+                if (entry.removed)
+                    continue;
+                EntryIcon(graphics, entry);
+                if (entry.running)
+                    FillRounded(graphics, entry.badge, F(entry.badge.bottom - entry.badge.top) / 2, Plus(theme::kSuccess, 0x26),
+                                Plus(theme::kSuccess, 0x26));
+            }
+
+            for (const Row& row : l.rows)
+                Icon(graphics, Gdiplus::PointF(F(row.rect.left) - F(18.0f), F(row.rect.top) + F(9.0f)), row.level);
+
+            if (l.edit)
+                FillRounded(graphics, l.editBox, F(6.0f), Plus(theme::kCardHover), Plus(l.renameProblem.empty() ? theme::kAccent : theme::kError));
         }
-
-        for (const Row& row : l.rows)
-            Icon(graphics, Gdiplus::PointF(F(row.rect.left) - F(18.0f), F(row.rect.top) + F(9.0f)), row.level);
-
-        if (l.edit)
-            FillRounded(graphics, l.editBox, F(6.0f), Plus(theme::kCardHover), Plus(l.renameProblem.empty() ? theme::kAccent : theme::kError));
 
         if (const int focused = FindTarget(l.focus); focused >= 0 && focusShown)
             FocusRing(graphics, l.targets[focused].rect);
@@ -1259,36 +1594,41 @@ void Paint(HDC output)
     PaintText(dc, ui->body, theme::kDim, L"Version " UNISHADE_VERSION,
              { l.logoRect.right + P(14), l.logoRect.top + P(26), width, l.logoRect.bottom }, DT_SINGLELINE);
 
-    if (!l.statusName.empty() && !ExecutableIcon(l.statusIcon, l.statusIconRect.right - l.statusIconRect.left))
-        PaintText(dc, ui->title, theme::kText, Initial(l.statusName), l.statusIconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-    PaintText(dc, ui->semibold, theme::kText, l.statusTitle, l.statusTitleRect);
-    PaintText(dc, ui->body, theme::kDim, l.statusDetail, l.statusDetailRect);
-    if (!l.update.version.empty())
-        PaintText(dc, ui->body, theme::kText, L"Unishade " + l.update.version + L" is available.", l.updateText,
-                 DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-
-    PaintText(dc, ui->semibold, theme::kText, L"Games", l.gamesTitle, DT_SINGLELINE | DT_VCENTER);
-    for (const Entry& entry : l.entries)
+    if (games)
     {
-        if (entry.removed)
-        {
-            PaintText(dc, ui->body, theme::kDim, L"Removed " + entry.name + L".", entry.nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-            continue;
-        }
-        EntryText(dc, entry);
-        if (entry.running)
-            PaintText(dc, ui->note, theme::kSuccess, L"Running", entry.badge, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-    }
-    if (l.entries.empty())
-        PaintText(dc, ui->body, theme::kDim, L"No games yet. Open one and click Add game.", Inset(l.list, P(18)),
-                 DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        if (!l.statusName.empty() && !ExecutableIcon(l.statusIcon, l.statusIconRect.right - l.statusIconRect.left))
+            PaintText(dc, ui->title, theme::kText, Initial(l.statusName), l.statusIconRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        PaintText(dc, ui->semibold, theme::kText, l.statusTitle, l.statusTitleRect);
+        PaintText(dc, ui->body, theme::kDim, l.statusDetail, l.statusDetailRect);
+        if (!l.update.version.empty())
+            PaintText(dc, ui->body, theme::kText, L"Unishade " + l.update.version + L" is available.", l.updateText,
+                     DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
+        PaintText(dc, ui->semibold, theme::kText, L"Games", l.gamesTitle, DT_SINGLELINE | DT_VCENTER);
+        for (const Entry& entry : l.entries)
+        {
+            if (entry.removed)
+            {
+                PaintText(dc, ui->body, theme::kDim, L"Removed " + entry.name + L".", entry.nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                continue;
+            }
+            EntryText(dc, entry);
+            if (entry.running)
+                PaintText(dc, ui->note, theme::kSuccess, L"Running", entry.badge, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        }
+        if (l.entries.empty())
+            PaintText(dc, ui->body, theme::kDim, L"No games yet. Open one and click Add game.", Inset(l.list, P(18)),
+                     DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+        if (!l.rows.empty())
+            PaintText(dc, ui->semibold, theme::kText, L"Messages", l.noticesTitle, DT_SINGLELINE | DT_VCENTER);
+        for (const Row& row : l.rows)
+            for (const Word& word : row.words)
+                PaintText(dc, ui->body, theme::kText, word.text, word.rect, DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    for (const Label& label : l.labels)
+        PaintText(dc, label.font, label.color, label.text, label.rect, label.format);
     PaintText(dc, ui->note, theme::kDim, kTrayNote, l.trayNote);
-    if (!l.rows.empty())
-        PaintText(dc, ui->semibold, theme::kText, L"Messages", l.noticesTitle, DT_SINGLELINE | DT_VCENTER);
-    for (const Row& row : l.rows)
-        for (const Word& word : row.words)
-            PaintText(dc, ui->body, theme::kText, word.text, word.rect, DT_SINGLELINE | DT_END_ELLIPSIS);
 
     for (size_t i = 0; i < l.targets.size(); ++i)
     {
@@ -1304,17 +1644,20 @@ void Paint(HDC output)
                           DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
             break;
         case Look::Button:
-            PaintText(dc, ui->body, theme::kText, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            PaintText(dc, ui->body, target.enabled ? theme::kText : theme::kBorderStrong, target.label, target.rect,
+                      DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             break;
         case Look::PrimaryButton:
             PaintText(dc, ui->strong, 0xFFFFFF, target.label, target.rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             break;
-        case Look::Setting:
-        {
-            const RECT label{ SettingSwitch(target.rect).right + P(10), target.rect.top, target.rect.right, target.rect.bottom };
-            PaintText(dc, ui->body, theme::kText, target.label, label, DT_SINGLELINE | DT_VCENTER);
+        case Look::Tab:
+            PaintText(dc, ui->strong, target.on || hovered ? theme::kText : theme::kDim, target.label, target.rect,
+                      DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             break;
-        }
+        case Look::Segment:
+            PaintText(dc, ui->body, target.on ? 0xFFFFFF : hovered ? theme::kText : theme::kDim, target.label, target.rect,
+                      DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            break;
         default:
             break;
         }
@@ -1693,7 +2036,25 @@ void EndRename(WPARAM how)
     Refresh();
 }
 
-// Enter saves the name, Escape cancels, and Tab or clicking elsewhere leaves the box.
+// Leaving the frame rate box uses the number in it. Enter and Tab leave it, and Escape leaves it with the limit as it was.
+void EndRate(WPARAM how)
+{
+    if (how == kCancelName)
+        SetWindowTextW(l.rate, std::to_wstring(FrameRateLimit()).c_str());
+    if (GetFocus() == l.rate)
+    {
+        // Which comes back here.
+        SetFocus(g.launcher);
+        return;
+    }
+    wchar_t text[8]{};
+    GetWindowTextW(l.rate, text, static_cast<int>(std::size(text)));
+    if (const int rate = _wtoi(text); rate > 0)
+        SetFrameRateLimit(rate);
+    Refresh();
+}
+
+// Enter saves what is in the rename box or the frame rate box, Escape cancels, and Tab or clicking elsewhere leaves it.
 LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -1711,9 +2072,9 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (wParam == L'\r' || wParam == L'\x1B' || wParam == L'\t')
             return 0;
         break;
-    // Not while CloseRename takes the focus away.
+    // Not while CloseRename or CloseRate takes the focus away.
     case WM_KILLFOCUS:
-        if (hwnd == l.edit)
+        if (hwnd == l.edit || hwnd == l.rate)
             PostMessageW(g.launcher, kRenameMessage, kLeaveName, reinterpret_cast<LPARAM>(hwnd));
         break;
     }
@@ -1781,6 +2142,7 @@ void Run(const Target& target)
     {
     case Action::OpenLog: ShellOpen(LogPath()); return;
     case Action::Help: ShellOpen(kHelpUrl); return;
+    case Action::Support: ShellOpen(kSupportUrl); return;
     case Action::RunSetup: ShellOpen(l.setup); return;
     case Action::Download: ShellOpen(l.update.url); return;
     case Action::OpenUrl: ShellOpen(target.label); return;
@@ -1811,9 +2173,114 @@ void Run(const Target& target)
     case Action::DismissNotices:
         ClearNotices();
         break;
+    case Action::ShowTab:
+        CloseRename();
+        l.tab = static_cast<Tab>(target.index);
+        l.scroll = 0;
+        break;
+    case Action::ShowPage:
+        l.page = static_cast<Page>(target.index);
+        l.scroll = 0;
+        break;
     case Action::StartWithWindows:
         SetStartWithWindows(!l.startWithWindows);
         break;
+    case Action::AutoSave:
+        SetAutoSavePresets(!AutoSavePresets());
+        // From here on every change saves as it happens, so changes that were waiting are saved too.
+        if (AutoSavePresets())
+            FlushPresets(true);
+        break;
+    case Action::MenuSize:
+        SetMenuScale(std::round((MenuScale() + (target.index ? 0.25f : -0.25f)) * 4) / 4);
+        break;
+    case Action::KeepEffects:
+        SetKeepEffectsVisible(!KeepEffectsVisible());
+        break;
+    case Action::UpdateChecks:
+        SetUpdateChecksEnabled(!UpdateChecksEnabled());
+        break;
+    case Action::FrameRate:
+        if (target.index < std::size(kFrameRates))
+        {
+            CloseRate();
+            SetFrameRateLimit(kFrameRates[target.index]);
+        }
+        else
+        {
+            if (!l.rate)
+                OpenRate();
+            if (l.rate)
+            {
+                SendMessageW(l.rate, EM_SETSEL, 0, -1);
+                SetFocus(l.rate);
+            }
+        }
+        break;
+    case Action::EffectResolution:
+        SetEffectResolution(kEffectResolutions[target.index]);
+        break;
+    case Action::DepthDetail:
+        SetDepthSize(kDepthSizes[target.index]);
+        break;
+    case Action::DebugInfo:
+        SetDebugInfoEnabled(!DebugInfoEnabled());
+        break;
+    case Action::SetShortcut:
+    {
+        // Clicking the shortcut that waits for keys stops the wait.
+        const bool waiting = l.capturing == static_cast<int>(target.index);
+        StopShortcut();
+        if (!waiting)
+        {
+            l.capturing = static_cast<int>(target.index);
+            l.shortcutError.clear();
+            SuspendHotkeys(true);
+        }
+        break;
+    }
+    case Action::ClearShortcut:
+    {
+        InputHotkeys hotkeys = g.hotkeys;
+        hotkeys.*kShortcuts[target.index].member = {};
+        l.shortcutError = ChangeHotkeys(hotkeys);
+        break;
+    }
+    case Action::ResetShortcuts:
+        if (MessageBoxW(g.launcher, L"Reset every shortcut?\n\nThey go back to the keys Unishade starts with.", L"Unishade",
+                        MB_OKCANCEL | MB_ICONWARNING) == IDOK)
+            l.shortcutError = ChangeHotkeys(DefaultHotkeys());
+        break;
+    }
+    Refresh();
+}
+
+// While a shortcut waits for its keys, the next key pressed with any modifiers becomes it.
+void TakeShortcut(UINT key)
+{
+    // Modifiers on their own.
+    if (key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU || key == VK_LWIN || key == VK_RWIN)
+        return;
+    Hotkey hotkey;
+    if (GetKeyState(VK_CONTROL) < 0)
+        hotkey.modifiers |= MOD_CONTROL;
+    if (GetKeyState(VK_MENU) < 0)
+        hotkey.modifiers |= MOD_ALT;
+    if (GetKeyState(VK_SHIFT) < 0)
+        hotkey.modifiers |= MOD_SHIFT;
+    if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0)
+        hotkey.modifiers |= MOD_WIN;
+    hotkey.key = key;
+    if (key == VK_ESCAPE && hotkey.modifiers == MOD_NOREPEAT)
+        StopShortcut();
+    else if (FormatHotkey(hotkey).empty())
+        l.shortcutError = UnusableKeyText();
+    else
+    {
+        InputHotkeys hotkeys = g.hotkeys;
+        hotkeys.*kShortcuts[l.capturing].member = hotkey;
+        StopShortcut();
+        l.shortcutError = ChangeHotkeys(hotkeys);
     }
     Refresh();
 }
@@ -1964,7 +2431,10 @@ bool LauncherKey(WPARAM key, LPARAM flags)
         const int count = static_cast<int>(l.targets.size());
         const int current = FindTarget(l.focus);
         const bool back = GetKeyState(VK_SHIFT) < 0;
-        const int next = current < 0 ? (back ? count - 1 : 0) : (current + (back ? count - 1 : 1)) % count;
+        int next = current < 0 ? (back ? count - 1 : 0) : (current + (back ? count - 1 : 1)) % count;
+        // Past the ones that cannot be used, such as the button for a larger menu at the largest size.
+        for (int skipped = 0; skipped < count && !l.targets[next].enabled; ++skipped)
+            next = (next + (back ? count - 1 : 1)) % count;
         l.focus = ControlOf(l.targets[next]);
         l.focusShown = true;
         ScrollTo(l.targets[next].rect);
@@ -1974,7 +2444,7 @@ bool LauncherKey(WPARAM key, LPARAM flags)
     // A held key repeats, which should not use the control again.
     const bool repeated = (flags & (1 << 30)) != 0;
     if ((key == VK_RETURN || key == VK_SPACE) && l.focusShown && !repeated)
-        if (const int index = FindTarget(l.focus); index >= 0)
+        if (const int index = FindTarget(l.focus); index >= 0 && l.targets[index].enabled)
         {
             // Copied, since running it lays the window out again.
             const Target target = l.targets[index];
@@ -2235,8 +2705,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             l.tip.reset();
             InvalidateRect(hwnd, nullptr, FALSE);
         }
-        // Clicking outside the rename box leaves it.
-        if (l.edit)
+        // Clicking outside the rename box or the frame rate box leaves it.
+        if (l.edit || l.rate)
             SetFocus(hwnd);
         // Clicking hides the focus until a key is used again.
         if (l.focusShown)
@@ -2249,6 +2719,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             l.pressed = ControlOf(l.targets[index]);
             l.focus = l.pressed;
             SetCapture(hwnd);
+        }
+        // Clicking anything but the shortcut that waits for keys stops the wait. Its own button does when let go.
+        if (l.capturing >= 0 && l.pressed != Control{ Action::SetShortcut, static_cast<size_t>(l.capturing) })
+        {
+            StopShortcut();
+            InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     case WM_LBUTTONUP:
@@ -2270,12 +2746,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         l.pressed.reset();
         return 0;
     case WM_KEYDOWN:
-        if (LauncherKey(wParam, lParam))
+    case WM_SYSKEYDOWN:
+        if (l.capturing >= 0)
+        {
+            TakeShortcut(static_cast<UINT>(wParam));
+            return 0;
+        }
+        if (message == WM_KEYDOWN && LauncherKey(wParam, lParam))
             return 0;
         break;
-    // The focus only shows while the launcher has it.
-    case WM_SETFOCUS:
+    // Alt would open the window's menu while a shortcut waits for keys.
+    case WM_SYSCOMMAND:
+        if (l.capturing >= 0 && (wParam & 0xFFF0) == SC_KEYMENU)
+            return 0;
+        break;
+    // The focus only shows while the launcher has it, and a shortcut only waits for keys there.
     case WM_KILLFOCUS:
+        StopShortcut();
+        [[fallthrough]];
+    case WM_SETFOCUS:
         InvalidateRect(hwnd, nullptr, FALSE);
         break;
     case WM_TIMER:
@@ -2326,6 +2815,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         // Not when it was sent by a box that is already closed.
         if (l.edit && reinterpret_cast<HWND>(lParam) == l.edit)
             EndRename(wParam);
+        else if (l.rate && reinterpret_cast<HWND>(lParam) == l.rate)
+            EndRate(wParam);
         return 0;
     // Typing again hides what was wrong with the name.
     case WM_COMMAND:
@@ -2361,6 +2852,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         Scale(l.launcherScaling, HIWORD(wParam));
         if (l.edit)
             SendMessageW(l.edit, WM_SETFONT, reinterpret_cast<WPARAM>(l.launcherScaling.strong), TRUE);
+        if (l.rate)
+            SendMessageW(l.rate, WM_SETFONT, reinterpret_cast<WPARAM>(l.launcherScaling.body), TRUE);
         ClearIcons();
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top,
@@ -2372,6 +2865,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         RemoveTrayIcon();
         // Destroyed with the launcher.
         l.edit = nullptr;
+        l.rate = nullptr;
         g.launcher = nullptr;
         PostQuitMessage(0);
         return 0;
