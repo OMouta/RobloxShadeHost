@@ -864,8 +864,15 @@ void Open(const std::string& target)
     Spawn("open", target);
 }
 
-std::string UiFont()
+std::string UiFont(bool bold)
 {
+    if (bold)
+    {
+        for (const char* path : { "/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/Library/Fonts/Arial Bold.ttf" })
+            if (access(path, R_OK) == 0)
+                return path;
+        return {};
+    }
     for (const char* path : { "/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Helvetica.ttc", "/Library/Fonts/Arial.ttf" })
         if (access(path, R_OK) == 0)
             return path;

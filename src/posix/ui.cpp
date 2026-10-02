@@ -1055,7 +1055,7 @@ bool InitUi(UiWindow& ui, std::string& error)
         static_cast<UiWindow*>(glfwGetWindowUserPointer(window))->rescale = true;
     });
 
-    const std::string font = platform::UiFont();
+    const std::string font = platform::UiFont(false);
     if (font.empty() || !io.Fonts->AddFontFromFileTTF(font.c_str()))
         io.Fonts->AddFontDefault();
 

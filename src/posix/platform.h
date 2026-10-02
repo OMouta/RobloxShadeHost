@@ -141,6 +141,6 @@ void Open(const std::string& target);
 // the Vulkan device can be the same GPU. False when unknown, as on macOS.
 bool DisplayDrmDevice(int64_t& major, int64_t& minor);
 
-// A sans-serif font for the menu, or empty to use Dear ImGui's own.
-std::string UiFont();
+// A sans-serif font for the launcher and the menu, regular or bold, or empty when the system has none.
+std::string UiFont(bool bold);
 } // namespace platform

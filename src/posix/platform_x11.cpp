@@ -1735,9 +1735,10 @@ void Open(const std::string& target)
         std::thread([pid] { waitpid(pid, nullptr, 0); }).detach();
 }
 
-std::string UiFont()
+std::string UiFont(bool bold)
 {
-    if (FILE* pipe = popen("fc-match -f '%{file}' 'sans-serif:style=Regular' 2>/dev/null", "r"))
+    const char* match = bold ? "fc-match -f '%{file}' 'sans-serif:bold' 2>/dev/null" : "fc-match -f '%{file}' 'sans-serif:style=Regular' 2>/dev/null";
+    if (FILE* pipe = popen(match, "r"))
     {
         char buffer[1024]{};
         const size_t size = fread(buffer, 1, sizeof(buffer) - 1, pipe);
@@ -1747,9 +1748,13 @@ std::string UiFont()
         if ((extension == ".ttf" || extension == ".otf") && access(path.c_str(), R_OK) == 0)
             return path;
     }
-    for (const char* path : { "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                              "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-                              "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf" })
+    const std::initializer_list<const char*> regularFonts = { "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                                                              "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+                                                              "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf" };
+    const std::initializer_list<const char*> boldFonts = { "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+                                                           "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf", "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+                                                           "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" };
+    for (const char* path : bold ? boldFonts : regularFonts)
         if (access(path, R_OK) == 0)
             return path;
     return {};
