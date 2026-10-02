@@ -550,9 +550,10 @@ void App::ToggleOverlay()
     Log(LogLevel::Info, captureEnabled ? "Overlay on." : "Overlay off. Frame capture stopped.");
 }
 
-void App::ShowToast(std::string text, double seconds)
+void App::ShowToast(std::string text, double seconds, std::string key)
 {
     toast = std::move(text);
+    toastKey = std::move(key);
     toastUntil = Now() + seconds;
 }
 

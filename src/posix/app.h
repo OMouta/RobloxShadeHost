@@ -81,7 +81,8 @@ public:
     // While the menu records a shortcut, every shortcut is let go so its keys reach the menu.
     void SuspendHotkeys(bool suspended);
     bool EffectsInstalled();
-    void ShowToast(std::string text, double seconds = 3.0);
+    // A short message at the bottom of the game, with an optional key before it.
+    void ShowToast(std::string text, double seconds = 3.0, std::string key = {});
     std::string HotkeyText(int id) const;
     const std::vector<platform::Window>& Windows();
 
@@ -108,6 +109,7 @@ public:
     const fx::Uniform* menuActiveUniform = nullptr;
     const fx::Uniform* menuHoveredUniform = nullptr;
     std::string toast;
+    std::string toastKey;
     double toastUntil = 0;
     std::string lastCaptureError;
     UiWindow launcher;
