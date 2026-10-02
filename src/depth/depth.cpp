@@ -21,8 +21,6 @@
 namespace
 {
 constexpr wchar_t kModelFile[] = L"depth-anything-v2-small.onnx";
-// Longest side of the model input. Depth Anything V2 expects multiples of 14 around 518.
-constexpr int kModelSize = 518;
 // Default RESHADE_DEPTH_LINEARIZATION_FAR_PLANE, so no preprocessor changes are needed in ReShade.
 constexpr float kFarPlane = 1000.0f;
 // Blend factor for the per-frame depth range, so the whole image does not pulse when something
@@ -64,6 +62,7 @@ struct Depth
 
     int width = 0;  // model input and output size, follows the frame's aspect ratio
     int height = 0;
+    int size = 0;   // their longest side, as picked in the menu's Settings
     UINT sourceWidth = 0;
     UINT sourceHeight = 0;
     // Compiled once, so the shader can be made again on a new device.
@@ -234,9 +233,10 @@ void Resize(const D3D11_TEXTURE2D_DESC& frame)
 {
     const bool landscape = frame.Width >= frame.Height;
     const float ratio = landscape ? static_cast<float>(frame.Height) / frame.Width : static_cast<float>(frame.Width) / frame.Height;
-    const int shortSide = std::max(14, static_cast<int>(std::lround(kModelSize * ratio / 14)) * 14);
-    d.width = landscape ? kModelSize : shortSide;
-    d.height = landscape ? shortSide : kModelSize;
+    d.size = DepthSize();
+    const int shortSide = std::max(14, static_cast<int>(std::lround(d.size * ratio / 14)) * 14);
+    d.width = landscape ? d.size : shortSide;
+    d.height = landscape ? shortSide : d.size;
     d.sourceWidth = frame.Width;
     d.sourceHeight = frame.Height;
     const size_t pixels = static_cast<size_t>(d.width) * d.height;
@@ -389,7 +389,7 @@ void UpdateDepth(ID3D11Texture2D* frame)
         CreateShader();
     D3D11_TEXTURE2D_DESC desc{};
     frame->GetDesc(&desc);
-    if (desc.Width != d.sourceWidth || desc.Height != d.sourceHeight)
+    if (desc.Width != d.sourceWidth || desc.Height != d.sourceHeight || d.size != DepthSize())
         Resize(desc);
 
     if (d.stagingPending)
@@ -422,6 +422,11 @@ void UpdateDepth(ID3D11Texture2D* frame)
     g.context->CSSetUnorderedAccessViews(0, 1, targets, nullptr);
     g.context->CopyResource(d.staging.get(), d.preprocessed.get());
     d.stagingPending = true;
+}
+
+bool DepthEnabled()
+{
+    return d.enabled;
 }
 
 void ReleaseDepthDevice()

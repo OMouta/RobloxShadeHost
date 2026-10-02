@@ -152,6 +152,10 @@ if(BUILD_TESTING)
     target_compile_options(frame_statistics_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME frame_statistics_tests COMMAND frame_statistics_tests)
 
+    add_executable(frame_limit_tests tests/frame_limit_tests.cpp)
+    target_compile_options(frame_limit_tests PRIVATE /W4 /permissive- /EHsc)
+    add_test(NAME frame_limit_tests COMMAND frame_limit_tests)
+
     add_executable(menu_layout_tests tests/menu_layout_tests.cpp)
     target_compile_options(menu_layout_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME menu_layout_tests COMMAND menu_layout_tests)

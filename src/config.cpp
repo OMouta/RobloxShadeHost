@@ -14,6 +14,9 @@ namespace
 std::atomic<int> updateChecks = -1;
 std::atomic<int> keepEffectsVisible = -1;
 std::atomic<float> menuScale = 0.0f;
+std::atomic<int> frameRateLimit = -1;
+std::atomic<int> effectResolution = -1;
+std::atomic<int> depthSize = -1;
 
 std::wstring IniPath()
 {
@@ -43,6 +46,42 @@ bool SaveFlag(std::atomic<int>& cached, const wchar_t* name, bool enabled)
 float ValidScale(float scale)
 {
     return scale > 0 ? std::clamp(scale, 0.75f, 2.0f) : 1.0f;
+}
+
+// A number under [Performance], read from the file once. valid turns what the file holds into a value the setting
+// takes, which is never negative.
+int CachedNumber(std::atomic<int>& cached, const wchar_t* name, int fallback, int (*valid)(int))
+{
+    int value = cached;
+    if (value < 0)
+    {
+        value = valid(static_cast<int>(GetPrivateProfileIntW(L"Performance", name, fallback, IniPath().c_str())));
+        cached = value;
+    }
+    return value;
+}
+
+void SaveNumber(std::atomic<int>& cached, const wchar_t* name, int value)
+{
+    if (cached.exchange(value) == value)
+        return;
+    if (!WritePrivateProfileStringW(L"Performance", name, std::to_wstring(value).c_str(), IniPath().c_str()))
+        Log(LogLevel::Warning, L"Could not save %ls to RobloxShadeHost.ini. It applies until Unishade closes.", name);
+}
+
+int ValidFrameRate(int fps)
+{
+    return fps <= 0 ? 0 : std::clamp(fps, kSlowestFrameRate, kFastestFrameRate);
+}
+
+int ValidResolution(int percent)
+{
+    return percent < 25 || percent > 100 ? 100 : percent;
+}
+
+int ValidDepthSize(int size)
+{
+    return size < 140 || size > kLargestDepthSize ? kLargestDepthSize : size / 14 * 14;
 }
 
 // A missing entry uses the default. An empty one leaves the shortcut unassigned when allowEmpty is set.
@@ -264,6 +303,36 @@ void SetKeepEffectsVisible(bool enabled)
 {
     if (!SaveFlag(keepEffectsVisible, L"KeepEffectsVisible", enabled))
         Log(LogLevel::Warning, L"Could not save the effects visibility setting to RobloxShadeHost.ini. It applies until Unishade closes.");
+}
+
+int FrameRateLimit()
+{
+    return CachedNumber(frameRateLimit, L"FrameRateLimit", 0, ValidFrameRate);
+}
+
+void SetFrameRateLimit(int fps)
+{
+    SaveNumber(frameRateLimit, L"FrameRateLimit", ValidFrameRate(fps));
+}
+
+int EffectResolution()
+{
+    return CachedNumber(effectResolution, L"EffectResolution", 100, ValidResolution);
+}
+
+void SetEffectResolution(int percent)
+{
+    SaveNumber(effectResolution, L"EffectResolution", ValidResolution(percent));
+}
+
+int DepthSize()
+{
+    return CachedNumber(depthSize, L"DepthSize", kLargestDepthSize, ValidDepthSize);
+}
+
+void SetDepthSize(int size)
+{
+    SaveNumber(depthSize, L"DepthSize", ValidDepthSize(size));
 }
 
 std::wstring GamePreset(const std::wstring& game)

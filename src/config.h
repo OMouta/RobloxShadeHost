@@ -100,6 +100,25 @@ void SetUpdateChecksEnabled(bool enabled);
 bool KeepEffectsVisible();
 void SetKeepEffectsVisible(bool enabled);
 
+// The most frames a second the overlay shows, from RobloxShadeHost.ini. 0 unless changed, which shows every frame the
+// game draws. A limit is kept between kSlowestFrameRate and kFastestFrameRate. The menu is held to it too, so the
+// slowest still leaves the menu usable.
+constexpr int kSlowestFrameRate = 30;
+constexpr int kFastestFrameRate = 500;
+int FrameRateLimit();
+void SetFrameRateLimit(int fps);
+
+// The percentage of the game's resolution that effects run at, from RobloxShadeHost.ini. 100 unless changed, and never
+// under 25.
+int EffectResolution();
+void SetEffectResolution(int percent);
+
+// The longest side of the picture depth is estimated from, from RobloxShadeHost.ini. Depth Anything V2 expects multiples
+// of 14 around 518, which it is unless changed, and it is never larger.
+constexpr int kLargestDepthSize = 518;
+int DepthSize();
+void SetDepthSize(int size);
+
 // The preset last used in a saved game, relative to the presets folder, from RobloxShadeHost.ini. Empty when the
 // game has none yet.
 std::wstring GamePreset(const std::wstring& game);

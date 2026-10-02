@@ -8,6 +8,7 @@
 #include "preset_ini.h"
 #include "addon.h"
 #include "config.h"
+#include "depth/depth.h"
 #include "log.h"
 #include "names.h"
 #include "reshade_imgui.h"
@@ -86,6 +87,14 @@ enum class Tab
     Effects,
     Settings,
     Status,
+};
+
+// The parts of the Settings tab, in the order their buttons show.
+enum class SettingsPage
+{
+    General,
+    Performance,
+    Shortcuts,
 };
 
 struct Technique
@@ -316,10 +325,14 @@ struct Menu
     bool openDlss = false;
     bool focusDlss = false;
 
+    SettingsPage settingsPage = SettingsPage::General;
     int capturing = -1;
     std::wstring shortcutError;
     bool updateChecks = true;
     bool keepEffects = false;
+    // The frame rate typed for Custom, and whether Custom was picked for a rate that another choice also gives.
+    int customRate = 0;
+    bool customRatePicked = false;
 
     bool openConfirmPopup = false;
     Confirmation confirm = Confirmation::ResetEffect;
@@ -894,6 +907,38 @@ bool Switch(const char* id, bool on)
     draw->AddRectFilled(position, position + size, on ? (hovered ? kAccentHover : kAccent) : (hovered ? kBorderStrong : kBorder), size.y / 2);
     const float x = on ? position.x + size.x - size.y / 2 : position.x + size.y / 2;
     draw->AddCircleFilled(ImVec2(x, position.y + size.y / 2), size.y / 2 - S(3), on ? IM_COL32_WHITE : kDim);
+    return clicked;
+}
+
+// Choices side by side in one control, each as wide as the others, with the selected one filled. Returns the index
+// of the choice clicked, or -1.
+int Segmented(const char* id, std::initializer_list<const char*> choices, int selected, ImU32 fill)
+{
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const ImVec2 whole(ImGui::GetContentRegionAvail().x, S(30));
+    const ImVec2 size(whole.x / static_cast<float>(choices.size()), whole.y);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(start, start + whole, kInset, S(7));
+    draw->AddRect(start, start + whole, kBorder, S(7));
+    int clicked = -1;
+    int index = 0;
+    ImGui::PushID(id);
+    PushSize(13.5f);
+    for (const char* choice : choices)
+    {
+        const ImVec2 min = start + ImVec2(size.x * index, 0);
+        ImGui::SetCursorScreenPos(min);
+        if (ImGui::InvisibleButton(choice, size, ImGuiButtonFlags_EnableNav))
+            clicked = index;
+        const bool hovered = ImGui::IsItemHovered();
+        HandOnHover();
+        if (index == selected)
+            draw->AddRectFilled(min + ImVec2(S(3), S(3)), min + size - ImVec2(S(3), S(3)), fill, S(5));
+        draw->AddText(min + (size - ImGui::CalcTextSize(choice)) * 0.5f, index == selected ? IM_COL32_WHITE : hovered ? kText : kDim, choice);
+        ++index;
+    }
+    ImGui::PopFont();
+    ImGui::PopID();
     return clicked;
 }
 
@@ -2785,9 +2830,91 @@ void MenuSizeRow()
     ImGui::Dummy(ImVec2(0, 0));
 }
 
+// A setting with its choices under it. Returns the index of the choice clicked, or -1.
+int ChoiceRow(const char* title, const char* description, std::initializer_list<const char*> choices, int selected)
+{
+    Text(title, kText, 14.5f);
+    Text(description, kDim, 13);
+    return Segmented(title, choices, selected, kAccent);
+}
+
+// The place of value among a setting's choices, or past the last one for a value that is none of them.
+template <size_t N>
+int ChoiceOf(const int (&values)[N], int value)
+{
+    return static_cast<int>(std::find(std::begin(values), std::end(values), value) - std::begin(values));
+}
+
+void FrameRateRow()
+{
+    static constexpr int kRates[] = { 0, 120, 60 };
+    constexpr int kCustom = static_cast<int>(std::size(kRates));
+    const int limit = FrameRateLimit();
+    const int choice = ChoiceOf(kRates, limit);
+    const bool custom = m.customRatePicked || choice == kCustom;
+    const int clicked = ChoiceRow("Frame rate", "The most frames a second Unishade shows. A lower limit leaves more of the GPU to the game.",
+                                  { "Follow game", "120 FPS", "60 FPS", "Custom" }, custom ? kCustom : choice);
+    if (clicked == kCustom)
+    {
+        m.customRatePicked = true;
+        m.customRate = limit ? limit : 60;
+        SetFrameRateLimit(m.customRate);
+    }
+    else if (clicked >= 0)
+    {
+        m.customRatePicked = false;
+        SetFrameRateLimit(kRates[clicked]);
+    }
+    if (!custom)
+        return;
+
+    ImGui::SetNextItemWidth(S(84));
+    ImGui::InputInt("##custom_rate", &m.customRate, 0, 0);
+    // Applies once typing ends, so a number is not limited while it is still being typed.
+    if (ImGui::IsItemDeactivatedAfterEdit())
+    {
+        m.customRate = std::clamp(m.customRate, kSlowestFrameRate, kFastestFrameRate);
+        SetFrameRateLimit(m.customRate);
+    }
+    ImGui::SameLine(0, S(10));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(6));
+    Text("frames a second, from " + std::to_string(kSlowestFrameRate) + " to " + std::to_string(kFastestFrameRate), kDim, 13);
+}
+
+void PerformanceSettings()
+{
+    FrameRateRow();
+
+    ImGui::Dummy(ImVec2(0, S(8)));
+    static constexpr int kResolutions[] = { 100, 75, 50 };
+    int clicked = ChoiceRow("Effect resolution",
+                            "Effects run on a smaller picture, stretched back to the game's size. Lower is faster and blurrier. The menu "
+                            "blurs too, and screenshots get smaller.",
+                            { "100%", "75%", "50%" }, ChoiceOf(kResolutions, EffectResolution()));
+    if (clicked >= 0)
+        SetEffectResolution(kResolutions[clicked]);
+
+    if (DepthEnabled())
+    {
+        ImGui::Dummy(ImVec2(0, S(8)));
+        static constexpr int kSizes[] = { kLargestDepthSize, 392, 266 };
+        clicked = ChoiceRow("Depth detail", "Depth is estimated from a smaller picture. Lower is faster, and effects that use depth lose fine detail.",
+                            { "High", "Medium", "Low" }, ChoiceOf(kSizes, DepthSize()));
+        if (clicked >= 0)
+            SetDepthSize(kSizes[clicked]);
+    }
+
+    ImGui::Dummy(ImVec2(0, S(14)));
+    Heading("DEBUG");
+    if (SwitchRow("debug_info", m.debugInfo, "Show debug info", "Captured game FPS, output FPS and frame loss."))
+    {
+        m.debugInfo = !m.debugInfo;
+        SetDebugInfoEnabled(m.debugInfo);
+    }
+}
+
 void ShortcutSettings()
 {
-    Heading("SHORTCUTS");
     Text("Click a shortcut, then press the keys you want. They work right away.", kDim, 13);
     ImGui::Dummy(ImVec2(0, S(4)));
     for (int i = 0; i < static_cast<int>(std::size(kShortcuts)); ++i)
@@ -2816,11 +2943,8 @@ void ShortcutSettings()
     }
 }
 
-void SettingsTab()
+void GeneralSettings()
 {
-    ShortcutSettings();
-
-    ImGui::Dummy(ImVec2(0, S(14)));
     Heading("PRESETS");
     if (SwitchRow("autosave", m.autoSave, "Save changes automatically", "Turn off to try changes first and save them with the icon at the top."))
     {
@@ -2848,13 +2972,23 @@ void SettingsTab()
         m.updateChecks = !m.updateChecks;
         SetUpdateChecksEnabled(m.updateChecks);
     }
+}
 
-    ImGui::Dummy(ImVec2(0, S(14)));
-    Heading("DEBUG");
-    if (SwitchRow("debug_info", m.debugInfo, "Show debug info", "Captured game FPS, output FPS and frame loss."))
+void SettingsTab()
+{
+    const int clicked = Segmented("page", { "General", "Performance", "Shortcuts" }, static_cast<int>(m.settingsPage), kBorder);
+    if (clicked >= 0)
     {
-        m.debugInfo = !m.debugInfo;
-        SetDebugInfoEnabled(m.debugInfo);
+        // A shortcut left waiting for keys on its page would take the next key pressed on another.
+        StopCapture();
+        m.settingsPage = static_cast<SettingsPage>(clicked);
+    }
+    ImGui::Dummy(ImVec2(0, S(6)));
+    switch (m.settingsPage)
+    {
+    case SettingsPage::General: GeneralSettings(); break;
+    case SettingsPage::Performance: PerformanceSettings(); break;
+    case SettingsPage::Shortcuts: ShortcutSettings(); break;
     }
 }
 
@@ -3724,6 +3858,7 @@ void InitMenu()
     m.menuScale = MenuScale();
     m.updateChecks = UpdateChecksEnabled();
     m.keepEffects = KeepEffectsVisible();
+    m.customRate = FrameRateLimit();
     reshade::register_event<reshade::addon_event::init_effect_runtime>(
         [](effect_runtime* runtime) { Guarded([runtime] { OnInitRuntime(runtime); }); });
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(

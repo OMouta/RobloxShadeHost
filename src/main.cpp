@@ -6,6 +6,7 @@
 #include "capture.h"
 #include "config.h"
 #include "depth/depth.h"
+#include "frame_limit.h"
 #include "launcher.h"
 #include "log.h"
 #include "menu.h"
@@ -58,6 +59,7 @@ struct Loop
 
     ULONGLONG nextRepeat = 0;
     ULONGLONG fastUntil = 0;
+    FrameLimit frameLimit;
     bool presentPending = false;
     bool wasInteractive = false;
     bool wasVisible = false;
@@ -272,6 +274,15 @@ void ShowFrames()
     const ULONGLONG now = GetTickCount64();
     if (fresh || interactive || loop.presentPending || ReShadeLoadingEffects() || now < loop.fastUntil || now >= loop.nextRepeat)
     {
+        // A frame rate limit holds back whatever comes too soon, the menu included. A frame held back is shown with
+        // the next one, or on the next repeat when the game stops drawing.
+        if (const int limit = FrameRateLimit())
+        {
+            using namespace std::chrono;
+            const nanoseconds time = FrameStatistics::Clock::now().time_since_epoch();
+            if (!loop.frameLimit.Allow(time.count(), nanoseconds(seconds(1)).count() / limit))
+                return;
+        }
         PresentLatestFrame();
         loop.presentPending = false;
         loop.nextRepeat = now + kRepeatInterval;
