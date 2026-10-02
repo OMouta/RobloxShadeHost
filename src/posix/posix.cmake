@@ -226,8 +226,14 @@ else()
 endif()
 
 if(APPLE)
-    add_executable(Unishade MACOSX_BUNDLE "${POSIX_DIR}/main.cpp" "${CMAKE_SOURCE_DIR}/assets/Unishade.png")
-    set_source_files_properties("${CMAKE_SOURCE_DIR}/assets/Unishade.png" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    # Finder and the Dock show the logo from an icon file made of it, which Info.plist names.
+    set(APP_ICON "${CMAKE_BINARY_DIR}/Unishade.icns")
+    add_custom_command(OUTPUT "${APP_ICON}"
+        COMMAND sips -s format icns "${LOGO_PNG}" --out "${APP_ICON}"
+        DEPENDS "${LOGO_PNG}"
+        VERBATIM)
+    add_executable(Unishade MACOSX_BUNDLE "${POSIX_DIR}/main.cpp" "${APP_ICON}")
+    set_source_files_properties("${APP_ICON}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(Unishade PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${POSIX_DIR}/Info.plist.in"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
