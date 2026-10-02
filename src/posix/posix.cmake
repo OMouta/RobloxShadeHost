@@ -167,8 +167,20 @@ target_compile_definitions(posix_libraries PUBLIC MINIZ_NO_TIME GLFW_INCLUDE_NON
 target_compile_options(posix_libraries PRIVATE -w)
 target_link_libraries(posix_libraries PUBLIC glfw unishade_vulkan)
 
+# The logo the launcher and the menu draw goes into the program as the bytes of its PNG, as the resource does on
+# Windows. Written again only when the picture changes.
+set(LOGO_PNG "${CMAKE_SOURCE_DIR}/assets/Unishade.png")
+set(LOGO_SOURCE "${CMAKE_BINARY_DIR}/logo.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${LOGO_PNG}")
+file(READ "${LOGO_PNG}" logo_bytes HEX)
+string(REGEX REPLACE "(..)" "0x\\1," logo_bytes "${logo_bytes}")
+file(CONFIGURE OUTPUT "${LOGO_SOURCE}" CONTENT
+    "extern const unsigned char kLogoPng[];\nextern const unsigned kLogoPngSize;\nconst unsigned char kLogoPng[] = {${logo_bytes}};\nconst unsigned kLogoPngSize = sizeof(kLogoPng);\n"
+    @ONLY)
+
 # Everything but main, so tests can link it.
 set(POSIX_SOURCES
+    "${LOGO_SOURCE}"
     "${POSIX_DIR}/app.cpp"
     "${POSIX_DIR}/config.cpp"
     "${POSIX_DIR}/effects.cpp"
