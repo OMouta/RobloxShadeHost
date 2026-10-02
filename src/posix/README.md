@@ -72,4 +72,4 @@ Set `UNISHADE_VALIDATION=1` to run with the Vulkan validation layers.
 | `setup.cpp` | `--install-effects` and the launcher's download button. Downloads over https only, except the sources given with `--effects-url` and `--presets-url`, which tests can point at local files |
 | `config.cpp`, `games.cpp`, `hotkeys.cpp` | `Unishade.ini`, `games.ini` and shortcuts |
 
-Shared with the Windows host, in `src/`: `preset_ini.h` (ReShade presets), `game_list.h` (`games.ini`), `hotkey_text.h` (how shortcuts are written), `names.h` (the rules for game folders and typed names), `package_files.h` (unpacking effect packages), `ini_text.h` and `theme.h`.
+Shared with the Windows host, in `src/`: `preset_ini.h` (ReShade presets), `game_list.h` (`games.ini`), `hotkey_text.h` (how shortcuts are written), `names.h` (the rules for game folders and typed names), `package_files.h` (unpacking effect packages), `menu_layout.h` (the menu's size), `ini_text.h` and `theme.h`.

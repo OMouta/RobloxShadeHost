@@ -2,9 +2,11 @@
 
 #include "app.h"
 
-// Dear ImGui for the launcher and the menu, styled with Setup's colors like on Windows.
+// Dear ImGui for the launcher and the menu, which look like the ones on Windows.
 bool InitUi(UiWindow& ui, std::string& error);
 void ShutdownUi(UiWindow& ui);
+// Gives the window the logo as its icon. macOS shows the app's icon instead.
+void SetWindowIcon(GLFWwindow* window);
 
 // Starts a Dear ImGui frame in the window's context.
 void BeginUi(UiWindow& ui);

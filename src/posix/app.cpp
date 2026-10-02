@@ -58,13 +58,16 @@ bool App::Init(std::string& error)
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
-    launcher.window = glfwCreateWindow(600, 680, "Unishade", nullptr, nullptr);
+    // As on Windows, the launcher sizes itself: DrawLauncher makes it as tall as its content.
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    launcher.window = glfwCreateWindow(620, 540, "Unishade", nullptr, nullptr);
     if (!launcher.window || !launcher.surface.Create(launcher.window, false, error) || !InitUi(launcher, error))
     {
         if (error.empty())
             error = "Could not open the launcher window.";
         return false;
     }
+    SetWindowIcon(launcher.window);
 
     // The overlay covers the game's window exactly. Clicks go through to the game until the menu opens.
     glfwDefaultWindowHints();
@@ -202,7 +205,7 @@ void App::StartCapture(const platform::Window& window)
     FollowGame();
     if (!startHintShown)
     {
-        ShowToast("Press " + HotkeyText(kEditModeHotkey) + " to open the Unishade menu", 6);
+        ShowToast("opens the Unishade menu", 6, HotkeyText(kEditModeHotkey));
         startHintShown = true;
     }
 }
@@ -330,18 +333,6 @@ void App::Select(std::optional<platform::Window> window)
     captureRetry = 0;
     if (active && (!selected || selected->id != active->id))
         StopCapture();
-}
-
-void App::AddActiveGame()
-{
-    if (!active)
-        return;
-    if (!AddAutoGame(autoGames, *active))
-    {
-        Report(LogLevel::Warning, "%s has closed.", active->title.c_str());
-        return;
-    }
-    SaveGames();
 }
 
 void App::SaveGames()

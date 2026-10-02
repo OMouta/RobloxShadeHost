@@ -59,7 +59,6 @@ public:
     void ToggleOverlay();
     // An empty window goes back to finding saved games automatically.
     void Select(std::optional<platform::Window> window);
-    void AddActiveGame();
     void SaveGames();
     // As the menu lists them: the game being played, all games, then every other folder with presets.
     std::vector<PresetFolder> PresetFolders() const;
