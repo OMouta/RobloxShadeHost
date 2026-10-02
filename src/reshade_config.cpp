@@ -139,6 +139,9 @@ void PrepareReShadeConfig()
     }
     if (!ini.Get("STYLE", "StyleIndex", value))
         ApplyTheme(ini);
+    // RenoDX's add-on otherwise waits for the inputs of a game's own DLSS, which Unishade never has.
+    if (std::filesystem::exists(ExeDirectory() + L"renodx-dlss.addon64") && !ini.Get("RENODX-DLSS", "DirectNeuralRenderingRequireDlss", value))
+        ini.Set("RENODX-DLSS", "DirectNeuralRenderingRequireDlss", "0");
 
     if (!ini.Changed())
         return;
