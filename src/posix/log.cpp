@@ -96,6 +96,12 @@ std::vector<Notice> Notices()
     return notices;
 }
 
+void ClearNotices()
+{
+    std::lock_guard lock(mutex);
+    notices.clear();
+}
+
 const std::filesystem::path& LogPath()
 {
     return path;

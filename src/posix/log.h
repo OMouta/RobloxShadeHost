@@ -31,5 +31,7 @@ void Report(LogLevel level, const char* format, ...) __attribute__((format(print
 
 // What Report and warnings and errors have shown so far, oldest first: the last 40, each message once.
 std::vector<Notice> Notices();
+// Empties that list. The log keeps the messages.
+void ClearNotices();
 
 const std::filesystem::path& LogPath();
