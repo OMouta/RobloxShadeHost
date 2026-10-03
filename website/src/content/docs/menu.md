@@ -32,6 +32,8 @@ People share presets on [Discord](links:discord).
 
 The **Effects** tab lists every installed effect with a switch. Click an effect to change its settings, and search at the top to find one. Right-click a setting to reset it, or click **Reset all** to reset the effect.
 
+Effects that are on run in the order **Active** lists them. Drag one onto another to move it there.
+
 ![An effect's settings in the Effects tab](./images/menu-effects.jpg)
 
 **ReShade** at the bottom of the menu opens ReShade's own menu.

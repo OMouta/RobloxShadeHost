@@ -4,7 +4,7 @@ description: Depth estimation and DLSS5, and how to add, change or remove them.
 order: 4
 ---
 
-Setup offers two optional add-ons. Install one or neither, since they don't work together. To add, change or remove one, open **Unishade Setup** from the Start menu and choose **Update or change add-ons**.
+Setup offers two optional add-ons. To add, change or remove one, open **Unishade Setup** from the Start menu and choose **Update or change add-ons**.
 
 ## Depth estimation
 

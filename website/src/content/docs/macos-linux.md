@@ -59,5 +59,6 @@ Screenshots go to `~/Pictures/Unishade`.
 ## What's different from Windows
 
 - Everything the menu shows happens in Unishade's own menu. ReShade's menu isn't there.
+- Preprocessor definitions, which some effects use for quality and feature options, are at the bottom of an effect's settings. A new value applies when you press **Enter**.
 - Depth estimation and DLSS5 are Windows only. Effects that need the game's depth see an empty depth buffer, as they would on Windows without the depth add-on.
 - A few effects use stencil, which is skipped. The **Status** tab lists effects that didn't compile.

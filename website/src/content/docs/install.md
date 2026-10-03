@@ -18,7 +18,7 @@ Setup isn't code-signed yet, so the first time Windows may say **Windows protect
 
 ReShade and every official ReShade effect are always included. Keep **Presets** on for ready-made looks.
 
-Two add-ons are optional. Pick one or neither, since they don't work together:
+Two add-ons are optional:
 
 - **Depth estimation** makes ambient occlusion, depth of field and fog work. It costs some frame rate.
 - **DLSS5** needs an NVIDIA RTX card. See [DLSS5](/docs/add-ons/#dlss5) after installing.

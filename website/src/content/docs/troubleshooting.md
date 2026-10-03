@@ -44,6 +44,8 @@ Windows only. Roblox replaces its folder when it updates, which deletes Unishade
 
 Effects cost frame rate. Turn off the heaviest ones or pick a lighter preset. On Windows, depth estimation costs some too.
 
+On Windows, **Settings > Performance**, in the menu or the Unishade window, can limit the frame rate and lower the effect resolution and depth detail. Each saved game keeps its own values.
+
 ## The log
 
 - Windows: **Open log** in the Unishade window opens `Unishade.log`. The previous run's log is `Unishade.old.log` in the same folder. Setup writes its own log to `%TEMP%\Unishade-Setup.log`.
