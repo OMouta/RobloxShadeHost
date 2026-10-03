@@ -309,7 +309,7 @@ void SetUpdateChecksEnabled(bool enabled)
 
 bool KeepEffectsVisible()
 {
-    return CachedFlag(keepEffectsVisible, L"KeepEffectsVisible", false);
+    return CachedFlag(keepEffectsVisible, L"KeepEffectsVisible", true);
 }
 
 void SetKeepEffectsVisible(bool enabled)

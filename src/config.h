@@ -121,7 +121,7 @@ void SetMenuScale(float scale);
 bool UpdateChecksEnabled();
 void SetUpdateChecksEnabled(bool enabled);
 
-// Whether effects stay over the game while another window is in front, from RobloxShadeHost.ini. Off unless turned on.
+// Whether effects stay over the game while another window is in front, from RobloxShadeHost.ini. On unless turned off.
 bool KeepEffectsVisible();
 void SetKeepEffectsVisible(bool enabled);
 
