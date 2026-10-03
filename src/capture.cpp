@@ -1,6 +1,7 @@
 #include "capture.h"
 #include "addon.h"
 #include "depth/depth.h"
+#include "hdr.h"
 #include "log.h"
 #include "menu.h"
 #include "overlay.h"
@@ -25,10 +26,14 @@ constexpr wchar_t kSessionClass[] = L"Windows.Graphics.Capture.GraphicsCaptureSe
 // Set when Windows does not allow capture without its border, so capture keeps it instead of failing to start.
 std::atomic<bool> borderRequired = false;
 
-// Draws a texture over the whole target with one triangle.
+// Draws a texture over the whole target with one triangle. tonemap does it for an HDR frame.
 constexpr char kScaleShader[] = R"(
 Texture2D Frame : register(t0);
 SamplerState Smooth : register(s0);
+cbuffer Hdr : register(b0)
+{
+    float SdrWhite; // in scRGB, where 1 is 80 nits
+};
 struct Corner
 {
     float4 position : SV_Position;
@@ -47,31 +52,47 @@ float4 ps(Corner corner) : SV_Target
 {
     return Frame.Sample(Smooth, corner.at);
 }
+
+// Turns linear scRGB back into the sRGB an SDR frame has, with SDR white at 1.
+float4 tonemap(Corner corner) : SV_Target
+{
+    float3 color = saturate(Frame.Sample(Smooth, corner.at).rgb / SdrWhite);
+    return float4(color <= 0.0031308 ? color * 12.92 : 1.055 * pow(color, 1 / 2.4) - 0.055, 1);
+}
 )";
 
-// What drawing the frame at another size takes, made on first use and again after the device was lost.
+// What drawing the frame at another size or from HDR takes, made on first use and again after the device was lost.
 struct Scaler
 {
     winrt::com_ptr<ID3D11VertexShader> vertexShader;
     winrt::com_ptr<ID3D11PixelShader> pixelShader;
+    winrt::com_ptr<ID3D11PixelShader> tonemapShader;
+    winrt::com_ptr<ID3D11Buffer> sdrWhite;
     winrt::com_ptr<ID3D11SamplerState> sampler;
     winrt::com_ptr<ID3D11Texture2D> frame;
     winrt::com_ptr<ID3D11ShaderResourceView> view;
 };
 Scaler scaler;
 
-// Draws the frame into a back buffer of another size. Capture's textures are not promised to be readable by
-// shaders, so the frame is copied into one that is.
-void DrawScaled(ID3D11Texture2D* frame, const D3D11_TEXTURE2D_DESC& size, ID3D11Texture2D* backBuffer, UINT width, UINT height)
+// Draws the frame into a back buffer of another size, or an HDR frame as SDR. Capture's textures are not promised to
+// be readable by shaders, so the frame is copied into one that is.
+void DrawFrame(ID3D11Texture2D* frame, const D3D11_TEXTURE2D_DESC& size, ID3D11Texture2D* backBuffer, UINT width, UINT height)
 {
     if (!scaler.sampler)
     {
-        winrt::com_ptr<ID3DBlob> vertex, pixel;
+        winrt::com_ptr<ID3DBlob> vertex, pixel, tonemap;
         winrt::check_hresult(D3DCompile(kScaleShader, sizeof(kScaleShader) - 1, "scale", nullptr, nullptr, "vs", "vs_4_0", 0, 0, vertex.put(), nullptr));
         winrt::check_hresult(D3DCompile(kScaleShader, sizeof(kScaleShader) - 1, "scale", nullptr, nullptr, "ps", "ps_4_0", 0, 0, pixel.put(), nullptr));
+        winrt::check_hresult(D3DCompile(kScaleShader, sizeof(kScaleShader) - 1, "scale", nullptr, nullptr, "tonemap", "ps_4_0", 0, 0, tonemap.put(), nullptr));
         scaler = {};
         winrt::check_hresult(g.device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, scaler.vertexShader.put()));
         winrt::check_hresult(g.device->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, scaler.pixelShader.put()));
+        winrt::check_hresult(g.device->CreatePixelShader(tonemap->GetBufferPointer(), tonemap->GetBufferSize(), nullptr, scaler.tonemapShader.put()));
+        D3D11_BUFFER_DESC constants{};
+        constants.ByteWidth = 16;
+        constants.Usage = D3D11_USAGE_DEFAULT;
+        constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        winrt::check_hresult(g.device->CreateBuffer(&constants, nullptr, scaler.sdrWhite.put()));
         D3D11_SAMPLER_DESC desc{};
         desc.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
         desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -82,7 +103,7 @@ void DrawScaled(ID3D11Texture2D* frame, const D3D11_TEXTURE2D_DESC& size, ID3D11
     D3D11_TEXTURE2D_DESC copy{};
     if (scaler.frame)
         scaler.frame->GetDesc(&copy);
-    if (copy.Width != size.Width || copy.Height != size.Height)
+    if (copy.Width != size.Width || copy.Height != size.Height || copy.Format != size.Format)
     {
         copy = size;
         copy.MipLevels = 1;
@@ -98,6 +119,11 @@ void DrawScaled(ID3D11Texture2D* frame, const D3D11_TEXTURE2D_DESC& size, ID3D11
         winrt::check_hresult(g.device->CreateShaderResourceView(scaler.frame.get(), nullptr, scaler.view.put()));
     }
     g.context->CopyResource(scaler.frame.get(), frame);
+    if (g.hdrWhiteLevel)
+    {
+        const float sdrWhite[4] = { *g.hdrWhiteLevel / 80 };
+        g.context->UpdateSubresource(scaler.sdrWhite.get(), 0, nullptr, sdrWhite, 0, 0);
+    }
 
     winrt::com_ptr<ID3D11RenderTargetView> target;
     winrt::check_hresult(g.device->CreateRenderTargetView(backBuffer, nullptr, target.put()));
@@ -105,12 +131,14 @@ void DrawScaled(ID3D11Texture2D* frame, const D3D11_TEXTURE2D_DESC& size, ID3D11
     ID3D11RenderTargetView* targets[] = { target.get() };
     ID3D11ShaderResourceView* views[] = { scaler.view.get() };
     ID3D11SamplerState* samplers[] = { scaler.sampler.get() };
+    ID3D11Buffer* constants[] = { scaler.sdrWhite.get() };
     g.context->IASetInputLayout(nullptr);
     g.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g.context->VSSetShader(scaler.vertexShader.get(), nullptr, 0);
-    g.context->PSSetShader(scaler.pixelShader.get(), nullptr, 0);
+    g.context->PSSetShader(g.hdrWhiteLevel ? scaler.tonemapShader.get() : scaler.pixelShader.get(), nullptr, 0);
     g.context->PSSetShaderResources(0, 1, views);
     g.context->PSSetSamplers(0, 1, samplers);
+    g.context->PSSetConstantBuffers(0, 1, constants);
     g.context->RSSetState(nullptr);
     g.context->RSSetViewports(1, &viewport);
     g.context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
@@ -198,8 +226,9 @@ void StartCapture(HWND target)
     GraphicsCaptureItem item{ nullptr };
     winrt::check_hresult(interop->CreateForWindow(target, winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(item)));
 
+    g.hdrWhiteLevel = HdrWhiteLevel(target);
     g.poolSize = item.Size();
-    g.pool = Direct3D11CaptureFramePool::CreateFreeThreaded(g.captureDevice, kPixelFormat, 2, g.poolSize);
+    g.pool = Direct3D11CaptureFramePool::CreateFreeThreaded(g.captureDevice, g.hdrWhiteLevel ? kHdrPixelFormat : kPixelFormat, 2, g.poolSize);
     g.capturedFrames.store(0, std::memory_order_relaxed);
     g.frameStatistics.Reset(FrameStatistics::Clock::now(), 0);
     g.frameArrived = g.pool.FrameArrived(winrt::auto_revoke, [](auto&&, auto&&) {
@@ -219,7 +248,8 @@ void StartCapture(HWND target)
 
     g.session.StartCapture();
     g.target = target;
-    Log(LogLevel::Info, L"Capturing %ls (%dx%d)", g.activeGame->name.c_str(), g.poolSize.Width, g.poolSize.Height);
+    Log(LogLevel::Info, L"Capturing %ls (%dx%d%ls)", g.activeGame->name.c_str(), g.poolSize.Width, g.poolSize.Height,
+        g.hdrWhiteLevel ? L", HDR" : L"");
     ShowStartHint();
 }
 
@@ -289,11 +319,12 @@ void PresentLatestFrame()
 
     winrt::com_ptr<ID3D11Texture2D> backBuffer;
     winrt::check_hresult(g.swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), backBuffer.put_void()));
-    if (width == size.Width && height == size.Height)
+    if (width == size.Width && height == size.Height && !g.hdrWhiteLevel)
         g.context->CopyResource(backBuffer.get(), surface.get());
     else
-        DrawScaled(surface.get(), size, backBuffer.get(), width, height);
-    UpdateDepth(surface.get());
+        DrawFrame(surface.get(), size, backBuffer.get(), width, height);
+    // Depth is estimated from SDR, so an HDR frame is read once it was drawn as SDR.
+    UpdateDepth(g.hdrWhiteLevel ? backBuffer.get() : surface.get());
     winrt::check_hresult(g.swapchain->Present(0, 0));
     const auto finished = FrameStatistics::Clock::now();
     g.frameStatistics.RecordPresent(frameTimestamp, std::chrono::duration<double, std::milli>(finished - started).count());

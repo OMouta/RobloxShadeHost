@@ -84,6 +84,7 @@ add_executable(Unishade WIN32
     src/config.cpp
     src/discord.cpp
     src/game_integration.cpp
+    src/hdr.cpp
     src/launcher.cpp
     src/log.cpp
     src/menu.cpp

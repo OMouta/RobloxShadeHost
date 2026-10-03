@@ -22,6 +22,8 @@ using winrt::Windows::Graphics::DirectX::DirectXPixelFormat;
 using winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 
 constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
+// What frames are captured in while HDR is on, since 8 bits would clip them.
+constexpr auto kHdrPixelFormat = DirectXPixelFormat::R16G16B16A16Float;
 // Posted by the menu to give input back to the game. The menu runs inside ReShade's present, so window
 // changes wait for the message loop.
 constexpr UINT kLeaveMenuMessage = WM_APP + 1;
@@ -59,6 +61,9 @@ struct State
     Direct3D11CaptureFramePool::FrameArrived_revoker frameArrived;
     Direct3D11CaptureFrame latestFrame{ nullptr };
     SizeInt32 poolSize{};
+    // HdrWhiteLevel of the game's display when capture started. While HDR is on, frames are captured in kHdrPixelFormat
+    // and turned back into SDR before effects and depth estimation see them.
+    std::optional<float> hdrWhiteLevel;
     HANDLE frameEvent = nullptr;
     // FrameArrived runs on the capture worker; statistics are sampled on the host thread.
     std::atomic<uint64_t> capturedFrames = 0;
