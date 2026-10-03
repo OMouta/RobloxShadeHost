@@ -169,10 +169,6 @@ Assert-File $legacy 'legacy-component.txt' $false
 foreach ($file in $userFiles) { Assert-File $legacy $file }
 
 $null = Invoke-TestInstaller 'no-license' 'reshade' $false
-$null = Invoke-TestInstaller 'dlss5-and-depth' 'reshade,dlss5,depth' -ExpectSuccess $false
-if ((Get-Content "$testRoot/dlss5-and-depth.log" -Raw) -notmatch 'do not work together') {
-    throw 'Setup did not refuse DLSS5 and depth estimation together.'
-}
 $reshade = Invoke-TestInstaller 'reshade' 'reshade,presets'
 Assert-File $reshade 'dxgi.dll'
 Assert-File $reshade 'ReShade-LICENSE.txt'
@@ -245,21 +241,20 @@ if ((Get-Content "$reshade/presets/GenericPreset1.ini" -Raw) -notmatch 'Edited')
 $missingManifests = @(
     '--dlss5-manifest', 'https://github.com/OMouta/Unishade/releases/download/dlss5-assets/not-present.ini',
     '--depth-manifest', 'https://github.com/OMouta/Unishade/releases/download/depth-assets/not-present.ini')
-$missing = Invoke-TestInstaller 'missing-dlss5' 'reshade,dlss5' -Extra $missingManifests -ExpectExitCode 2
+# Both add-ons can be picked. One that is skipped keeps the files it had.
+New-Item -ItemType Directory -Path "$testRoot/missing-addons" -Force | Out-Null
+Set-Content "$testRoot/missing-addons/depth-anything-v2-small.onnx" 'kept'
+$missing = Invoke-TestInstaller 'missing-addons' 'reshade,dlss5,depth' -Extra $missingManifests -ExpectExitCode 2
 Assert-File $missing 'Unishade.exe'
 Assert-File $missing 'dxgi.dll'
 Assert-File $missing 'nvngx_dlssnr.dll' $false
 Assert-File $missing 'renodx-dlss.addon64' $false
-if ((Get-Content "$testRoot/missing-dlss5.log" -Raw) -notmatch 'DLSS5 skipped:') {
-    throw 'Missing DLSS5 downloads were not reported.'
-}
-$missingDepth = Invoke-TestInstaller 'missing-depth' 'reshade,depth' -Extra $missingManifests -ExpectExitCode 2
-Assert-File $missingDepth 'dxgi.dll'
-Assert-File $missingDepth 'onnxruntime.dll' $false
-Assert-File $missingDepth 'DirectML.dll' $false
-Assert-File $missingDepth 'depth-anything-v2-small.onnx' $false
-if ((Get-Content "$testRoot/missing-depth.log" -Raw) -notmatch 'Depth estimation skipped:') {
-    throw 'Missing depth estimation downloads were not reported.'
+Assert-File $missing 'onnxruntime.dll' $false
+Assert-File $missing 'DirectML.dll' $false
+Assert-File $missing 'depth-anything-v2-small.onnx'
+$missingLog = Get-Content "$testRoot/missing-addons.log" -Raw
+if ($missingLog -notmatch 'DLSS5 skipped:' -or $missingLog -notmatch 'Depth estimation skipped:') {
+    throw 'Missing add-on downloads were not reported.'
 }
 
 # Each add-on file must match the SHA-256 in the download list. This list points nvngx_dlssnr.dll at a small file of
@@ -285,7 +280,7 @@ if ((Get-Content "$testRoot/mismatched-dlss5.log" -Raw) -notmatch 'DLSS5 skipped
 }
 
 if ($DownloadDLSS) {
-    # Installing DLSS5 over depth estimation removes the depth files.
+    # Installing DLSS5 without depth estimation removes the depth files.
     New-Item -ItemType Directory -Path "$testRoot/full" -Force | Out-Null
     Set-Content "$testRoot/full/depth-anything-v2-small.onnx" 'stale'
     $full = Invoke-TestInstaller 'full' 'reshade,dlss5'
@@ -316,7 +311,7 @@ if ($DownloadDepth) {
         throw 'Depth estimation was not skipped although a download does not match its hash.'
     }
 
-    # Installing depth estimation over DLSS5 removes the DLSS5 files.
+    # Installing depth estimation without DLSS5 removes the DLSS5 files.
     New-Item -ItemType Directory -Path "$testRoot/depth" -Force | Out-Null
     Set-Content "$testRoot/depth/renodx-dlss.addon64" 'stale'
     $depth = Invoke-TestInstaller 'depth' 'reshade,depth'
@@ -346,22 +341,22 @@ if ((Invoke-Setup 'uninstall-again' @('--uninstall', '--delete-user-files', '--d
 Assert-File $reshade 'ReShade.ini'
 
 # Deleting the user's files too removes the settings, logs, presets and reshade-shaders, and leaves other files.
-New-Item -ItemType Directory -Path "$missingDepth/presets/Game" -Force | Out-Null
-Set-Content "$missingDepth/presets/Game/Mine.ini" 'Techniques=Mine@Mine.fx'
-Set-Content "$missingDepth/reshade-shaders/Shaders/Mine.fx" '// added by the user'
-Set-Content "$missingDepth/ReShadePreset.ini" 'Techniques='
-Set-Content "$missingDepth/RobloxShadeHost.ini" "[Input]`nToggleKey=F8"
-Set-Content "$missingDepth/games.ini" "[Games]`nCount=0"
-Set-Content "$missingDepth/ReShade.log" 'log'
-Set-Content "$missingDepth/Unishade.log" 'log'
-Set-Content "$missingDepth/Screenshot.png" 'not created by Setup'
-if ((Invoke-Setup 'uninstall-all' @('--uninstall', '--delete-user-files', '--dir', "`"$missingDepth`"")) -ne 0) {
+New-Item -ItemType Directory -Path "$missing/presets/Game" -Force | Out-Null
+Set-Content "$missing/presets/Game/Mine.ini" 'Techniques=Mine@Mine.fx'
+Set-Content "$missing/reshade-shaders/Shaders/Mine.fx" '// added by the user'
+Set-Content "$missing/ReShadePreset.ini" 'Techniques='
+Set-Content "$missing/RobloxShadeHost.ini" "[Input]`nToggleKey=F8"
+Set-Content "$missing/games.ini" "[Games]`nCount=0"
+Set-Content "$missing/ReShade.log" 'log'
+Set-Content "$missing/Unishade.log" 'log'
+Set-Content "$missing/Screenshot.png" 'not created by Setup'
+if ((Invoke-Setup 'uninstall-all' @('--uninstall', '--delete-user-files', '--dir', "`"$missing`"")) -ne 0) {
     throw "Uninstall failed. See $testRoot/uninstall-all.log"
 }
 foreach ($file in @('Unishade.exe', 'dxgi.dll', 'ReShade.ini', 'ReShadePreset.ini', 'RobloxShadeHost.ini', 'games.ini', 'ReShade.log',
         'Unishade.log', 'presets', 'reshade-shaders', 'RobloxShadeHost-Setup.files')) {
-    Assert-File $missingDepth $file $false
+    Assert-File $missing $file $false
 }
-Assert-File $missingDepth 'Screenshot.png'
+Assert-File $missing 'Screenshot.png'
 
 Write-Output "Installer checks passed. Test files and logs: $testRoot"

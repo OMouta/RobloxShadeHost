@@ -23,7 +23,7 @@ The presets component reads `presets/downloads.ini` from the `main` branch, down
 
 The DLSS5 component reads `downloads.ini` from the `dlss5-assets` release, and depth estimation reads the one from the `depth-assets` release. For each file of the add-on, the manifest gives the address to download it from and its SHA-256, and every file must pass its SHA-256 check. A missing manifest, `enabled=0`, a file without a valid address or SHA-256, or a failed or mismatched download skips the add-on, and the finish page says so. Addresses must point at this repository's releases or anywhere on huggingface.co, as HTTPS URLs on the default port without a user name, password, query, `%` escapes or `.` and `..` segments. Addresses into the releases from before the rename to Unishade lead to the same release under the new name.
 
-DLSS5 and depth estimation do not work together, so the add-ons page allows only one. Once the selected add-on is installed, Setup removes the files of the other one. When the selected add-on is skipped, the add-on that was installed before stays. Picking neither removes both.
+Setup removes the files of an add-on that is not picked. A picked add-on that is skipped keeps the files it had.
 
 Downloads use HTTPS and check certificates for revocation. When the revocation check cannot be completed, for example because the network blocks the revocation servers, Setup repeats the download without it, as browsers do, rather than failing every installation on such networks; a certificate Windows reports as revoked still fails. A proxy that asks to sign in with Windows authentication gets the user's Windows account.
 

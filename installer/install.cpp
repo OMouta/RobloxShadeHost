@@ -62,6 +62,11 @@ const AddonInfo kAddons[] = {
     { Addon::DLSS5, "DLSS5", L"dlss5", { L"nvngx_dlssnr.dll", L"renodx-dlss.addon64" } },
 };
 
+bool Selected(const InstallOptions& options, Addon addon)
+{
+    return addon == Addon::Depth ? options.depth : options.dlss5;
+}
+
 const struct
 {
     const wchar_t* link;
@@ -795,7 +800,7 @@ void CloseHost(const fs::path& directory)
     });
 }
 
-void Commit(const fs::path& files, const InstallOptions& options, bool addonInstalled, Progress& progress)
+void Commit(const fs::path& files, const InstallOptions& options, Progress& progress)
 {
     const fs::path& directory = options.directory;
     progress.Status("Installing to " + PathText(directory));
@@ -837,11 +842,11 @@ void Commit(const fs::path& files, const InstallOptions& options, bool addonInst
                 installed.insert(relative.wstring());
             fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing);
         }
-        // An add-on that is not selected is removed, since depth estimation and DLSS5 must not be installed together.
-        // When the selected one could not be downloaded, the installed one stays.
-        if (options.reshade && (options.addon == Addon::None || addonInstalled))
+        // An add-on that is not selected is removed. One that is selected but could not be downloaded keeps the
+        // files it had.
+        if (options.reshade)
             for (const auto& addon : kAddons)
-                if (addon.addon != options.addon)
+                if (!Selected(options, addon.addon))
                     for (const wchar_t* file : addon.files)
                         RemoveFile(directory / file);
         // Repairs the search paths in a ReShade.ini written by an earlier version of Setup.
@@ -1005,7 +1010,6 @@ bool Install(const InstallOptions& options, const ReShadeRelease& release, Progr
     WriteFile(files / L"LICENSE", Resource(IDR_LICENSE));
     WriteFile(files / L"CREDITS.txt", Resource(IDR_CREDITS));
     bool complete = true;
-    bool addonInstalled = false;
     if (options.reshade)
     {
         InstallReShade(work, files, release, options.presets, progress);
@@ -1014,13 +1018,10 @@ bool Install(const InstallOptions& options, const ReShadeRelease& release, Progr
         if (options.presets && !InstallPresets(work, files, progress))
             complete = false;
         for (const auto& addon : kAddons)
-            if (addon.addon == options.addon)
-            {
-                addonInstalled = DownloadAddon(work, files, addon, progress);
-                complete = complete && addonInstalled;
-            }
+            if (Selected(options, addon.addon) && !DownloadAddon(work, files, addon, progress))
+                complete = false;
     }
-    Commit(files, options, addonInstalled, progress);
+    Commit(files, options, progress);
     SetupLog(complete ? "Installation finished." : "Installation finished without the parts listed above.");
     return complete;
 }
@@ -1148,14 +1149,15 @@ std::optional<Installation> FindInstallation()
     return Installation{ directory, Utf8(version) };
 }
 
-Addon InstalledAddon(const fs::path& directory)
+bool AddonInstalled(const fs::path& directory, Addon addon)
 {
     std::error_code ignored;
-    for (const auto& addon : kAddons)
-        for (const wchar_t* file : addon.files)
-            if (fs::exists(directory / file, ignored))
-                return addon.addon;
-    return Addon::None;
+    for (const auto& info : kAddons)
+        if (info.addon == addon)
+            for (const wchar_t* file : info.files)
+                if (fs::exists(directory / file, ignored))
+                    return true;
+    return false;
 }
 
 std::wstring ReadShortcut(const fs::path& directory, const wchar_t* name, const wchar_t* fallback)

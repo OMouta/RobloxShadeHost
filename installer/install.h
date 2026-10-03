@@ -12,7 +12,6 @@
 
 enum class Addon
 {
-    None,
     Depth,
     DLSS5,
 };
@@ -22,7 +21,8 @@ struct InstallOptions
     std::filesystem::path directory;
     bool reshade = true;
     bool presets = true;
-    Addon addon = Addon::None;
+    bool depth = false;
+    bool dlss5 = false;
     // Leaves out the Start menu shortcuts, the entry in Windows' app list and the copy of Setup.
     bool portable = false;
 };
@@ -100,8 +100,8 @@ struct Installation
 };
 std::optional<Installation> FindInstallation();
 
-// The add-on whose files are in the folder, to preselect it.
-Addon InstalledAddon(const std::filesystem::path& directory);
+// Whether the add-on's files are in the folder, to preselect it.
+bool AddonInstalled(const std::filesystem::path& directory, Addon addon);
 
 // A shortcut in the folder's RobloxShadeHost.ini, which the host reads when it starts.
 std::wstring ReadShortcut(const std::filesystem::path& directory, const wchar_t* name, const wchar_t* fallback);
