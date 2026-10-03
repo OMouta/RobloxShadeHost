@@ -1,5 +1,5 @@
-# Builds Unishade and packs a portable copy for testers into build/beta. The zip has ReShade, every official effect
-# and the presets, without the depth estimation and DLSS5 add-ons. Testers unzip it and run Unishade.exe.
+# Builds Unishade and packs a portable copy for testers into build/beta. The zip has ReShade, every official effect,
+# the presets and the depth estimation and DLSS5 add-ons. Testers unzip it and run Unishade.exe.
 #
 #   ./scripts/package-beta.ps1
 
@@ -22,7 +22,7 @@ $folder = Join-Path $out 'Unishade'
 $log = Join-Path $out 'setup.log'
 if (Test-Path $folder) { Remove-Item $folder -Recurse -Force }
 New-Item -ItemType Directory -Path $out -Force | Out-Null
-$arguments = @('--silent', '--portable', '--components', 'reshade,presets', '--accept-reshade-license',
+$arguments = @('--silent', '--portable', '--components', 'reshade,presets,depth,dlss5', '--accept-reshade-license',
     '--dir', "`"$folder`"", '--log', "`"$log`"")
 # Presets come from main on the GitHub repository origin points at, which may still have its old name. Without a
 # GitHub origin, Setup uses its own presets address.
@@ -35,8 +35,8 @@ if ($github.Success) {
 }
 $setup = Join-Path $build "installer/Unishade-Setup-$version.exe"
 $exitCode = (Start-Process $setup -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru).ExitCode
-# 2 means Setup left out an effect package or a preset, which a beta should not ship without.
-if ($exitCode -eq 2) { throw "Setup left out an effect package or a preset. See $log" }
+# 2 means Setup left out an effect package, a preset or an add-on, which a beta should not ship without.
+if ($exitCode -eq 2) { throw "Setup left out an effect package, a preset or an add-on. See $log" }
 if ($exitCode -ne 0) { throw "Setup failed with exit code $exitCode. See $log" }
 
 # Setup's uninstall list means nothing outside an installation.
