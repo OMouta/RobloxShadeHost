@@ -2900,7 +2900,7 @@ void PerformanceSettings()
     {
         ImGui::Dummy(ImVec2(0, S(8)));
         clicked = ChoiceRow("Depth detail", "Depth is estimated from a smaller picture. Lower is faster, and effects that use depth lose fine detail.",
-                            { "High", "Medium", "Low" }, ChoiceOf(kDepthSizes, DepthSize()));
+                            { "Ultra", "High", "Medium", "Low" }, ChoiceOf(kDepthSizes, DepthSize()));
         if (clicked >= 0)
             SetDepthSize(kDepthSizes[clicked]);
     }

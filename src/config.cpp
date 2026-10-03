@@ -99,7 +99,7 @@ int ValidResolution(int percent)
 
 int ValidDepthSize(int size)
 {
-    return size < 140 || size > kLargestDepthSize ? kLargestDepthSize : size / 14 * 14;
+    return size < 140 || size > kDepthSizes[0] ? kDefaultDepthSize : size / 14 * 14;
 }
 
 // A missing entry uses the default. An empty one leaves the shortcut unassigned when allowEmpty is set.
@@ -402,7 +402,7 @@ void SetEffectResolution(int percent)
 
 int DepthSize()
 {
-    return CachedNumber(depthSize, L"DepthSize", kLargestDepthSize, ValidDepthSize);
+    return CachedNumber(depthSize, L"DepthSize", kDefaultDepthSize, ValidDepthSize);
 }
 
 void SetDepthSize(int size)

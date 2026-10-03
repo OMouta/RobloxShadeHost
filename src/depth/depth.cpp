@@ -1,6 +1,7 @@
 #include "depth.h"
 #include "depth_model.h"
 #include "../addon.h"
+#include "../capture.h"
 #include "../config.h"
 #include "../log.h"
 #include "../reshade_imgui.h"
@@ -27,10 +28,10 @@ namespace
 constexpr wchar_t kModelFile[] = L"depth-anything-v2-small.onnx";
 // The model's input and output go between the D3D11 and D3D12 devices in textures, since only textures can be
 // shared between them, and DirectML takes buffers. The textures hold the values in order, in rows of this many bytes,
-// so D3D12 copies them to and from packed buffers.
-constexpr UINT kRowBytes = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+// so D3D12 copies them to and from packed buffers. Rows this wide keep the largest input under 16384 of them.
+constexpr UINT kRowBytes = 16 * D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
 
-// Preprocess turns the frame into the model's input. Range, Smooth and Encode turn its output into ReShade's DEPTH.
+// Preprocess turns the frame into the model's input. Peak, Smooth and Upsample turn its output into ReShade's DEPTH.
 constexpr char kShaders[] = R"(
 cbuffer Sizes : register(b0)
 {
@@ -42,17 +43,25 @@ cbuffer Sizes : register(b0)
 Texture2D<float4> Source : register(t0);
 Texture2D<float> Result : register(t1);
 StructuredBuffer<float4> Smoothed : register(t2);
+Texture2D<float4> Guide : register(t3);
 RWTexture2D<float> Input : register(u0);
 RWByteAddressBuffer Keys : register(u1);
 RWStructuredBuffer<float4> State : register(u2);
 RWTexture2D<float> Depth : register(u3);
+RWTexture2D<float4> GuideTarget : register(u4);
 
 static const float3 Mean = float3(0.485, 0.456, 0.406);
 static const float3 Std = float3(0.229, 0.224, 0.225);
-// Blend factor for the depth range, so the whole image does not pulse when something close enters or leaves the view.
-static const float RangeSmoothing = 0.2;
+// Blend factor for the depth scale, so the whole image does not pulse when something close enters or leaves the view.
+static const float PeakSmoothing = 0.2;
 // Default RESHADE_DEPTH_LINEARIZATION_FAR_PLANE, so no preprocessor changes are needed in ReShade.
 static const float FarPlane = 1000.0;
+// The model only knows how far things are relative to each other. The nearest thing in view is put at this fraction
+// of the far plane, and anything more than 1 / Nearest times farther than it on the far plane.
+static const float Nearest = 0.01;
+// How far, in model pixels and in color, an output value reaches when upsampled.
+static const float SpatialSigma = 1.0;
+static const float ColorSigma = 0.1;
 
 void Store(uint index, float value)
 {
@@ -64,7 +73,8 @@ float Load(uint index)
     return Result.Load(int3(index % OutputWidth, index / OutputWidth, 0));
 }
 
-// Box-filters the frame down to the model size and writes planar, ImageNet-normalized RGB.
+// Box-filters the frame down to the model size and writes planar, ImageNet-normalized RGB, and the colors themselves
+// for Upsample.
 [numthreads(16, 16, 1)]
 void Preprocess(uint3 id : SV_DispatchThreadID)
 {
@@ -76,7 +86,9 @@ void Preprocess(uint3 id : SV_DispatchThreadID)
     for (uint y = begin.y; y < end.y; ++y)
         for (uint x = begin.x; x < end.x; ++x)
             sum += Source.Load(int3(x, y, 0)).rgb;
-    float3 color = (sum / ((end.x - begin.x) * (end.y - begin.y)) - Mean) / Std;
+    float3 average = sum / ((end.x - begin.x) * (end.y - begin.y));
+    GuideTarget[id.xy] = float4(average, 1);
+    float3 color = (average - Mean) / Std;
     uint plane = ModelSize.x * ModelSize.y;
     uint index = id.y * ModelSize.x + id.x;
     Store(index, color.r);
@@ -96,54 +108,73 @@ float Unordered(uint key)
     return asfloat(key & 0x80000000 ? key & 0x7FFFFFFF : ~key);
 }
 
-groupshared float2 Bounds[256];
+groupshared float Peaks[256];
 
-// Finds the lowest and highest value of the output. Keys starts out all ones and keeps the highest inverted, so both
-// keep the smallest key.
+// Finds the highest value of the output, the nearest point. Keys starts out zero, below every key.
 [numthreads(256, 1, 1)]
-void Range(uint3 id : SV_DispatchThreadID, uint thread : SV_GroupIndex)
+void Peak(uint3 id : SV_DispatchThreadID, uint thread : SV_GroupIndex)
 {
-    Bounds[thread] = Load(min(id.x, ModelSize.x * ModelSize.y - 1));
+    Peaks[thread] = Load(min(id.x, ModelSize.x * ModelSize.y - 1));
     GroupMemoryBarrierWithGroupSync();
     for (uint step = 128; step > 0; step >>= 1)
     {
         if (thread < step)
-            Bounds[thread] = float2(min(Bounds[thread].x, Bounds[thread + step].x), max(Bounds[thread].y, Bounds[thread + step].y));
+            Peaks[thread] = max(Peaks[thread], Peaks[thread + step]);
         GroupMemoryBarrierWithGroupSync();
     }
     if (thread == 0)
     {
         uint previous;
-        Keys.InterlockedMin(0, Ordered(Bounds[0].x), previous);
-        Keys.InterlockedMin(4, ~Ordered(Bounds[0].y), previous);
+        Keys.InterlockedMax(0, Ordered(Peaks[0]), previous);
     }
 }
 
-// Moves the range kept in State towards the output's. State starts out zero, until z marks it as set.
+// Moves the peak kept in State towards the output's. State starts out zero, until z marks it as set.
 [numthreads(1, 1, 1)]
 void Smooth()
 {
-    float2 range = float2(Unordered(Keys.Load(0)), Unordered(~Keys.Load(4)));
+    float peak = Unordered(Keys.Load(0));
     float4 state = State[0];
     if (state.z == 0)
-        state.xy = range;
-    State[0] = float4(state.xy + (range - state.xy) * RangeSmoothing, 1, 0);
+        state.x = peak;
+    State[0] = float4(state.x + (peak - state.x) * PeakSmoothing, 0, 1, 0);
 }
 
-// Converts relative inverse depth to the non-linear depth ReShade linearizes by default:
-// linear = z / (far - z * (far - 1)), solved for z with linear = 0 nearest and 1 at the far plane.
+// Upsamples the output to the frame's size with a joint bilateral filter: each nearby output value counts by how close
+// the color it was estimated from is to this pixel's, so depth edges follow the frame's edges instead of blurring
+// across them. Values that match no color still count a little, by distance alone.
 [numthreads(16, 16, 1)]
-void Encode(uint3 id : SV_DispatchThreadID)
+void Upsample(uint3 id : SV_DispatchThreadID)
 {
-    if (any(id.xy >= ModelSize))
+    if (any(id.xy >= SourceSize))
         return;
-    float2 range = Smoothed[0].xy;
-    float distance01 = 1 - saturate((Load(id.y * ModelSize.x + id.x) - range.x) / max(range.y - range.x, 1e-6));
+    float3 color = Source.Load(int3(id.xy, 0)).rgb;
+    float2 position = (id.xy + 0.5) * ModelSize / SourceSize - 0.5;
+    int2 corner = int2(floor(position)) - 1;
+    float sum = 0;
+    float weights = 0;
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+        {
+            int2 texel = corner + int2(x, y);
+            float2 offset = texel - position;
+            texel = clamp(texel, 0, int2(ModelSize) - 1);
+            float3 difference = Guide.Load(int3(texel, 0)).rgb - color;
+            float weight = exp(-dot(offset, offset) / (2 * SpatialSigma * SpatialSigma)) *
+                           (exp(-dot(difference, difference) / (2 * ColorSigma * ColorSigma)) + 1e-3);
+            sum += weight * Load(texel.y * ModelSize.x + texel.x);
+            weights += weight;
+        }
+
+    // The output is inverse depth, so distance goes with its reciprocal, which also keeps flat surfaces flat. It is
+    // stored as the non-linear depth ReShade linearizes by default: linear = z / (far - z * (far - 1)), solved for z.
+    float closeness = sum / weights / max(Smoothed[0].x, 1e-6);
+    float distance01 = Nearest / max(closeness, Nearest);
     Depth[id.xy] = distance01 * FarPlane / (1 + distance01 * (FarPlane - 1));
 }
 )";
 
-constexpr const char* kEntryPoints[] = { "Preprocess", "Range", "Smooth", "Encode" };
+constexpr const char* kEntryPoints[] = { "Preprocess", "Peak", "Smooth", "Upsample" };
 
 struct Depth
 {
@@ -162,9 +193,13 @@ struct Depth
     winrt::com_ptr<ID3D11Texture2D> frameCopy;
     winrt::com_ptr<ID3D11ShaderResourceView> frameView;
 
-    // Made for each model size. The input and output textures are shared with the D3D12 device, like the fence.
+    // Made for each frame and model size. The input and output textures are shared with the D3D12 device, like the
+    // fence.
     winrt::com_ptr<ID3D11Texture2D> input;
     winrt::com_ptr<ID3D11UnorderedAccessView> inputTarget;
+    winrt::com_ptr<ID3D11Texture2D> guide;
+    winrt::com_ptr<ID3D11UnorderedAccessView> guideTarget;
+    winrt::com_ptr<ID3D11ShaderResourceView> guideView;
     winrt::com_ptr<ID3D11Texture2D> output;
     winrt::com_ptr<ID3D11ShaderResourceView> outputView;
     winrt::com_ptr<ID3D11Buffer> keys;
@@ -434,8 +469,8 @@ void CompileShaders()
     CreateShaders();
 }
 
-// Runs a shader with views in their registers, t0 to t2 and u0 to u3, and unbinds them after.
-void Dispatch(size_t shader, std::array<ID3D11ShaderResourceView*, 3> views, std::array<ID3D11UnorderedAccessView*, 4> targets, UINT x, UINT y)
+// Runs a shader with views in their registers, t0 to t3 and u0 to u4, and unbinds them after.
+void Dispatch(size_t shader, std::array<ID3D11ShaderResourceView*, 4> views, std::array<ID3D11UnorderedAccessView*, 5> targets, UINT x, UINT y)
 {
     ID3D11Buffer* constants[] = { d.sizes.get() };
     g.context->CSSetShader(d.shaders[shader].get(), nullptr, 0);
@@ -449,8 +484,8 @@ void Dispatch(size_t shader, std::array<ID3D11ShaderResourceView*, 3> views, std
     g.context->CSSetUnorderedAccessViews(0, static_cast<UINT>(targets.size()), targets.data(), nullptr);
 }
 
-// Unbinds DEPTH, so effects stop reading an estimate that no longer updates, and releases what is made for each model
-// size.
+// Unbinds DEPTH, so effects stop reading an estimate that no longer updates, and releases what is made for each frame
+// and model size.
 void ReleaseShared()
 {
     for (auto* runtime : d.runtimes)
@@ -465,6 +500,9 @@ void ReleaseShared()
     d.keys = nullptr;
     d.outputView = nullptr;
     d.output = nullptr;
+    d.guideView = nullptr;
+    d.guideTarget = nullptr;
+    d.guide = nullptr;
     d.inputTarget = nullptr;
     d.input = nullptr;
     for (HANDLE* handle : { &d.inputHandle, &d.outputHandle })
@@ -487,6 +525,21 @@ void ReleaseResources()
         shader = nullptr;
     d.sourceWidth = 0;
     d.sourceHeight = 0;
+}
+
+// Turns depth off after an error. At a size other than the default it goes back to the default instead, since the size
+// may be what failed, such as the GPU running out of memory for the largest. Otherwise the menus would hide the setting
+// with depth off, and it would fail the same way on every start.
+void Stop()
+{
+    ReleaseResources();
+    if (DepthSize() == kDefaultDepthSize)
+    {
+        d.enabled = false;
+        return;
+    }
+    SetDepthSize(kDefaultDepthSize);
+    Report(LogLevel::Warning, L"Depth estimation failed, so Depth detail went back to High.");
 }
 
 // Sizes the model to the frame's aspect ratio. What follows the model's size is made again once the model is built
@@ -570,16 +623,24 @@ void CreateShared()
     const UINT zero[4] = {};
     g.context->ClearUnorderedAccessViewUint(d.stateTarget.get(), zero);
 
-    D3D11_TEXTURE2D_DESC depth{};
-    depth.Width = d.width;
-    depth.Height = d.height;
-    depth.MipLevels = 1;
-    depth.ArraySize = 1;
-    depth.Format = DXGI_FORMAT_R32_FLOAT;
-    depth.SampleDesc = { 1, 0 };
-    depth.Usage = D3D11_USAGE_DEFAULT;
-    depth.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    winrt::check_hresult(g.device->CreateTexture2D(&depth, nullptr, d.texture.put()));
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = d.width;
+    desc.Height = d.height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc = { 1, 0 };
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    winrt::check_hresult(g.device->CreateTexture2D(&desc, nullptr, d.guide.put()));
+    winrt::check_hresult(g.device->CreateUnorderedAccessView(d.guide.get(), nullptr, d.guideTarget.put()));
+    winrt::check_hresult(g.device->CreateShaderResourceView(d.guide.get(), nullptr, d.guideView.put()));
+
+    // DEPTH has the frame's size, so its edges can follow the frame's.
+    desc.Width = d.sourceWidth;
+    desc.Height = d.sourceHeight;
+    desc.Format = DXGI_FORMAT_R32_FLOAT;
+    winrt::check_hresult(g.device->CreateTexture2D(&desc, nullptr, d.texture.put()));
     winrt::check_hresult(g.device->CreateUnorderedAccessView(d.texture.get(), nullptr, d.textureTarget.put()));
     winrt::check_hresult(g.device->CreateShaderResourceView(d.texture.get(), nullptr, d.view.put()));
     const float farPlane[4] = { 1, 1, 1, 1 };
@@ -592,17 +653,18 @@ void CreateShared()
         Bind(runtime, d.view.get());
 }
 
-// Turns the model's output into the DEPTH texture, once the fence says it is ready.
+// Turns the model's output into the DEPTH texture, once the fence says it is ready. The frame copy and guide still hold
+// the frame it was estimated from, since the next one is only copied after this.
 void Publish()
 {
     winrt::check_hresult(g.context.as<ID3D11DeviceContext4>()->Wait(d.fence.get(), d.inputValue + 1));
-    const UINT ones[4] = { ~0u, ~0u, ~0u, ~0u };
-    g.context->ClearUnorderedAccessViewUint(d.keysTarget.get(), ones);
+    const UINT zero[4] = {};
+    g.context->ClearUnorderedAccessViewUint(d.keysTarget.get(), zero);
     const UINT pixels = static_cast<UINT>(d.width * d.height);
     Dispatch(1, { nullptr, d.outputView.get() }, { nullptr, d.keysTarget.get() }, (pixels + 255) / 256, 1);
     Dispatch(2, {}, { nullptr, d.keysTarget.get(), d.stateTarget.get() }, 1, 1);
-    Dispatch(3, { nullptr, d.outputView.get(), d.stateView.get() }, { nullptr, nullptr, nullptr, d.textureTarget.get() }, (d.width + 15) / 16,
-             (d.height + 15) / 16);
+    Dispatch(3, { d.frameView.get(), d.outputView.get(), d.stateView.get(), d.guideView.get() }, { nullptr, nullptr, nullptr, d.textureTarget.get() },
+             (d.sourceWidth + 15) / 16, (d.sourceHeight + 15) / 16);
 }
 } // namespace
 
@@ -643,45 +705,58 @@ void UpdateDepth(ID3D11Texture2D* frame)
     if (!d.enabled)
         return;
 
-    if (d.busy)
+    try
     {
-        if (!d.done)
-            return;
-        if (d.failed)
+        if (d.busy)
         {
-            d.enabled = false;
-            ReleaseResources();
+            if (!d.done)
+                return;
+            if (d.failed)
+            {
+                Stop();
+                d.done = false;
+                d.busy = false;
+                d.failed = false;
+                return;
+            }
+            if (d.inputValue && d.d3d12Fence->GetCompletedValue() < d.inputValue + 1)
+                return;
+            d.done = false;
+            d.busy = false;
+            // Nothing is left to publish to after the device was lost.
+            if (d.inputValue && d.texture)
+                Publish();
+        }
+
+        if (!d.shaders[0])
+            CreateShaders();
+        D3D11_TEXTURE2D_DESC desc{};
+        frame->GetDesc(&desc);
+        if (desc.Width != d.sourceWidth || desc.Height != d.sourceHeight || d.size != DepthSize())
+            Resize(desc);
+        // The worker builds the model for each size, which tells what types it takes.
+        if (d.modelWidth != d.width || d.modelHeight != d.height)
+        {
+            Request(0);
             return;
         }
-        if (d.inputValue && d.d3d12Fence->GetCompletedValue() < d.inputValue + 1)
-            return;
-        d.done = false;
-        d.busy = false;
-        // Nothing is left to publish to after the device was lost.
-        if (d.inputValue && d.texture)
-            Publish();
-    }
+        if (!d.texture)
+            CreateShared();
 
-    if (!d.shaders[0])
-        CreateShaders();
-    D3D11_TEXTURE2D_DESC desc{};
-    frame->GetDesc(&desc);
-    if (desc.Width != d.sourceWidth || desc.Height != d.sourceHeight || d.size != DepthSize())
-        Resize(desc);
-    // The worker builds the model for each size, which tells what types it takes.
-    if (d.modelWidth != d.width || d.modelHeight != d.height)
+        g.context->CopyResource(d.frameCopy.get(), frame);
+        Dispatch(0, { d.frameView.get() }, { d.inputTarget.get(), nullptr, nullptr, nullptr, d.guideTarget.get() }, (d.width + 15) / 16, (d.height + 15) / 16);
+        d.fenceValue += 2;
+        winrt::check_hresult(g.context.as<ID3D11DeviceContext4>()->Signal(d.fence.get(), d.fenceValue - 1));
+        Request(d.fenceValue - 1);
+    }
+    catch (const winrt::hresult_error& e)
     {
-        Request(0);
-        return;
+        // The host recovers from a lost device and depth starts again on the new one. Any other error only stops depth.
+        if (DeviceLost(e.code()))
+            throw;
+        Log(LogLevel::Error, L"Depth estimation stopped: %ls (0x%08X)", e.message().c_str(), static_cast<unsigned>(e.code()));
+        Stop();
     }
-    if (!d.texture)
-        CreateShared();
-
-    g.context->CopyResource(d.frameCopy.get(), frame);
-    Dispatch(0, { d.frameView.get() }, { d.inputTarget.get() }, (d.width + 15) / 16, (d.height + 15) / 16);
-    d.fenceValue += 2;
-    winrt::check_hresult(g.context.as<ID3D11DeviceContext4>()->Signal(d.fence.get(), d.fenceValue - 1));
-    Request(d.fenceValue - 1);
 }
 
 bool DepthEnabled()

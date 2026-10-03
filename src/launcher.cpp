@@ -966,7 +966,7 @@ void PerformanceLayout(HDC dc, int pad, int right, int& y)
     if (DepthEnabled())
         PlaceChoices(dc, pad, right, y, Action::DepthDetail, L"Depth detail",
                      L"Depth is estimated from a smaller picture. Lower is faster, and effects that use depth lose fine detail.",
-                     { L"High", L"Medium", L"Low" }, ChoiceOf(kDepthSizes, DepthSize()));
+                     { L"Ultra", L"High", L"Medium", L"Low" }, ChoiceOf(kDepthSizes, DepthSize()));
 
     PlaceHeading(pad, right, y, L"DEBUG");
     PlaceSwitch(dc, pad, right, y, Action::DebugInfo, DebugInfoEnabled(), L"Show debug info", L"Captured game FPS, output FPS and frame loss.");

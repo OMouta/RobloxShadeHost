@@ -154,10 +154,10 @@ inline constexpr int kEffectResolutions[] = { 100, 75, 50 };
 int EffectResolution();
 void SetEffectResolution(int percent);
 
-// The longest side of the picture depth is estimated from. Depth Anything V2 expects multiples of 14 around 518, which
-// it is unless changed, and it is never larger.
-constexpr int kLargestDepthSize = 518;
-inline constexpr int kDepthSizes[] = { kLargestDepthSize, 392, 266 };
+// The longest side of the picture depth is estimated from, in the multiples of 14 Depth Anything V2 expects. It was
+// trained with the shortest side at 518, which the largest size gives a 16:9 frame. The default is 518, which is faster.
+inline constexpr int kDepthSizes[] = { 924, 518, 392, 266 };
+constexpr int kDefaultDepthSize = 518;
 int DepthSize();
 void SetDepthSize(int size);
 
