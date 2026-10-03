@@ -816,6 +816,7 @@ void ApplyStyle(ImGuiStyle& style)
     color(ImGuiCol_TextLink, kAccentHover);
     color(ImGuiCol_TextSelectedBg, Color(theme::kAccent, 90));
     color(ImGuiCol_InputTextCursor, kText);
+    color(ImGuiCol_DragDropTarget, kAccent);
     color(ImGuiCol_NavCursor, kAccent);
     color(ImGuiCol_ModalWindowDimBg, IM_COL32(0, 0, 0, 120));
 }
@@ -2513,8 +2514,28 @@ void DrawParameters(const Technique& technique)
     ImGui::PopStyleColor();
 }
 
-void TechniqueRow(Technique& technique)
+// Moves an effect to where another one runs, as dragging it there does. The other effects keep their order.
+void MoveTechnique(size_t from, size_t to)
 {
+    std::vector<effect_technique> order;
+    m.runtime->enumerate_techniques(nullptr, [&order](effect_runtime*, effect_technique handle) { order.push_back(handle); });
+    const auto source = std::find(order.begin(), order.end(), m.techniques[from].handle);
+    const auto target = std::find(order.begin(), order.end(), m.techniques[to].handle);
+    if (source == order.end() || target == order.end())
+        return;
+    if (source < target)
+        std::rotate(source, source + 1, target + 1);
+    else
+        std::rotate(target, source, source + 1);
+    m.runtime->reorder_techniques(order.size(), order.data());
+    m.presetChanged = true;
+    LoadTechniques();
+}
+
+// Effects that are on can be dragged onto each other to change the order they run in, which from and to take.
+void TechniqueRow(size_t index, size_t& moveFrom, size_t& moveTo)
+{
+    Technique& technique = m.techniques[index];
     const bool on = m.runtime->get_technique_state(technique.handle);
     const bool expanded = m.expanded == technique.key;
     ImGui::PushID(technique.key.c_str());
@@ -2532,6 +2553,24 @@ void TechniqueRow(Technique& technique)
         m.expanded = expanded ? std::string() : technique.key;
     const bool hovered = ImGui::IsItemHovered();
     HandOnHover();
+    if (on)
+    {
+        if (ImGui::BeginDragDropSource())
+        {
+            ImGui::SetDragDropPayload("technique", &index, sizeof(index));
+            ImGui::TextUnformatted(technique.label.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("technique"))
+            {
+                moveFrom = *static_cast<const size_t*>(payload->Data);
+                moveTo = index;
+            }
+            ImGui::EndDragDropTarget();
+        }
+    }
     ImDrawList* draw = ImGui::GetWindowDrawList();
     if (hovered || expanded)
         draw->AddRectFilled(start, start + size, hovered ? kCardHover : kCard, S(8));
@@ -2602,12 +2641,13 @@ void EffectsTab()
             m.active.insert(technique.key);
     const auto active = [&](const Technique& technique) { return m.active.count(technique.key) != 0; };
 
+    size_t moveFrom = 0, moveTo = 0;
     Heading("ACTIVE");
     bool any = false;
-    for (Technique& technique : m.techniques)
-        if (active(technique) && matches(technique))
+    for (size_t i = 0; i < m.techniques.size(); ++i)
+        if (active(m.techniques[i]) && matches(m.techniques[i]))
         {
-            TechniqueRow(technique);
+            TechniqueRow(i, moveFrom, moveTo);
             any = true;
         }
     if (!any)
@@ -2630,11 +2670,11 @@ void EffectsTab()
     ImGui::PopFont();
     if (open)
         for (size_t index : m.byName)
-        {
-            Technique& technique = m.techniques[index];
-            if (!active(technique) && matches(technique))
-                TechniqueRow(technique);
-        }
+            if (!active(m.techniques[index]) && matches(m.techniques[index]))
+                TechniqueRow(index, moveFrom, moveTo);
+
+    if (moveFrom != moveTo)
+        MoveTechnique(moveFrom, moveTo);
 }
 
 // Settings
