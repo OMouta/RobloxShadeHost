@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -79,6 +80,9 @@ struct Effect
     bool compiled = false;
     bool cached = false; // taken from the compile cache
     std::string errors; // the compiler's errors and warnings
+    // The preprocessor definitions the effect checks that can be set, with the value it was compiled with, by name.
+    // ReShade's menu lists the same ones.
+    std::vector<std::pair<std::string, std::string>> definitions;
     reshadefx::effect_module module;
     std::unordered_map<std::string, std::vector<uint32_t>> spirv; // SPIR-V code by entry point
     std::vector<Uniform> uniforms;
@@ -218,6 +222,13 @@ public:
     // Techniques the preset turns on whose effect file was not found.
     std::vector<std::string> MissingTechniques() const;
 
+    // A preprocessor definition's value for an effect: from the preset's section for the effect, the preset's own
+    // definitions or the global ones in Unishade.ini. Empty when none sets it, so the effect uses its default.
+    std::string DefinitionValue(const std::string& file, const std::string& name) const;
+    // Sets a definition in the preset's section for the effect, or removes it there with an empty value, and
+    // compiles the effects again. When the effect no longer compiles, the definition goes back to what it was.
+    void SetDefinition(const std::string& file, const std::string& name, const std::string& value);
+
     std::vector<Effect>& Effects() { return effects; }
     // In the order they run.
     std::vector<Technique>& Techniques() { return techniques; }
@@ -275,6 +286,8 @@ private:
     void ShareTextures(Effect& effect, size_t index);
     void SortTechniques();
     void ApplyPreset(Effect& effect, size_t effectIndex);
+    // Sets or, with an empty value, removes a definition in the preset's section for the effect.
+    void PutDefinition(const std::string& file, const std::string& name, const std::string& value);
     bool WritePreset(const fs::path& path, PresetIni preset);
     void Enable(Technique& technique, bool enabled);
     bool ImagesReady(Effect& effect);
@@ -329,6 +342,15 @@ private:
     PresetIni presetIni; // as loaded or last saved
     PresetDefinitions presetDefinitions;
     bool dirty = false;
+    // The definition SetDefinition changed last, until the effects compiled with it, and the value it had in the
+    // effect's section, if any.
+    struct DefinitionChange
+    {
+        std::string file;
+        std::string name;
+        std::optional<std::string> previous;
+    };
+    std::optional<DefinitionChange> definitionChange;
 
     // Compiling happens on a loader thread with workers of its own. Compiled effects wait in finished until
     // Update takes them. A new load does not wait for the one before: that one stops after its current step,

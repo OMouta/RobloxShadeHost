@@ -1802,6 +1802,41 @@ bool DrawParameter(App& app, fx::Effect& effect, const fx::Uniform& uniform)
     return changed;
 }
 
+// The preprocessor definitions the effect checks, such as quality levels. A change compiles the effects again, so it
+// applies on Enter, as in ReShade's menu.
+void DrawDefinitions(App& app, const fx::Effect& effect)
+{
+    if (effect.definitions.empty() || !ImGui::CollapsingHeader("Preprocessor definitions"))
+        return;
+    for (const auto& [name, compiled] : effect.definitions)
+    {
+        ImGui::PushID(name.c_str());
+        const float x = ImGui::GetCursorPosX();
+        const float labelWidth = std::floor(ImGui::GetContentRegionAvail().x * 0.42f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushTextWrapPos(x + labelWidth - S(10));
+        ImGui::TextUnformatted(name.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(x + labelWidth);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        // Empty while the effect uses its own value, which shows as the hint.
+        const std::string current = app.runtime.DefinitionValue(effect.file, name);
+        char value[256]{};
+        current.copy(value, sizeof(value) - 1);
+        if (ImGui::InputTextWithHint("##value", compiled.c_str(), value, sizeof(value), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll) &&
+            current != value)
+            app.runtime.SetDefinition(effect.file, name, value);
+        if (ImGui::BeginPopupContextItem("reset"))
+        {
+            if (ImGui::MenuItem("Reset to default"))
+                app.runtime.SetDefinition(effect.file, name, "");
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+}
+
 void DrawParameters(App& app, const fx::Technique& technique, fx::Effect& effect)
 {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, kInset);
@@ -1819,7 +1854,7 @@ void DrawParameters(App& app, const fx::Technique& technique, fx::Effect& effect
     for (const fx::Uniform& uniform : effect.uniforms)
         if (!uniform.hidden && std::find(categories.begin(), categories.end(), uniform.category) == categories.end())
             categories.push_back(uniform.category);
-    if (categories.empty())
+    if (categories.empty() && effect.definitions.empty())
         Text("This effect has no settings.", kDim, 13.5f);
     bool changed = false;
     for (const std::string& category : categories)
@@ -1842,6 +1877,7 @@ void DrawParameters(App& app, const fx::Technique& technique, fx::Effect& effect
         }
         Tooltip("Right-click a setting to reset only that one.");
     }
+    DrawDefinitions(app, effect);
     ImGui::PopFont();
     ImGui::EndChild();
     ImGui::PopStyleColor();

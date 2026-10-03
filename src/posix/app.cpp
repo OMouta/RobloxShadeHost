@@ -139,7 +139,8 @@ void App::Run()
         if (overlayVisible && HasFrame() && (newFrame || menuOpen || toastShowing || Now() - lastOverlayFrame > 0.1))
             RenderOverlay();
 
-        if (settings.autoSavePresets && runtime.Dirty() && Now() - lastAutoSave > 1.0)
+        // While effects compile, the ones not done yet would be missing from the preset's order.
+        if (settings.autoSavePresets && runtime.Dirty() && !runtime.Loading() && Now() - lastAutoSave > 1.0)
         {
             runtime.SavePreset();
             lastAutoSave = Now();

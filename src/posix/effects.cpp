@@ -22,6 +22,7 @@
 #include <random>
 #include <set>
 #include <tuple>
+#include <utility>
 
 // A hash of ReShade's compiler sources, from posix.cmake, so a new or changed compiler starts a new cache.
 #ifndef UNISHADE_COMPILER_ID
@@ -321,7 +322,7 @@ uint64_t HashPiece(std::string_view data, uint64_t hash)
 }
 
 // Bump when what the cache stores changes.
-constexpr uint32_t kCacheFormat = 1;
+constexpr uint32_t kCacheFormat = 2;
 constexpr char kCacheMagic[8] = "UNIFXC1";
 
 bool ReadText(const fs::path& path, std::string& text)
@@ -649,7 +650,7 @@ void Visit(A& archive, reshadefx::effect_module& module)
     Visit(archive, module.entry_points);
 }
 
-// The compiled part of an effect: its module, SPIR-V and warnings.
+// The compiled part of an effect: its module, SPIR-V, warnings and the definitions it checks.
 template <class A>
 void VisitCompiled(A& archive, Effect& effect)
 {
@@ -658,6 +659,7 @@ void VisitCompiled(A& archive, Effect& effect)
     Visit(archive, spirv);
     effect.spirv = { spirv.begin(), spirv.end() };
     Visit(archive, effect.errors);
+    Visit(archive, effect.definitions);
 }
 
 // One entry per effect, set of macros and include folders. It lists the files the effect was compiled from,
@@ -1039,6 +1041,17 @@ bool CompileEffect(Effect& effect, const fs::path& path, const Definitions& defi
     effect.errors = pp.errors();
     if (!preprocessed || (cancelled && cancelled()))
         return false;
+    // Left out as in ReShade: short names, and the ones ReShade or the effect's includes set.
+    for (auto [name, value] : pp.used_macro_definitions())
+    {
+        if (name.size() < 8 || name[0] == '_' || name.starts_with("BUFFER_") || name.starts_with("RESHADE_") ||
+            name.find("INCLUDE_") != std::string::npos)
+            continue;
+        value.erase(0, value.find_first_not_of(" \t"));
+        value.erase(value.find_last_not_of(" \t") + 1);
+        effect.definitions.emplace_back(std::move(name), std::move(value));
+    }
+    std::sort(effect.definitions.begin(), effect.definitions.end());
 
     // Vulkan's clip space is upside down compared to Direct3D's, which effects are written for.
     std::unique_ptr<reshadefx::codegen> codegen(reshadefx::create_codegen_spirv(true, false, false, false, true));
@@ -1379,8 +1392,24 @@ void Runtime::Update()
             cached += effect.cached;
         }
         Log(LogLevel::Info, "Effects loaded: %zu compiled (%zu from the cache), %zu failed.", effects.size() - failed, cached, failed);
-        for (const std::string& missing : MissingTechniques())
-            Report(LogLevel::Warning, "The preset uses %s, which is not installed.", missing.c_str());
+        // An effect that stops compiling would also leave the menu, and its definitions with it.
+        bool reverted = false;
+        if (const std::optional<DefinitionChange> change = std::exchange(definitionChange, std::nullopt))
+        {
+            const auto effect = std::find_if(effects.begin(), effects.end(), [&](const Effect& loaded) { return Lowercase(loaded.file) == Lowercase(change->file); });
+            if (effect != effects.end() && !effect->compiled)
+            {
+                PutDefinition(change->file, change->name, change->previous.value_or(""));
+                Log(LogLevel::Warning, "%s did not compile with that value of %s, so it went back to the one before.", change->file.c_str(),
+                    change->name.c_str());
+                dirty = true;
+                Reload();
+                reverted = true;
+            }
+        }
+        if (!reverted)
+            for (const std::string& missing : MissingTechniques())
+                Report(LogLevel::Warning, "The preset uses %s, which is not installed.", missing.c_str());
     }
     PrepareEffects(kPrepareBudget);
 }
@@ -1595,6 +1624,12 @@ bool Runtime::WritePreset(const fs::path& path, PresetIni preset)
                 enabled.push_back(key);
     preset.Set("", "Techniques", PresetIni::Join(enabled));
     preset.Set("", "TechniqueSorting", PresetIni::Join(order));
+    // Each effect's definitions, which the menu changes. The preset's own are left as they are.
+    for (const std::string& section : preset.SectionNames())
+        if (!presetDefinitions.effects.count(section))
+            preset.Remove(section, "PreprocessorDefinitions");
+    for (const auto& [file, definitions] : presetDefinitions.effects)
+        preset.Set(file, "PreprocessorDefinitions", FormatDefinitions(definitions));
 
     for (size_t index = 0; index < effects.size(); ++index)
     {
@@ -1661,6 +1696,47 @@ std::vector<std::string> Runtime::MissingTechniques() const
             missing.push_back(key);
     }
     return missing;
+}
+
+std::string Runtime::DefinitionValue(const std::string& file, const std::string& name) const
+{
+    const auto value = [&name](const Definitions& definitions) -> const std::string* {
+        const auto found = std::find_if(definitions.begin(), definitions.end(), [&name](const auto& definition) { return definition.first == name; });
+        return found == definitions.end() ? nullptr : &found->second;
+    };
+    const std::string* found = nullptr;
+    if (const auto effect = presetDefinitions.effects.find(file); effect != presetDefinitions.effects.end())
+        found = value(effect->second);
+    if (!found)
+        found = value(presetDefinitions.global);
+    if (!found)
+        found = value(settings.definitions);
+    return found ? *found : std::string();
+}
+
+void Runtime::PutDefinition(const std::string& file, const std::string& name, const std::string& value)
+{
+    Definitions& definitions = presetDefinitions.effects[file];
+    std::erase_if(definitions, [&name](const auto& definition) { return definition.first == name; });
+    if (!value.empty())
+        definitions.emplace_back(name, value);
+    if (definitions.empty())
+        presetDefinitions.effects.erase(file);
+}
+
+void Runtime::SetDefinition(const std::string& file, const std::string& name, const std::string& value)
+{
+    std::optional<std::string> previous;
+    if (const auto effect = presetDefinitions.effects.find(file); effect != presetDefinitions.effects.end())
+        for (const auto& [defined, text] : effect->second)
+            if (defined == name)
+                previous = text;
+    if (previous.value_or("") == value)
+        return;
+    PutDefinition(file, name, value);
+    definitionChange = DefinitionChange{ file, name, previous };
+    dirty = true;
+    Reload();
 }
 
 void Runtime::SetEnabled(size_t index, bool enabled)

@@ -109,6 +109,9 @@ int main()
     Write(directory / "Shaders" / "Value.fxh", "#define VALUE 0.5\n");
     Write(directory / "Shaders" / "Test.fx",
           "#include \"Value.fxh\"\n"
+          "#ifndef TEST_QUALITY\n"
+          "#define TEST_QUALITY 2\n"
+          "#endif\n"
           "uniform float Strength < ui_type = \"slider\"; ui_min = 0.0; ui_max = 1.0; > = VALUE;\n"
           "texture Target { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA8; };\n"
           "void Vertex(uint id : SV_VertexID, out float4 position : SV_Position)\n"
@@ -121,10 +124,15 @@ int main()
     options.includePaths = { directory / "Shaders" };
     options.cacheDirectory = directory / "cache";
     const fs::path effectPath = directory / "Shaders" / "Test.fx";
-    fx::Effect first, second, third, fourth, missing, stopped;
+    fx::Effect first, second, defined, third, fourth, missing, stopped;
     ok &= Check(fx::CompileEffect(first, effectPath, {}, options) && first.compiled && !first.cached, "compiles an effect");
+    ok &= Check(first.definitions == fx::Definitions{ { "TEST_QUALITY", "2" } }, "lists the definitions an effect checks, with its own value");
+    ok &= Check(fx::CompileEffect(defined, effectPath, { { "TEST_QUALITY", "3" } }, options) &&
+                    defined.definitions == fx::Definitions{ { "TEST_QUALITY", "3" } },
+                "or with the value it was compiled with");
     ok &= Check(fx::CompileEffect(second, effectPath, {}, options) && second.compiled && second.cached, "reads it back from the cache");
-    ok &= Check(second.spirv == first.spirv && second.module.techniques.size() == 1 && second.module.techniques[0].name == "Test" &&
+    ok &= Check(second.spirv == first.spirv && second.definitions == first.definitions && second.module.techniques.size() == 1 &&
+                    second.module.techniques[0].name == "Test" &&
                     second.module.textures.size() == first.module.textures.size() && second.module.textures[0].width == 1920 &&
                     second.uniforms.size() == 1 && second.uniforms[0].min == 0.0f && second.uniforms[0].max == 1.0f &&
                     second.uniformData.size() == first.uniformData.size() && second.module.uniforms[0].initializer_value.as_float[0] == 0.5f,
