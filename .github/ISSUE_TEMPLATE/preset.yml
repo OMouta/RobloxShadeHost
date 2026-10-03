@@ -4,7 +4,7 @@ labels: [preset]
 body:
   - type: markdown
     attributes:
-      value: Presets may only use effects from [ReShade's official package list](https://github.com/crosire/reshade-shaders/blob/list/EffectPackages.ini). Depth-based effects do nothing, since Roblox provides no depth buffer.
+      value: Presets may only use effects from [ReShade's official package list](https://github.com/crosire/reshade-shaders/blob/list/EffectPackages.ini). Depth effects require the optional depth estimation add-on. Include the supported game you tested with.
   - type: input
     id: name
     attributes:
@@ -23,6 +23,6 @@ body:
     id: screenshots
     attributes:
       label: Screenshots
-      description: Before and after in a Roblox experience.
+      description: Before and after in a supported game. Name the game you used.
     validations:
       required: true

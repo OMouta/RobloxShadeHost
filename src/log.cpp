@@ -1,45 +1,128 @@
 #include "log.h"
 #include "config.h"
+#include "text.h"
 
 #include <windows.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
+#include <type_traits>
 
 namespace
 {
-std::mutex mutex;
+constexpr size_t kMaxNotices = 40;
+// The log stops growing here, so something that keeps logging cannot fill the disk.
+constexpr unsigned long long kMaxLogSize = 16ull * 1024 * 1024;
+
+// Never destroyed, since other threads, such as the update check, may still log while the host exits.
+struct Shared
+{
+    std::mutex mutex;
+    std::vector<Notice> notices;
+    unsigned long long size = 0;
+    bool full = false;
+    // The last line written, without its time, and how often it came again right after.
+    LogLevel lastLevel = LogLevel::Info;
+    std::string lastText;
+    unsigned repeats = 0;
+    std::string repeatStamp;
+};
+Shared& shared = *new Shared;
 HANDLE file = INVALID_HANDLE_VALUE;
 std::wstring path;
-bool colors = false;
+std::atomic<unsigned> noticeVersion = 0;
 
-std::string Utf8(const wchar_t* text)
+template <class Char>
+size_t WebAddressLengthOf(std::basic_string_view<Char> word)
 {
-    const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
-    std::string result(size > 0 ? size - 1 : 0, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), size, nullptr, nullptr);
-    return result;
+    const auto startsWith = [word](std::string_view prefix) {
+        return word.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), word.begin(), [](char a, Char b) { return Char(a) == b; });
+    };
+    const auto punctuation = [](Char character) {
+        const auto code = static_cast<std::make_unsigned_t<Char>>(character);
+        return code < 128 && std::string_view(".,;:!?)'\"").find(static_cast<char>(code)) != std::string_view::npos;
+    };
+    if (!startsWith("https://") && !startsWith("http://"))
+        return 0;
+    // The slashes after http: are no punctuation, so this stops there at the latest.
+    size_t length = word.size();
+    while (punctuation(word[length - 1]))
+        --length;
+    return length;
 }
 
-void WriteToFile(const std::string& text)
+// Called with the mutex held.
+void WriteToFile(std::string text)
 {
+    if (file == INVALID_HANDLE_VALUE || shared.full)
+        return;
+    if (shared.size + text.size() > kMaxLogSize)
+    {
+        shared.full = true;
+        text = "Unishade.log reached 16 MB, so nothing more is written to it until Unishade restarts.\r\n";
+    }
     DWORD written = 0;
-    if (file != INVALID_HANDLE_VALUE)
-        WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+    WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+    shared.size += written;
+}
+
+// Called with the mutex held.
+void WriteRepeats()
+{
+    if (shared.repeats)
+        WriteToFile(shared.repeatStamp + "(repeated " + std::to_string(shared.repeats) + " times)\r\n");
+    shared.repeats = 0;
+}
+
+void Write(LogLevel level, bool notice, const wchar_t* format, va_list args)
+{
+    wchar_t buffer[2048];
+    _vsnwprintf_s(buffer, _TRUNCATE, format, args);
+
+    static constexpr const char* kNames[] = { "", "ok", "warning", "error" };
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    char stamp[64];
+    snprintf(stamp, sizeof(stamp), "%04u-%02u-%02u %02u:%02u:%02u.%03u  %-7s  ", time.wYear, time.wMonth, time.wDay, time.wHour,
+             time.wMinute, time.wSecond, time.wMilliseconds, kNames[static_cast<int>(level)]);
+    std::string text = Utf8(buffer);
+
+    std::lock_guard lock(shared.mutex);
+    // A line that keeps coming, such as from a retry, is written once and then counted.
+    if (level == shared.lastLevel && text == shared.lastText)
+    {
+        ++shared.repeats;
+        shared.repeatStamp = stamp;
+    }
+    else
+    {
+        WriteRepeats();
+        WriteToFile(stamp + text + "\r\n");
+        shared.lastLevel = level;
+        shared.lastText = std::move(text);
+    }
+    if (!notice && level != LogLevel::Warning && level != LogLevel::Error)
+        return;
+    auto& notices = shared.notices;
+    // Retries, such as a capture that keeps failing, would otherwise fill the list with one message.
+    if (std::any_of(notices.begin(), notices.end(), [&](const Notice& existing) { return existing.text == buffer; }))
+        return;
+    if (notices.size() == kMaxNotices)
+        notices.erase(notices.begin());
+    notices.push_back({ level, buffer });
+    ++noticeVersion;
 }
 } // namespace
 
 void InitLog()
 {
-    DWORD mode = 0;
-    HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
-    colors = GetConsoleMode(console, &mode) && SetConsoleMode(console, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    SetConsoleOutputCP(CP_UTF8);
-
-    path = ExeDirectory() + L"RobloxShadeHost.log";
-    MoveFileExW(path.c_str(), (ExeDirectory() + L"RobloxShadeHost.old.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    path = ExeDirectory() + L"Unishade.log";
+    MoveFileExW(path.c_str(), (ExeDirectory() + L"Unishade.old.log").c_str(), MOVEFILE_REPLACE_EXISTING);
     file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD error = GetLastError();
 
     // GetVersionEx reports Windows 8 to programs without a compatibility manifest.
     RTL_OSVERSIONINFOW version{ sizeof(version) };
@@ -47,45 +130,67 @@ void InitLog()
     if (auto get = reinterpret_cast<RtlGetVersion>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")))
         get(&version);
     char header[512];
-    snprintf(header, sizeof(header), "RobloxShadeHost %s on Windows %lu.%lu.%lu\r\n", ROBLOX_SHADE_HOST_VERSION,
+    snprintf(header, sizeof(header), "Unishade %s on Windows %lu.%lu.%lu\r\n", UNISHADE_VERSION,
              version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber);
-    WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory().c_str()) + "\r\n\r\n");
+    {
+        std::lock_guard lock(shared.mutex);
+        WriteToFile(header + std::string("Folder: ") + Utf8(ExeDirectory()) + "\r\n\r\n");
+    }
 
     if (file == INVALID_HANDLE_VALUE)
-        Log(LogLevel::Warning, L"Could not create %ls (error %lu). Messages are only shown here.", path.c_str(), GetLastError());
+        Log(LogLevel::Warning, L"Could not create %ls (error %lu), so nothing is logged this time.", path.c_str(), error);
+}
+
+void FlushLog()
+{
+    std::lock_guard lock(shared.mutex);
+    WriteRepeats();
 }
 
 void Log(LogLevel level, const wchar_t* format, ...)
 {
-    wchar_t buffer[2048];
     va_list args;
     va_start(args, format);
-    _vsnwprintf_s(buffer, _TRUNCATE, format, args);
+    Write(level, false, format, args);
     va_end(args);
-    const std::string message = Utf8(buffer);
+}
 
-    static constexpr struct
-    {
-        const char* name;
-        const char* color;
-    } kLevels[] = { { "", "" }, { "ok", "\x1b[32m" }, { "warning", "\x1b[33m" }, { "error", "\x1b[91m" } };
-    const auto& tag = kLevels[static_cast<int>(level)];
+void Report(LogLevel level, const wchar_t* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    Write(level, true, format, args);
+    va_end(args);
+}
 
-    SYSTEMTIME time{};
-    GetLocalTime(&time);
-    char line[64];
+std::vector<Notice> Notices()
+{
+    std::lock_guard lock(shared.mutex);
+    return shared.notices;
+}
 
-    std::lock_guard lock(mutex);
-    if (colors)
-        std::printf("\x1b[90m%02u:%02u:%02u\x1b[0m  %s%-7s\x1b[0m  %s\n", time.wHour, time.wMinute, time.wSecond, tag.color, tag.name,
-                    message.c_str());
-    else
-        std::printf("%02u:%02u:%02u  %-7s  %s\n", time.wHour, time.wMinute, time.wSecond, tag.name, message.c_str());
-    std::fflush(stdout);
+void ClearNotices()
+{
+    std::lock_guard lock(shared.mutex);
+    if (shared.notices.empty())
+        return;
+    shared.notices.clear();
+    ++noticeVersion;
+}
 
-    snprintf(line, sizeof(line), "%04u-%02u-%02u %02u:%02u:%02u.%03u  %-7s  ", time.wYear, time.wMonth, time.wDay, time.wHour,
-             time.wMinute, time.wSecond, time.wMilliseconds, tag.name);
-    WriteToFile(line + message + "\r\n");
+unsigned NoticeVersion()
+{
+    return noticeVersion;
+}
+
+size_t WebAddressLength(std::string_view word)
+{
+    return WebAddressLengthOf(word);
+}
+
+size_t WebAddressLength(std::wstring_view word)
+{
+    return WebAddressLengthOf(word);
 }
 
 const std::wstring& LogPath()

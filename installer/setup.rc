@@ -1,8 +1,37 @@
 #include "resource.h"
 
-1 ICON "../assets/RobloxShadeHost.ico"
+1 ICON "../assets/Unishade.ico"
 // Found through the include path, which CMake points at the host's build folder.
-IDR_HOST RCDATA "RobloxShadeHost.exe"
+IDR_HOST RCDATA "Unishade.exe"
 IDR_LICENSE RCDATA "../LICENSE"
 IDR_CREDITS RCDATA "CREDITS.txt"
-IDR_LOGO RCDATA "../assets/RobloxShadeHost.png"
+IDR_LOGO RCDATA "../assets/Unishade.png"
+
+#include <winver.h>
+
+1 VERSIONINFO
+ FILEVERSION UNISHADE_VERSION_RESOURCE
+ PRODUCTVERSION UNISHADE_VERSION_RESOURCE
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Unishade contributors\0"
+            VALUE "FileDescription", "Unishade Setup\0"
+            VALUE "FileVersion", UNISHADE_VERSION "\0"
+            VALUE "InternalName", "Unishade Setup\0"
+            VALUE "OriginalFilename", "Unishade-Setup.exe\0"
+            VALUE "ProductName", "Unishade\0"
+            VALUE "ProductVersion", UNISHADE_VERSION "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

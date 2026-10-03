@@ -1,0 +1,16 @@
+// The implementations of the single-header stb libraries.
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_HDR
+#define STBI_NO_PIC
+#define STBI_NO_PNM
+#include <stb_image.h>
+
+// Needs stb_image's internals, so it goes in the same file.
+#define STB_IMAGE_DDS_IMPLEMENTATION
+#include <stb_image_dds.h>
+
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include <stb_image_resize2.h>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>

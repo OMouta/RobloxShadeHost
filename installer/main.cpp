@@ -1,11 +1,12 @@
-// RobloxShadeHost Setup: installs the host with ReShade, its effects, presets and an optional add-on, and
+// Unishade Setup: installs the host with ReShade, its effects, presets and an optional add-on, and
 // later changes shortcuts or uninstalls. Drawn with Dear ImGui, the UI library ReShade's own menu uses.
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "install.h"
 #include "resource.h"
-#include "text.h"
-#include "../src/hotkey.h"
+#include "../src/config.h"
+#include "../src/text.h"
+#include "../src/theme.h"
 
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
@@ -40,28 +41,30 @@ constexpr float kStrip = 3;
 constexpr float kSidebar = 236;
 constexpr float kFooter = 74;
 
-constexpr ImU32 kBackground = IM_COL32(17, 18, 23, 255);
-constexpr ImU32 kSidebarColor = IM_COL32(12, 13, 17, 255);
-constexpr ImU32 kCard = IM_COL32(25, 26, 33, 255);
-constexpr ImU32 kCardHover = IM_COL32(31, 32, 41, 255);
-constexpr ImU32 kBorder = IM_COL32(40, 42, 53, 255);
-constexpr ImU32 kBorderStrong = IM_COL32(74, 77, 94, 255);
-constexpr ImU32 kText = IM_COL32(236, 236, 241, 255);
-constexpr ImU32 kDim = IM_COL32(150, 152, 167, 255);
-constexpr ImU32 kAccent = IM_COL32(112, 122, 255, 255);
-constexpr ImU32 kAccentHover = IM_COL32(132, 141, 255, 255);
-constexpr ImU32 kAccentActive = IM_COL32(95, 104, 235, 255);
-constexpr ImU32 kWarning = IM_COL32(245, 192, 92, 255);
-constexpr ImU32 kError = IM_COL32(255, 118, 118, 255);
-constexpr ImU32 kSuccess = IM_COL32(104, 214, 148, 255);
-// The ring in the logo.
-constexpr ImU32 kRainbow[] = {
-    IM_COL32(255, 72, 96, 255),  IM_COL32(255, 158, 54, 255), IM_COL32(248, 228, 76, 255), IM_COL32(84, 222, 122, 255),
-    IM_COL32(62, 198, 255, 255), IM_COL32(84, 110, 255, 255), IM_COL32(186, 92, 255, 255),
-};
+constexpr ImU32 Color(unsigned rgb, int alpha = 255)
+{
+    return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, alpha);
+}
 
-constexpr wchar_t kDefaultToggleKey[] = L"Home";
-constexpr wchar_t kDefaultOverlayToggleKey[] = L"Ctrl+F8";
+constexpr ImU32 kBackground = Color(theme::kBackground);
+constexpr ImU32 kSidebarColor = Color(theme::kSidebar);
+constexpr ImU32 kCard = Color(theme::kCard);
+constexpr ImU32 kCardHover = Color(theme::kCardHover);
+constexpr ImU32 kBorder = Color(theme::kBorder);
+constexpr ImU32 kBorderStrong = Color(theme::kBorderStrong);
+constexpr ImU32 kText = Color(theme::kText);
+constexpr ImU32 kDim = Color(theme::kDim);
+constexpr ImU32 kAccent = Color(theme::kAccent);
+constexpr ImU32 kAccentHover = Color(theme::kAccentHover);
+constexpr ImU32 kAccentActive = Color(theme::kAccentActive);
+constexpr ImU32 kWarning = Color(theme::kWarning);
+constexpr ImU32 kError = Color(theme::kError);
+constexpr ImU32 kSuccess = Color(theme::kSuccess);
+
+// Exit codes of a silent run. 1 is also used when the command line is invalid.
+constexpr int kExitFailed = 1;
+// Installed, but an effect package, a preset or the requested add-on was left out. The setup log says which.
+constexpr int kExitIncomplete = 2;
 
 enum class Page
 {
@@ -71,7 +74,6 @@ enum class Page
     License,
     Installing,
     Failed,
-    Shortcuts,
     Finished,
     Uninstall,
     Uninstalled,
@@ -167,17 +169,17 @@ struct App
     std::vector<std::string> notes;
     bool closeRequested = false;
 
-    Hotkey toggleKey;
-    Hotkey overlayToggleKey;
-    int capturing = -1; // which shortcut is waiting for a key press
-    std::string captureError;
-    bool shortcutsOnly = false;
-    std::string saveError;
+    InputHotkeys hotkeys;
+    // The index in kShortcuts of the shortcut waiting for new keys, or -1.
+    int capturing = -1;
+    std::string shortcutError;
     bool hostRunning = false;
     bool launch = true;
+    bool highPerformanceGpu = true;
 
     Task uninstallTask;
     bool deleteUserFiles = false;
+    bool folderLeft = false;
 };
 App app;
 
@@ -211,31 +213,86 @@ fs::path DefaultDirectory()
 {
     PWSTR path = nullptr;
     SHGetKnownFolderPath(FOLDERID_UserProgramFiles, 0, nullptr, &path);
-    fs::path directory = fs::path(path ? path : L"") / L"RobloxShadeHost";
+    fs::path directory = fs::path(path ? path : L"") / L"Unishade";
     CoTaskMemFree(path);
     return directory;
 }
 
-Hotkey ParseOr(const std::wstring& text, const wchar_t* fallback)
-{
-    Hotkey hotkey;
-    if (text.empty() || !ParseHotkey(text, hotkey))
-        ParseHotkey(fallback, hotkey);
-    return hotkey;
-}
-
+// Reads the shortcuts the way the host does: a missing or unsupported entry is the default, and an empty one
+// leaves the shortcut unassigned, except for the menu's.
 void LoadShortcuts()
 {
     const fs::path directory = Directory();
-    app.toggleKey = ParseOr(ReadShortcut(directory, L"ToggleKey", kDefaultToggleKey), kDefaultToggleKey);
-    const std::wstring overlay = ReadShortcut(directory, L"OverlayToggleKey", kDefaultOverlayToggleKey);
-    app.overlayToggleKey = overlay.empty() ? Hotkey{} : ParseOr(overlay, kDefaultOverlayToggleKey);
+    for (const Shortcut& shortcut : kShortcuts)
+    {
+        const std::wstring text = ReadShortcut(directory, shortcut.name, shortcut.fallback);
+        Hotkey& hotkey = app.hotkeys.*shortcut.member;
+        hotkey = {};
+        if (text.empty() && shortcut.member != &InputHotkeys::input)
+            continue;
+        if (!ParseHotkey(text, hotkey))
+            ParseHotkey(shortcut.fallback, hotkey);
+    }
+}
+
+// While Setup waits for a shortcut, the next key pressed with any modifiers becomes it.
+void CaptureShortcut(UINT key)
+{
+    // Modifiers on their own.
+    if (key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU || key == VK_LWIN || key == VK_RWIN)
+        return;
+    Hotkey hotkey;
+    if (GetKeyState(VK_CONTROL) < 0)
+        hotkey.modifiers |= MOD_CONTROL;
+    if (GetKeyState(VK_MENU) < 0)
+        hotkey.modifiers |= MOD_ALT;
+    if (GetKeyState(VK_SHIFT) < 0)
+        hotkey.modifiers |= MOD_SHIFT;
+    if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0)
+        hotkey.modifiers |= MOD_WIN;
+    if (key == VK_ESCAPE && hotkey.modifiers == MOD_NOREPEAT)
+    {
+        app.capturing = -1;
+        return;
+    }
+    hotkey.key = key;
+    const std::wstring text = FormatHotkey(hotkey);
+    if (text.empty())
+    {
+        app.shortcutError = "That key cannot be used. Try a letter, a number or an F key other than F12.";
+        return;
+    }
+    // The host turns off the later of two shortcuts on the same keys.
+    const Shortcut& shortcut = kShortcuts[app.capturing];
+    for (const Shortcut& other : kShortcuts)
+    {
+        const Hotkey& taken = app.hotkeys.*other.member;
+        if (&other != &shortcut && taken.key == hotkey.key && taken.modifiers == hotkey.modifiers)
+        {
+            app.shortcutError = Utf8(text) + " is already used by another Unishade shortcut.";
+            return;
+        }
+    }
+    app.capturing = -1;
+    app.shortcutError.clear();
+    if (WriteShortcut(Directory(), shortcut.name, text))
+        app.hotkeys.*shortcut.member = hotkey;
+    else
+        app.shortcutError = "Could not save RobloxShadeHost.ini.";
 }
 
 void StartReleaseFetch()
 {
     app.releaseError.clear();
     app.releaseTask.Start([] { app.fetchedRelease = FetchReShadeRelease(app.releaseCancel); });
+}
+
+// Setup started on the uninstall page has not loaded the license yet.
+void ShowLicensePage()
+{
+    if (!app.release && !app.releaseTask.Running())
+        StartReleaseFetch();
+    app.page = Page::License;
 }
 
 void StartInstall()
@@ -259,7 +316,7 @@ void StartUninstall()
 std::string CheckDirectory(const fs::path& directory)
 {
     if (!directory.is_absolute() || !directory.has_filename())
-        return "Enter a full folder path, such as C:\\Games\\RobloxShadeHost.";
+        return "Enter a full folder path, such as C:\\Games\\Unishade.";
     std::error_code ignored;
     const std::wstring lower = [&] {
         std::wstring text = directory.wstring();
@@ -273,7 +330,7 @@ std::string CheckDirectory(const fs::path& directory)
     fs::path existing = directory;
     while (!fs::is_directory(existing, ignored) && existing.has_relative_path())
         existing = existing.parent_path();
-    const fs::path probe = existing / (L"RobloxShadeHost-" + std::to_wstring(GetCurrentProcessId()) + L".tmp");
+    const fs::path probe = existing / (L"Unishade-" + std::to_wstring(GetCurrentProcessId()) + L".tmp");
     HANDLE file = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
     if (file == INVALID_HANDLE_VALUE)
         return "Setup cannot write to this folder. Pick another one, such as the suggested folder.";
@@ -304,8 +361,8 @@ std::optional<fs::path> BrowseFolder(const fs::path& current)
     fs::path folder = path;
     CoTaskMemFree(path);
     // Keeps the files together instead of spreading them over the chosen folder.
-    if (_wcsicmp(folder.filename().c_str(), L"RobloxShadeHost") != 0)
-        folder /= L"RobloxShadeHost";
+    if (_wcsicmp(folder.filename().c_str(), L"Unishade") != 0 && _wcsicmp(folder.filename().c_str(), L"RobloxShadeHost") != 0)
+        folder /= L"Unishade";
     return folder;
 }
 
@@ -340,12 +397,14 @@ void Title(const std::string& text)
 
 void Rainbow(ImDrawList* draw, ImVec2 min, ImVec2 max)
 {
-    constexpr int count = IM_ARRAYSIZE(kRainbow);
+    constexpr int count = IM_ARRAYSIZE(theme::kRainbow);
     for (int i = 0; i + 1 < count; ++i)
     {
         const float left = min.x + (max.x - min.x) * i / (count - 1);
         const float right = min.x + (max.x - min.x) * (i + 1) / (count - 1);
-        draw->AddRectFilledMultiColor(ImVec2(left, min.y), ImVec2(right, max.y), kRainbow[i], kRainbow[i + 1], kRainbow[i + 1], kRainbow[i]);
+        const ImU32 from = Color(theme::kRainbow[i]);
+        const ImU32 to = Color(theme::kRainbow[i + 1]);
+        draw->AddRectFilledMultiColor(ImVec2(left, min.y), ImVec2(right, max.y), from, to, to, from);
     }
 }
 
@@ -525,72 +584,58 @@ void ProgressLine(float fraction)
     ImGui::Dummy(end - start);
 }
 
-// A shortcut drawn like a key, followed by what it does.
-void KeyLine(const Hotkey& hotkey, const std::string& description)
+// A shortcut drawn like a key, followed by what it does. Clicking the key makes it wait for new ones.
+void KeybindLine(int index, const std::string& description)
 {
-    const std::string key = Utf8(FormatHotkey(hotkey));
-    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const Hotkey& hotkey = app.hotkeys.*kShortcuts[index].member;
+    const bool capturing = app.capturing == index;
+    const std::string label = capturing ? "Press keys..." : hotkey.key ? Utf8(FormatHotkey(hotkey)) : "Not set";
+    ImGui::PushID(index);
     ImGui::PushFont(ui.semibold, 14.5f);
-    const ImVec2 text = ImGui::CalcTextSize(key.c_str());
-    const ImVec2 size(std::max(text.x + S(20), S(92)), text.y + S(10));
-    const ImVec2 position = ImGui::GetCursorScreenPos();
-    draw->AddRectFilled(position, position + size, kCard, S(6));
-    draw->AddRect(position, position + size, kBorderStrong, S(6), S(1));
-    draw->AddText(position + ImVec2((size.x - text.x) / 2, S(5)), kText, key.c_str());
-    ImGui::Dummy(size);
+    ImGui::PushStyleColor(ImGuiCol_Button, kBackground);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kCardHover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, kBorder);
+    ImGui::PushStyleColor(ImGuiCol_Border, capturing ? kAccent : kBorderStrong);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(10), S(5)));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, S(6));
+    const float width = std::max(ImGui::CalcTextSize(label.c_str()).x + S(20), S(116));
+    if (ImGui::Button((label + "###key").c_str(), ImVec2(width, 0)))
+    {
+        app.capturing = capturing ? -1 : index;
+        app.shortcutError.clear();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
     ImGui::PopFont();
+    ImGui::PopID();
     ImGui::SameLine(0, S(14));
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(4));
     Text(description, kText, 15);
 }
 
-// The key a shortcut uses, and a button that waits for new keys when clicked.
-void ShortcutRow(int index, const char* title, const char* description, Hotkey& hotkey, bool clearable)
+// The two shortcuts needed from the first start, in a card with the accent border so it is not skipped.
+void Keybinds()
 {
-    const float buttonWidth = S(190);
-    const float right = ImGui::GetContentRegionAvail().x;
-    const float top = ImGui::GetCursorPosY();
-    ImGui::BeginGroup();
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + right - buttonWidth - S(56));
-    ImGui::PushFont(ui.semibold, 16.5f);
-    ImGui::TextUnformatted(title);
-    ImGui::PopFont();
-    ImGui::PushFont(ui.regular, 14.5f);
-    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-    ImGui::TextUnformatted(description);
-    ImGui::PopStyleColor();
-    ImGui::PopFont();
-    ImGui::PopTextWrapPos();
-    ImGui::EndGroup();
-    const float bottom = ImGui::GetCursorPosY();
-
-    ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + right - buttonWidth - S(40), top + S(4)));
-    const bool capturing = app.capturing == index;
-    const std::string label = capturing ? "Press keys..." : hotkey.key ? Utf8(FormatHotkey(hotkey)) : "Not set";
-    ImGui::PushID(index);
-    ImGui::PushStyleColor(ImGuiCol_Border, capturing ? kAccent : kBorderStrong);
-    ImGui::PushStyleColor(ImGuiCol_Text, capturing ? kAccentHover : hotkey.key ? kText : kDim);
-    if (Button(label.c_str(), ImVec2(buttonWidth, S(40)), false))
-    {
-        app.capturing = capturing ? -1 : index;
-        app.captureError.clear();
-    }
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, kCard);
+    ImGui::PushStyleColor(ImGuiCol_Border, kAccent);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(16), S(14)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, S(1.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, S(10));
+    ImGui::BeginChild("keybinds", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+    ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
-    if (clearable)
-    {
-        ImGui::SameLine(0, S(6));
-        ImGui::BeginDisabled(!hotkey.key);
-        if (Button("x", ImVec2(S(34), S(40)), false))
-        {
-            hotkey = {};
-            app.capturing = -1;
-        }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetItemTooltip("Leave unassigned");
-    }
-    ImGui::PopID();
-    ImGui::SetCursorPosY(std::max(bottom, top + S(48)) + S(14));
+    Text("Set your keybinds", kText, 18, ui.semibold);
+    Text(app.hostRunning ? "Click a key, then press the keys you want. They apply the next time Unishade starts."
+                         : "Click a key, then press the keys you want.",
+         kDim, 14.5f);
+    Spacing(2);
+    KeybindLine(0, "opens the Unishade menu over the game. Press it again to go back to playing.");
+    KeybindLine(1, "turns the overlay off and on.");
+    if (!app.shortcutError.empty())
+        Text(app.shortcutError, kError, 14.5f);
+    ImGui::EndChild();
 }
 
 void Sidebar(std::initializer_list<const char*> steps, int current)
@@ -606,9 +651,9 @@ void Sidebar(std::initializer_list<const char*> steps, int current)
     if (ui.logo)
         draw->AddImage(ImTextureID(reinterpret_cast<uintptr_t>(ui.logo.Get())), ImVec2(x - S(8), y), ImVec2(x - S(8) + S(80), y + S(80)));
     y += S(92);
-    draw->AddText(ui.semibold, S(18), ImVec2(x, y), kText, "RobloxShadeHost");
+    draw->AddText(ui.semibold, S(18), ImVec2(x, y), kText, "Unishade");
     y += S(25);
-    draw->AddText(ui.regular, S(13.5f), ImVec2(x, y), kDim, "Setup " ROBLOX_SHADE_HOST_VERSION);
+    draw->AddText(ui.regular, S(13.5f), ImVec2(x, y), kDim, "Setup " UNISHADE_VERSION);
     y += S(48);
 
     int index = 0;
@@ -619,13 +664,13 @@ void Sidebar(std::initializer_list<const char*> steps, int current)
             draw->AddLine(dot + ImVec2(0, S(9)), dot + ImVec2(0, S(27)), kBorder, S(1.5f));
         if (index < current)
         {
-            draw->AddCircleFilled(dot, S(7), IM_COL32(104, 214, 148, 40));
+            draw->AddCircleFilled(dot, S(7), Color(theme::kSuccess, 40));
             const ImVec2 check[] = { dot + ImVec2(-S(3.2f), 0), dot + ImVec2(-S(0.8f), S(2.5f)), dot + ImVec2(S(3.5f), -S(2.5f)) };
             draw->AddPolyline(check, 3, kSuccess, S(1.8f));
         }
         else if (index == current)
         {
-            draw->AddCircleFilled(dot, S(9), IM_COL32(112, 122, 255, 60));
+            draw->AddCircleFilled(dot, S(9), Color(theme::kAccent, 60));
             draw->AddCircleFilled(dot, S(5), kAccent);
         }
         else
@@ -668,8 +713,8 @@ void CreditsPopup()
 
 void WelcomePage()
 {
-    Title("Install RobloxShadeHost");
-    Text("ReShade effects for Roblox. RobloxShadeHost runs alongside the game and never modifies Roblox or its files.");
+    Title("Install Unishade");
+    Text("Universal post-processing without injection.");
     Text("Your frame rate will be lower while it runs.", kDim, 15);
     Spacing(18);
     Text("Install folder", kText, 15, ui.semibold);
@@ -691,11 +736,11 @@ void WelcomePage()
 
 void ManagePage()
 {
-    Title("RobloxShadeHost is installed");
-    std::string version = app.installation && !app.installation->version.empty() ? "Version " + app.installation->version : "RobloxShadeHost";
+    Title("Unishade is installed");
+    std::string version = app.installation && !app.installation->version.empty() ? "Version " + app.installation->version : "Unishade";
     Text(version + " is installed in " + app.directory + ".", kDim, 15);
-    if (app.installation && app.installation->version != ROBLOX_SHADE_HOST_VERSION)
-        Text("This setup installs version " ROBLOX_SHADE_HOST_VERSION ".", kDim, 15);
+    if (app.installation && app.installation->version != UNISHADE_VERSION)
+        Text("This setup installs version " UNISHADE_VERSION ".", kDim, 15);
     Spacing(14);
     if (Card("update", "Update or change add-ons", nullptr, 0,
              "Get the newest ReShade and effects, or add or remove depth estimation and DLSS5. Your settings and presets stay.", CardKind::Action))
@@ -703,13 +748,7 @@ void ManagePage()
         app.addon = InstalledAddon(Directory());
         app.page = Page::Addons;
     }
-    if (Card("shortcuts", "Change shortcuts", nullptr, 0, "Pick the keys that open ReShade and turn the overlay off.", CardKind::Action))
-    {
-        LoadShortcuts();
-        app.shortcutsOnly = true;
-        app.page = Page::Shortcuts;
-    }
-    if (Card("uninstall", "Uninstall", nullptr, 0, "Remove RobloxShadeHost, ReShade and the effects from this PC.", CardKind::Action))
+    if (Card("uninstall", "Uninstall", nullptr, 0, "Remove Unishade, ReShade and the effects from this PC.", CardKind::Action))
         app.page = Page::Uninstall;
 }
 
@@ -718,7 +757,7 @@ void AddonsPage()
     Title("Choose what to install");
     Spacing(6);
     Card("reshade", "ReShade and effects", "Included", kDim, "ReShade from reshade.me and every effect package on ReShade's official list.", CardKind::Static);
-    if (Card("presets", "Presets", nullptr, 0, "Ready-made looks for Roblox. Pick one from the list at the top of the ReShade menu.", CardKind::Toggle, app.presets))
+    if (Card("presets", "Presets", nullptr, 0, "Ready-made looks to start from. Pick one in the Unishade menu.", CardKind::Toggle, app.presets))
         app.presets = !app.presets;
     Spacing(8);
     Text("Optional add-ons", kText, 15, ui.semibold);
@@ -792,86 +831,40 @@ void FailedPage()
     if (!cancelled)
         Text(app.installTask.error, kError, 15);
     Spacing(6);
-    Text("Go back to try again, or leave out the part that failed.", kDim, 15);
+    Text("Go back to try again.", kDim, 15);
     Spacing(6);
     if (Link("Open the setup log", kAccentHover, 15))
         OpenFile(SetupLogPath());
 }
 
-void ShortcutsPage()
-{
-    Title("Shortcuts");
-    Text("Click a shortcut, then press the keys you want.", kDim, 15);
-    Spacing(16);
-    ShortcutRow(0, "Open ReShade", "Opens the ReShade menu over Roblox and gives it your mouse and keyboard. Press it again to go back to playing.",
-                app.toggleKey, false);
-    ShortcutRow(1, "Turn the overlay off and on", "Shows Roblox without effects and stops capturing it until you press it again.",
-                app.overlayToggleKey, true);
-
-    const auto bare = [](const Hotkey& hotkey) { return hotkey.key && !(hotkey.modifiers & (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN)); };
-    const bool typing = app.toggleKey.key == VK_SPACE || app.toggleKey.key == VK_TAB || (app.toggleKey.key >= '0' && app.toggleKey.key <= 'Z');
-    if (!app.captureError.empty())
-        Text(app.captureError, kError, 14.5f);
-    else if (app.overlayToggleKey.key == app.toggleKey.key && app.overlayToggleKey.modifiers == app.toggleKey.modifiers)
-        Text("Pick two different shortcuts.", kError, 14.5f);
-    else
-    {
-        if (bare(app.toggleKey) && typing)
-            Text("Roblox will not receive " + Utf8(FormatHotkey(app.toggleKey)) + " while RobloxShadeHost runs.", kWarning, 14.5f);
-        if (bare(app.overlayToggleKey))
-            Text("Other programs will not receive " + Utf8(FormatHotkey(app.overlayToggleKey)) + " while RobloxShadeHost runs.", kWarning, 14.5f);
-    }
-    if (!app.saveError.empty())
-        Text(app.saveError, kError, 14.5f);
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + S(6));
-    if (Link("Reset to defaults", kDim, 14))
-    {
-        ParseHotkey(kDefaultToggleKey, app.toggleKey);
-        ParseHotkey(kDefaultOverlayToggleKey, app.overlayToggleKey);
-        app.capturing = -1;
-        app.captureError.clear();
-    }
-}
-
 void FinishedPage()
 {
-    if (app.shortcutsOnly)
-    {
-        Title("Shortcuts saved");
-        Text(app.hostRunning ? "Restart RobloxShadeHost to use them." : "RobloxShadeHost uses them the next time it starts.", kDim, 15);
-    }
-    else
-    {
-        Title("RobloxShadeHost is ready");
-        Text("Open a Roblox experience and start RobloxShadeHost from the Start menu, in either order.", kDim, 15);
-    }
+    Title("Unishade is ready");
+    Text("Start Unishade and open your game. Roblox is detected automatically. Add other games in the Unishade window.", kDim, 15);
     Spacing(14);
-    KeyLine(app.toggleKey, "opens ReShade over Roblox. Press it again to go back to playing.");
-    if (app.overlayToggleKey.key)
-        KeyLine(app.overlayToggleKey, "turns the overlay off and on.");
-    if (!app.shortcutsOnly && app.presets)
-    {
-        Spacing(4);
-        Text("Pick a preset from the list at the top of the ReShade menu.", kText, 15);
-    }
+    Keybinds();
+    Spacing(4);
+    Text(app.presets ? "Pick a preset or change the other shortcuts in the menu." : "You can change the other shortcuts in the menu.", kText, 15);
     for (const auto& note : app.notes)
     {
         Spacing(4);
         Text(note, kWarning, 14.5f);
     }
+    Spacing(14);
+    CheckLine("Run Unishade on the high-performance GPU", app.highPerformanceGpu);
     if (!app.hostRunning)
-    {
-        Spacing(14);
-        CheckLine("Start RobloxShadeHost now", app.launch);
-    }
+        CheckLine("Start Unishade now", app.launch);
 }
 
 void UninstallPage()
 {
-    Title("Uninstall RobloxShadeHost");
-    Text("Removes RobloxShadeHost, ReShade and the effects from " + std::string(app.directory) + ", and its Start menu shortcuts.", kDim, 15);
+    Title("Uninstall Unishade");
+    Text("Removes Unishade, ReShade and the effects from " + std::string(app.directory) + ", and its Start menu shortcuts.", kDim, 15);
     Spacing(10);
-    CheckLine("Also delete my presets, ReShade settings and shortcuts", app.deleteUserFiles);
+    CheckLine("Also delete my presets, settings and game list", app.deleteUserFiles);
+    Text("That deletes ReShade.ini, ReShadePreset.ini, RobloxShadeHost.ini and games.ini, and the presets and reshade-shaders folders with "
+         "everything in them. Other files in the folder, such as screenshots, stay.",
+         kDim, 14);
     if (app.uninstallTask.Running())
     {
         Spacing(10);
@@ -883,9 +876,11 @@ void UninstalledPage()
 {
     if (app.uninstallTask.error.empty())
     {
-        Title("RobloxShadeHost was uninstalled");
+        Title("Unishade was uninstalled");
         if (!app.deleteUserFiles)
-            Text("Your presets, ReShade settings and shortcuts are still in " + std::string(app.directory) + ".", kDim, 15);
+            Text("Your presets and settings are still in " + std::string(app.directory) + ".", kDim, 15);
+        else if (app.folderLeft)
+            Text("Files Setup did not create, such as screenshots, are still in " + std::string(app.directory) + ".", kDim, 15);
     }
     else
     {
@@ -912,13 +907,21 @@ void CollectTasks()
             app.notes = app.progress->Read().notes;
             app.installation = FindInstallation();
             LoadShortcuts();
-            app.page = Page::Shortcuts;
+            app.hostRunning = HostRunning(Directory());
+            // A different preference picked in Windows' settings stays unless the box is ticked.
+            const int preference = GpuPreference(Directory());
+            app.highPerformanceGpu = preference < 0 || preference == 2;
+            app.page = Page::Finished;
         }
         if (app.closeRequested)
             DestroyWindow(ui.window);
     }
     if (app.uninstallTask.Collect())
+    {
+        std::error_code ignored;
+        app.folderLeft = fs::exists(Directory(), ignored);
         app.page = Page::Uninstalled;
+    }
 }
 
 void DrawUi()
@@ -938,8 +941,6 @@ void DrawUi()
     const Page page = app.page;
     if (page == Page::Uninstall || page == Page::Uninstalled)
         Sidebar({ "Uninstall", "Done" }, page == Page::Uninstall ? 0 : 1);
-    else if (app.shortcutsOnly && (page == Page::Shortcuts || page == Page::Finished))
-        Sidebar({ "Shortcuts", "Done" }, page == Page::Shortcuts ? 0 : 1);
     else
     {
         int step = 0;
@@ -949,11 +950,10 @@ void DrawUi()
         case Page::License: step = 2; break;
         case Page::Installing:
         case Page::Failed: step = 3; break;
-        case Page::Shortcuts: step = 4; break;
-        case Page::Finished: step = 5; break;
+        case Page::Finished: step = 4; break;
         default: break;
         }
-        Sidebar({ "Welcome", "Add-ons", "License", "Install", "Shortcuts", "Done" }, step);
+        Sidebar({ "Welcome", "Add-ons", "License", "Install", "Done" }, step);
     }
 
     // Content, above a footer separated by a line.
@@ -971,7 +971,6 @@ void DrawUi()
     case Page::License: LicensePage(); break;
     case Page::Installing: InstallingPage(); break;
     case Page::Failed: FailedPage(); break;
-    case Page::Shortcuts: ShortcutsPage(); break;
     case Page::Finished: FinishedPage(); break;
     case Page::Uninstall: UninstallPage(); break;
     case Page::Uninstalled: UninstalledPage(); break;
@@ -994,7 +993,7 @@ void DrawUi()
         break;
     case Page::Addons:
         if (FooterButton(0, "Next", true))
-            app.page = Page::License;
+            ShowLicensePage();
         if (FooterButton(1, "Back", false))
             app.page = app.installation ? Page::Manage : Page::Welcome;
         break;
@@ -1014,34 +1013,12 @@ void DrawUi()
         if (FooterButton(1, "Close", false))
             DestroyWindow(ui.window);
         break;
-    case Page::Shortcuts:
-    {
-        const bool distinct = app.overlayToggleKey.key != app.toggleKey.key || app.overlayToggleKey.modifiers != app.toggleKey.modifiers;
-        if (FooterButton(0, "Save", true, distinct && app.capturing < 0))
-        {
-            try
-            {
-                WriteShortcuts(Directory(), FormatHotkey(app.toggleKey), FormatHotkey(app.overlayToggleKey));
-                app.saveError.clear();
-                app.hostRunning = HostRunning(Directory());
-                app.page = Page::Finished;
-            }
-            catch (const std::exception& e)
-            {
-                app.saveError = e.what();
-            }
-        }
-        if (app.shortcutsOnly && FooterButton(1, "Back", false))
-        {
-            app.shortcutsOnly = false;
-            app.capturing = -1;
-            app.page = Page::Manage;
-        }
-        break;
-    }
     case Page::Finished:
         if (FooterButton(0, "Finish", true))
         {
+            // Before starting Unishade, which picks its GPU when it starts.
+            if (app.highPerformanceGpu)
+                SetHighPerformanceGpu(Directory());
             if (app.launch && !app.hostRunning)
                 LaunchHost(Directory());
             DestroyWindow(ui.window);
@@ -1064,45 +1041,8 @@ void DrawUi()
         break;
     }
 
-    // Clicking anywhere else stops waiting for a shortcut.
-    if (app.capturing >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered())
-        app.capturing = -1;
-
     CreditsPopup();
     ImGui::End();
-}
-
-void CaptureKey(WPARAM key, LPARAM lParam)
-{
-    if (key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU || key == VK_LWIN || key == VK_RWIN)
-        return;
-    Hotkey hotkey;
-    if (GetKeyState(VK_CONTROL) < 0)
-        hotkey.modifiers |= MOD_CONTROL;
-    if (GetKeyState(VK_MENU) < 0)
-        hotkey.modifiers |= MOD_ALT;
-    if (GetKeyState(VK_SHIFT) < 0)
-        hotkey.modifiers |= MOD_SHIFT;
-    if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0)
-        hotkey.modifiers |= MOD_WIN;
-    if (key == VK_ESCAPE && hotkey.modifiers == MOD_NOREPEAT)
-    {
-        app.capturing = -1;
-        return;
-    }
-    hotkey.key = static_cast<UINT>(key);
-    if (FormatHotkey(hotkey).empty())
-    {
-        wchar_t name[64]{};
-        GetKeyNameTextW(static_cast<LONG>(lParam), name, static_cast<int>(std::size(name)));
-        app.captureError = (name[0] ? Utf8(name) : std::string("That key")) +
-                           " cannot be used. Use a letter, number, F key other than F12, Home, End, Insert, Delete, Page Up, Page Down, "
-                           "Pause or Scroll Lock, with or without Ctrl, Alt, Shift or Win.";
-        return;
-    }
-    (app.capturing == 0 ? app.toggleKey : app.overlayToggleKey) = hotkey;
-    app.capturing = -1;
-    app.captureError.clear();
 }
 
 ComPtr<ID3D11ShaderResourceView> LoadLogo(UINT size)
@@ -1206,16 +1146,11 @@ void CreateRenderTarget()
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    // While a shortcut is being picked, keys go to it rather than to the window.
-    if (app.capturing >= 0)
+    // Keys pressed for a shortcut are not meant for the window, so Alt+F4 can be picked without closing it.
+    if (app.capturing >= 0 && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN))
     {
-        if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
-        {
-            CaptureKey(wParam, lParam);
-            return 0;
-        }
-        if (message == WM_KEYUP || message == WM_SYSKEYUP || message == WM_CHAR || message == WM_SYSCHAR)
-            return 0;
+        CaptureShortcut(static_cast<UINT>(wParam));
+        return 0;
     }
     if (ImGui_ImplWin32_WndProcHandler(hwnd, message, wParam, lParam))
         return 1;
@@ -1302,6 +1237,15 @@ void AddFonts()
 
 int RunWindow(const Arguments& arguments)
 {
+    // However the window ends, the license download stops first, so no hidden Setup keeps running.
+    struct StopReleaseFetch
+    {
+        ~StopReleaseFetch()
+        {
+            app.releaseCancel = true;
+            app.releaseTask.Wait();
+        }
+    } stopReleaseFetch;
     app.installation = FindInstallation();
     const fs::path directory = !arguments.directory.empty() ? fs::absolute(arguments.directory)
                                : app.installation        ? app.installation->directory
@@ -1322,13 +1266,13 @@ int RunWindow(const Arguments& arguments)
     windowClass.hIcon = LoadIconW(windowClass.hInstance, MAKEINTRESOURCEW(1));
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = CreateSolidBrush(RGB(17, 18, 23));
-    windowClass.lpszClassName = L"RobloxShadeHostSetup";
+    windowClass.lpszClassName = L"UnishadeSetup";
     RegisterClassExW(&windowClass);
     constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    ui.window = CreateWindowExW(0, windowClass.lpszClassName, L"RobloxShadeHost Setup", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr,
+    ui.window = CreateWindowExW(0, windowClass.lpszClassName, L"Unishade Setup", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr,
                                 nullptr, windowClass.hInstance, nullptr);
     if (!ui.window)
-        return 1;
+        return kExitFailed;
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(ui.window, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     const COLORREF caption = RGB(12, 13, 17);
@@ -1347,8 +1291,8 @@ int RunWindow(const Arguments& arguments)
 
     if (!CreateDeviceAndSwapchain())
     {
-        MessageBoxW(ui.window, L"Setup could not start its window because DirectX 11 is unavailable.", L"RobloxShadeHost Setup", MB_ICONERROR);
-        return 1;
+        MessageBoxW(ui.window, L"Setup could not start its window because DirectX 11 is unavailable.", L"Unishade Setup", MB_ICONERROR);
+        return kExitFailed;
     }
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
@@ -1398,14 +1342,12 @@ int RunWindow(const Arguments& arguments)
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         ui.swapchain->Present(1, 0);
 
-        const bool animating = app.installTask.Running() || app.uninstallTask.Running() || app.capturing >= 0 ||
+        const bool animating = app.installTask.Running() || app.uninstallTask.Running() ||
                                (app.page == Page::License && app.releaseTask.Running());
         if (!animating && --framesLeft <= 0)
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 500, QS_ALLINPUT);
     }
 
-    app.releaseCancel = true;
-    app.releaseTask.Wait();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -1460,8 +1402,7 @@ int RunSilent(const Arguments& arguments)
 
         Progress progress;
         const ReShadeRelease release = options.reshade ? FetchReShadeRelease(progress.cancel) : ReShadeRelease{};
-        Install(options, release, progress);
-        return 0;
+        return Install(options, release, progress) ? 0 : kExitIncomplete;
     }
     catch (const Cancelled&)
     {
@@ -1471,7 +1412,7 @@ int RunSilent(const Arguments& arguments)
     {
         SetupLog(std::string("Error: ") + e.what());
     }
-    return 1;
+    return kExitFailed;
 }
 
 Arguments ParseArguments()
@@ -1523,21 +1464,22 @@ Arguments ParseArguments()
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     // Setup's copy lives next to ReShade, which installs itself as dxgi.dll or d3d11.dll, and Windows looks
-    // in the exe's folder first. d3d11.dll is delay-loaded, so loading both from System32 before anything
-    // else keeps ReShade out of Setup; later loads by name get these copies.
+    // in the exe's folder first. From here on, DLLs loaded by name, including the delay-loaded imports, come
+    // from System32 only. dxgi.dll and d3d11.dll are loaded right away, so later loads by name get these copies.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const Arguments arguments = ParseArguments();
-    OpenSetupLog(!arguments.log.empty() ? fs::absolute(arguments.log) : fs::temp_directory_path() / L"RobloxShadeHost-Setup.log");
-    SetupLog("RobloxShadeHost Setup " ROBLOX_SHADE_HOST_VERSION);
+    OpenSetupLog(!arguments.log.empty() ? fs::absolute(arguments.log) : fs::temp_directory_path() / L"Unishade-Setup.log");
+    SetupLog("Unishade Setup " UNISHADE_VERSION);
     if (!arguments.error.empty())
     {
         SetupLog(arguments.error);
         if (!arguments.silent)
-            MessageBoxW(nullptr, Wide(arguments.error).c_str(), L"RobloxShadeHost Setup", MB_ICONERROR);
-        return 1;
+            MessageBoxW(nullptr, Wide(arguments.error).c_str(), L"Unishade Setup", MB_ICONERROR);
+        return kExitFailed;
     }
     const int result = arguments.silent ? RunSilent(arguments) : RunWindow(arguments);
     DeleteMovedSetup();

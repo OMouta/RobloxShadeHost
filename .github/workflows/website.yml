@@ -1,0 +1,74 @@
+name: Website
+
+# Cloudflare builds and deploys unishade.me from main. This workflow builds pull requests that change the site, so a
+# broken build shows up before it's merged, and asks Cloudflare to build the site again when a release changes, since
+# the download buttons link to the newest release's files.
+on:
+  pull_request:
+    paths:
+      - 'website/**'
+      - 'assets/**'
+      # The download page compares the newest release with the version in CMakeLists.txt.
+      - 'CMakeLists.txt'
+      - '.github/workflows/website.yml'
+  # A release that build.yml publishes with the workflow's token doesn't start other workflows, so build.yml calls the
+  # deploy hook itself. This trigger covers releases published, edited or deleted by hand.
+  release:
+    types: [published, edited, deleted]
+  # Builds the site here and asks Cloudflare to build and deploy it again.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ASTRO_TELEMETRY_DISABLED: 1
+
+jobs:
+  build:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # The pnpm and Node versions are the ones Cloudflare uses: packageManager in package.json and .node-version.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          package_json_file: website/package.json
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: website/.node-version
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+        env:
+          # The download buttons read the newest release from the API, which allows 60 requests an hour without a
+          # token. If GitHub doesn't answer, the build still succeeds and the buttons link to the Releases page.
+          GITHUB_TOKEN: ${{ github.token }}
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ask Cloudflare to build the site again
+        env:
+          DEPLOY_HOOK: ${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "::warning::The CLOUDFLARE_DEPLOY_HOOK secret is not set, so Cloudflare was not asked to build the site."
+            exit 0
+          fi
+          curl --fail --silent --show-error --max-time 30 -X POST "$DEPLOY_HOOK" > /dev/null

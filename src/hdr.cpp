@@ -6,10 +6,8 @@
 
 namespace
 {
-// DISPLAYCONFIG paths are matched to a window's monitor by comparing GDI device names ("\\.\
-// DISPLAY1"), since neither DXGI nor DisplayConfig otherwise share a common identifier for the
-// same physical display.
-bool FindDisplayConfigPath(HWND window, DISPLAYCONFIG_PATH_INFO& found)
+// The window's monitor and Windows' display paths only share the GDI device name, such as \\.\DISPLAY1.
+bool FindDisplayPath(HWND window, DISPLAYCONFIG_PATH_INFO& found)
 {
     MONITORINFOEXW monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
@@ -37,33 +35,27 @@ bool FindDisplayConfigPath(HWND window, DISPLAYCONFIG_PATH_INFO& found)
             return true;
         }
     }
-    // Falls back to the SDR path below, same as main, so this is worth knowing about rather than
-    // silently treating an HDR display as SDR.
-    Log(LogLevel::Warning, L"Could not match %ls to a display for HDR detection; capturing as SDR.", monitorInfo.szDevice);
+    Log(LogLevel::Info, L"Could not find %ls in Windows' display settings, so it is captured without HDR.", monitorInfo.szDevice);
     return false;
 }
 } // namespace
 
-bool IsAdvancedColorEnabled(HWND window)
+std::optional<float> HdrWhiteLevel(HWND window)
 {
     DISPLAYCONFIG_PATH_INFO path{};
-    if (!FindDisplayConfigPath(window, path))
-        return false;
+    if (!FindDisplayPath(window, path))
+        return std::nullopt;
 
-    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info{};
-    info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
-    info.header.size = sizeof(info);
-    info.header.adapterId = path.targetInfo.adapterId;
-    info.header.id = path.targetInfo.id;
-    return DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS && info.advancedColorEnabled;
-}
+    // Wide color on an SDR display is advanced color too, but keeps SDR brightness, so it is captured as SDR.
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO color{};
+    color.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+    color.header.size = sizeof(color);
+    color.header.adapterId = path.targetInfo.adapterId;
+    color.header.id = path.targetInfo.id;
+    if (DisplayConfigGetDeviceInfo(&color.header) != ERROR_SUCCESS || !color.advancedColorEnabled || color.wideColorEnforced)
+        return std::nullopt;
 
-float GetSdrWhiteLevelNits(HWND window)
-{
-    DISPLAYCONFIG_PATH_INFO path{};
-    if (!FindDisplayConfigPath(window, path))
-        return 80.0f;
-
+    // 1000 is 80 nits, scRGB's own SDR white, which is also taken when Windows does not say.
     DISPLAYCONFIG_SDR_WHITE_LEVEL level{};
     level.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
     level.header.size = sizeof(level);
@@ -71,6 +63,5 @@ float GetSdrWhiteLevelNits(HWND window)
     level.header.id = path.targetInfo.id;
     if (DisplayConfigGetDeviceInfo(&level.header) != ERROR_SUCCESS || level.SDRWhiteLevel == 0)
         return 80.0f;
-    // SDRWhiteLevel is in units where 1000 == 80 nits.
     return level.SDRWhiteLevel / 1000.0f * 80.0f;
 }

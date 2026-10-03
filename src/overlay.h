@@ -1,10 +1,17 @@
 #pragma once
 
-// Creates the overlay window that hosts the swapchain and the "Input captured" badge above it.
-void CreateOverlayWindows();
+// Creates the overlay window that hosts the swapchain over the game.
+void CreateOverlayWindow();
 
-// Switches the overlay between passing clicks through to Roblox and receiving them itself.
+// Switches the overlay between passing clicks through to the game and receiving them itself, for the menu.
 void SetEditMode(bool enabled);
 
-// Keeps the overlay exactly over Roblox while Roblox is the foreground window (or while editing).
+// Leaves edit mode and brings the game back to the front.
+void ReturnToGame();
+
+// Keeps the overlay exactly over the game while the game is the foreground window (or while editing). With
+// KeepEffectsVisible, also while another window is in front, then directly above the game instead of above every window.
 void UpdateOverlay();
+
+// Turns capture and the overlay off or on, like the overlay shortcut.
+void ToggleOverlay();

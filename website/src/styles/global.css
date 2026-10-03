@@ -1,0 +1,203 @@
+:root {
+  --night: #0f1024;
+  --night-raised: #161834;
+  --line: #2a2d52;
+  /* Borders of buttons and other controls, at least 3:1 against the page. */
+  --line-strong: #62669a;
+  --ink: #f1f1fa;
+  --haze: #a3a6c8;
+  --accent: #8c94ff;
+  --accent-ink: #0f1024;
+
+  --page: min(1180px, 100% - 2 * var(--gutter));
+  --gutter: clamp(20px, 4vw, 48px);
+  --radius: 14px;
+  --nav-height: 72px;
+
+  color-scheme: dark;
+  /* Links to a heading stop below the navigation. */
+  scroll-padding-top: calc(var(--nav-height) + 24px);
+  font-family: var(--font-archivo);
+  font-size: 106.25%;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--night);
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-stretch: 122%;
+  line-height: 1.08;
+  text-wrap: balance;
+}
+
+h1 {
+  font-size: clamp(2.4rem, 5.4vw, 4.6rem);
+  font-weight: 800;
+  letter-spacing: -0.015em;
+}
+
+h2 {
+  font-size: clamp(1.75rem, 3.2vw, 2.6rem);
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+
+h3 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  font-stretch: 112%;
+}
+
+p {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  color: var(--ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 22px;
+  border-radius: 10px;
+  font-weight: 650;
+  font-stretch: 110%;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.button-primary {
+  color: var(--accent-ink);
+  background: var(--accent);
+}
+
+.button-primary:hover {
+  color: var(--accent-ink);
+  background: #a8aeff;
+}
+
+.button-secondary {
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+}
+
+.button-secondary:hover {
+  border-color: var(--haze);
+}
+
+.dim {
+  color: var(--haze);
+}
+
+/* Pages written in Markdown: the docs and the legal pages. */
+.prose h1 {
+  font-size: clamp(2.1rem, 4.4vw, 3.2rem);
+}
+
+.prose h2 {
+  margin: 56px 0 16px;
+  font-size: clamp(1.5rem, 2.6vw, 2rem);
+}
+
+.prose h3 {
+  margin: 36px 0 12px;
+}
+
+.prose p,
+.prose ul,
+.prose ol,
+.prose table {
+  margin: 0 0 16px;
+  max-width: 68ch;
+}
+
+.prose li {
+  margin-bottom: 6px;
+}
+
+.prose li::marker {
+  color: var(--accent);
+}
+
+.prose li > ul,
+.prose li > ol {
+  margin: 6px 0 0;
+}
+
+.prose img {
+  margin: 26px 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.prose code {
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 0.92em;
+  background: var(--night-raised);
+}
+
+.prose pre {
+  max-width: 68ch;
+  margin: 0 0 16px;
+  padding: 14px 18px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: var(--night-raised);
+}
+
+.prose pre code {
+  padding: 0;
+  background: none;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.prose th,
+.prose td {
+  padding: 10px 14px 10px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.prose th {
+  color: var(--haze);
+  font-weight: 600;
+}

@@ -1,48 +1,103 @@
 #include "addon.h"
+#include "reshade_imgui.h"
 #include "state.h"
 
-#include <reshade.hpp>
-
 // Shown in ReShade's add-on list.
-extern "C" __declspec(dllexport) const char* NAME = "RobloxShadeHost";
+extern "C" __declspec(dllexport) const char* NAME = "Unishade";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Opens the ReShade menu with the host's shortcut and supplies estimated depth when depth estimation is installed.";
+    "Draws the Unishade menu and supplies estimated depth when depth estimation is installed.";
 
 namespace
 {
 bool registered = false;
+bool tooOld = false;
+bool reshadeMenuOpen = false;
+bool allowReShadeMenu = false;
 // The host has one swapchain, so ReShade creates one runtime for it.
 reshade::api::effect_runtime* runtime = nullptr;
+// When ReShade may have started making effects, 0 when it is done.
+ULONGLONG loadingSince = 0;
+// In case the end of loading is missed, such as after a preset switch that loads nothing.
+constexpr ULONGLONG kLoadingLimit = 10000;
+// While ReShade compiles effects on its own threads.
+bool compiling = false;
 
+// A new runtime compiles its effects from its first frame.
 void OnInitRuntime(reshade::api::effect_runtime* created)
 {
     runtime = created;
+    loadingSince = GetTickCount64();
+    compiling = true;
+}
+
+// ReShade compiles effects in the background, applies the preset, then makes one effect per frame and reports reloaded
+// effects once all are made. It reports reloaded effects before compiling too, which needs no frames.
+void OnSetPresetPath(reshade::api::effect_runtime* changed, const char*)
+{
+    if (changed != runtime)
+        return;
+    loadingSince = GetTickCount64();
+    compiling = false;
+}
+
+void OnReloadedEffects(reshade::api::effect_runtime* reloaded)
+{
+    if (reloaded != runtime)
+        return;
+    loadingSince = 0;
+    // Before compiling, ReShade has dropped every effect. Once all are made, it lists them again.
+    bool listed = false;
+    reloaded->enumerate_techniques(
+        nullptr, [](reshade::api::effect_runtime*, reshade::api::effect_technique, void* found) { *static_cast<bool*>(found) = true; }, &listed);
+    compiling = !listed;
 }
 
 void OnDestroyRuntime(reshade::api::effect_runtime* destroyed)
 {
-    if (runtime == destroyed)
-        runtime = nullptr;
+    if (runtime != destroyed)
+        return;
+    runtime = nullptr;
+    // Its menu goes with it, such as when the device is lost, and the next runtime starts with it closed.
+    reshadeMenuOpen = false;
+    loadingSince = 0;
+    compiling = false;
 }
 
 bool OnOpenOverlay(reshade::api::effect_runtime*, bool open, reshade::api::input_source)
 {
-    // Closing the menu with ReShade's own key also returns input to Roblox. This runs inside ReShade's
-    // present, so the window changes wait for the message loop.
-    if (!open && g.editMode)
-        PostMessageW(g.overlay, kMenuClosedMessage, 0, 0);
+    // The host's menu replaces ReShade's, which only opens from the host's menu.
+    if (open && !allowReShadeMenu)
+        return true;
+    reshadeMenuOpen = open;
     return false;
 }
 } // namespace
 
+bool ReShadeLoaded()
+{
+    return reshade::internal::get_reshade_module_handle() != nullptr;
+}
+
 bool InitAddon()
 {
-    if (!reshade::register_addon(GetModuleHandleW(nullptr)))
+    const HMODULE module = GetModuleHandleW(nullptr);
+    if (!reshade::register_addon(module))
+    {
+        // register_addon also fails when ReShade does not export the ImGui version the menu is built with, but
+        // leaves the add-on registered then. Unregistering treats that like a ReShade without add-on support.
+        reshade::unregister_addon(module);
+        using GetTable = const void* (*)(uint32_t);
+        const HMODULE reshadeModule = reshade::internal::get_reshade_module_handle();
+        const auto getTable = reshadeModule ? reinterpret_cast<GetTable>(GetProcAddress(reshadeModule, "ReShadeGetImGuiFunctionTable")) : nullptr;
+        tooOld = reshadeModule && (!getTable || !getTable(IMGUI_VERSION_NUM));
         return false;
+    }
     registered = true;
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(OnDestroyRuntime);
     reshade::register_event<reshade::addon_event::reshade_open_overlay>(OnOpenOverlay);
+    reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(OnSetPresetPath);
+    reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
     return true;
 }
 
@@ -51,10 +106,33 @@ bool AddonRegistered()
     return registered;
 }
 
+bool ReShadeTooOld()
+{
+    return tooOld;
+}
+
 void OpenReShadeMenu(bool open)
 {
-    if (runtime)
-        runtime->open_overlay(open, reshade::api::input_source::keyboard);
+    if (!runtime)
+        return;
+    allowReShadeMenu = open;
+    runtime->open_overlay(open, reshade::api::input_source::keyboard);
+    allowReShadeMenu = false;
+}
+
+bool ReShadeMenuOpen()
+{
+    return reshadeMenuOpen;
+}
+
+bool ReShadeLoadingEffects()
+{
+    return loadingSince && GetTickCount64() - loadingSince < kLoadingLimit;
+}
+
+bool ReShadeCompilingEffects()
+{
+    return compiling;
 }
 
 void ShutdownAddon()

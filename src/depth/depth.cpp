@@ -3,9 +3,9 @@
 #include "../addon.h"
 #include "../config.h"
 #include "../log.h"
+#include "../reshade_imgui.h"
 #include "../state.h"
 
-#include <reshade.hpp>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 
@@ -21,8 +21,6 @@
 namespace
 {
 constexpr wchar_t kModelFile[] = L"depth-anything-v2-small.onnx";
-// Longest side of the model input. Depth Anything V2 expects multiples of 14 around 518.
-constexpr int kModelSize = 518;
 // Default RESHADE_DEPTH_LINEARIZATION_FAR_PLANE, so no preprocessor changes are needed in ReShade.
 constexpr float kFarPlane = 1000.0f;
 // Blend factor for the per-frame depth range, so the whole image does not pulse when something
@@ -64,8 +62,11 @@ struct Depth
 
     int width = 0;  // model input and output size, follows the frame's aspect ratio
     int height = 0;
+    int size = 0;   // their longest side, as picked in the menu's Settings
     UINT sourceWidth = 0;
     UINT sourceHeight = 0;
+    // Compiled once, so the shader can be made again on a new device.
+    winrt::com_ptr<ID3DBlob> code;
     winrt::com_ptr<ID3D11ComputeShader> shader;
     winrt::com_ptr<ID3D11Buffer> sizes;
     winrt::com_ptr<ID3D11Texture2D> frameCopy;
@@ -104,14 +105,15 @@ struct Depth
 };
 Depth d;
 
-void Bind(reshade::api::effect_runtime* runtime)
+// Binds view to DEPTH, or unbinds it when view is null.
+void Bind(reshade::api::effect_runtime* runtime, ID3D11ShaderResourceView* view)
 {
-    const reshade::api::resource_view view{ reinterpret_cast<uint64_t>(d.view.get()) };
-    runtime->update_texture_bindings("DEPTH", view, view);
-    runtime->enumerate_uniform_variables(nullptr, [](reshade::api::effect_runtime* runtime, reshade::api::effect_uniform_variable variable) {
+    const reshade::api::resource_view handle{ reinterpret_cast<uint64_t>(view) };
+    runtime->update_texture_bindings("DEPTH", handle, handle);
+    runtime->enumerate_uniform_variables(nullptr, [ready = view != nullptr](reshade::api::effect_runtime* runtime, reshade::api::effect_uniform_variable variable) {
         char source[32];
         if (runtime->get_annotation_string_from_uniform_variable(variable, "source", source) && std::strcmp(source, "bufready_depth") == 0)
-            runtime->set_uniform_value_bool(variable, d.view != nullptr);
+            runtime->set_uniform_value_bool(variable, ready);
     });
 }
 
@@ -119,7 +121,7 @@ void OnInitRuntime(reshade::api::effect_runtime* runtime)
 {
     d.runtimes.push_back(runtime);
     if (d.view)
-        Bind(runtime);
+        Bind(runtime, d.view.get());
 }
 
 void OnDestroyRuntime(reshade::api::effect_runtime* runtime)
@@ -131,7 +133,7 @@ void OnReloadedEffects(reshade::api::effect_runtime* runtime)
 {
     // Effect textures were recreated, and the generic depth add-on has just bound nothing to DEPTH.
     if (d.view)
-        Bind(runtime);
+        Bind(runtime, d.view.get());
 }
 
 void OnInitDevice(reshade::api::device* device)
@@ -173,7 +175,7 @@ void Worker()
                 model->Load(d.directory, kModelFile, d.width, d.height, d.d3d12.get());
                 loadedWidth = d.width;
                 loadedHeight = d.height;
-                Log(LogLevel::Ok, L"Depth model ready (%dx%d)", d.width, d.height);
+                Report(LogLevel::Ok, L"Depth estimation ready (%dx%d)", d.width, d.height);
             }
             model->Run(d.input, d.width, d.height, d.result);
         }
@@ -186,13 +188,9 @@ void Worker()
     }
 }
 
-void CompileShader()
+void CreateShader()
 {
-    winrt::com_ptr<ID3DBlob> code, errors;
-    const HRESULT hr = D3DCompile(kPreprocessShader, sizeof(kPreprocessShader) - 1, "depth", nullptr, nullptr, "main", "cs_5_0", 0, 0, code.put(), errors.put());
-    if (FAILED(hr))
-        throw std::runtime_error(errors ? static_cast<const char*>(errors->GetBufferPointer()) : "compute shaders are unavailable on this GPU");
-    winrt::check_hresult(g.device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, d.shader.put()));
+    winrt::check_hresult(g.device->CreateComputeShader(d.code->GetBufferPointer(), d.code->GetBufferSize(), nullptr, d.shader.put()));
 
     D3D11_BUFFER_DESC desc{};
     desc.ByteWidth = 16;
@@ -201,14 +199,44 @@ void CompileShader()
     winrt::check_hresult(g.device->CreateBuffer(&desc, nullptr, d.sizes.put()));
 }
 
+void CompileShader()
+{
+    winrt::com_ptr<ID3DBlob> errors;
+    const HRESULT hr = D3DCompile(kPreprocessShader, sizeof(kPreprocessShader) - 1, "depth", nullptr, nullptr, "main", "cs_5_0", 0, 0, d.code.put(), errors.put());
+    if (FAILED(hr))
+        throw std::runtime_error(errors ? static_cast<const char*>(errors->GetBufferPointer()) : "compute shaders are unavailable on this GPU");
+    CreateShader();
+}
+
+// Unbinds DEPTH, so effects stop reading an estimate that no longer updates, and releases everything made on the
+// D3D11 device. UpdateDepth makes them again while depth is on.
+void ReleaseResources()
+{
+    for (auto* runtime : d.runtimes)
+        Bind(runtime, nullptr);
+    d.view = nullptr;
+    d.texture = nullptr;
+    d.staging = nullptr;
+    d.preprocessedView = nullptr;
+    d.preprocessed = nullptr;
+    d.frameView = nullptr;
+    d.frameCopy = nullptr;
+    d.sizes = nullptr;
+    d.shader = nullptr;
+    d.stagingPending = false;
+    d.sourceWidth = 0;
+    d.sourceHeight = 0;
+}
+
 // Sizes the model input to the frame's aspect ratio and recreates every size-dependent resource.
 void Resize(const D3D11_TEXTURE2D_DESC& frame)
 {
     const bool landscape = frame.Width >= frame.Height;
     const float ratio = landscape ? static_cast<float>(frame.Height) / frame.Width : static_cast<float>(frame.Width) / frame.Height;
-    const int shortSide = std::max(14, static_cast<int>(std::lround(kModelSize * ratio / 14)) * 14);
-    d.width = landscape ? kModelSize : shortSide;
-    d.height = landscape ? shortSide : kModelSize;
+    d.size = DepthSize();
+    const int shortSide = std::max(14, static_cast<int>(std::lround(d.size * ratio / 14)) * 14);
+    d.width = landscape ? d.size : shortSide;
+    d.height = landscape ? shortSide : d.size;
     d.sourceWidth = frame.Width;
     d.sourceHeight = frame.Height;
     const size_t pixels = static_cast<size_t>(d.width) * d.height;
@@ -267,13 +295,16 @@ void Resize(const D3D11_TEXTURE2D_DESC& frame)
     winrt::check_hresult(g.device->CreateTexture2D(&depth, &initial, d.texture.put()));
     winrt::check_hresult(g.device->CreateShaderResourceView(d.texture.get(), nullptr, d.view.put()));
     for (auto* runtime : d.runtimes)
-        Bind(runtime);
+        Bind(runtime, d.view.get());
 }
 
 // Converts relative inverse depth to the non-linear depth ReShade linearizes by default:
 // linear = z / (far - z * (far - 1)), solved for z with linear = 0 nearest and 1 at the far plane.
 void PublishResult()
 {
+    // A result from before the resources were made again, such as after the device was lost, is dropped.
+    if (!d.texture || d.result.empty() || d.result.size() != static_cast<size_t>(d.width) * d.height)
+        return;
     float lo = d.result[0], hi = d.result[0];
     for (float value : d.result)
     {
@@ -311,7 +342,7 @@ bool InitDepth()
         return false;
     if (!AddonRegistered())
     {
-        Log(LogLevel::Warning, L"Depth estimation is off. It needs ReShade with full add-on support, with RobloxShadeHost enabled in ReShade's Add-ons tab.");
+        Log(LogLevel::Warning, L"Depth estimation is off because ReShade did not load the Unishade add-on.");
         return false;
     }
     reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
@@ -346,6 +377,7 @@ void UpdateDepth(ID3D11Texture2D* frame)
         if (d.failed)
         {
             d.enabled = false;
+            ReleaseResources();
             return;
         }
         PublishResult();
@@ -353,9 +385,11 @@ void UpdateDepth(ID3D11Texture2D* frame)
     if (d.busy)
         return;
 
+    if (!d.shader)
+        CreateShader();
     D3D11_TEXTURE2D_DESC desc{};
     frame->GetDesc(&desc);
-    if (desc.Width != d.sourceWidth || desc.Height != d.sourceHeight)
+    if (desc.Width != d.sourceWidth || desc.Height != d.sourceHeight || d.size != DepthSize())
         Resize(desc);
 
     if (d.stagingPending)
@@ -388,6 +422,16 @@ void UpdateDepth(ID3D11Texture2D* frame)
     g.context->CSSetUnorderedAccessViews(0, 1, targets, nullptr);
     g.context->CopyResource(d.staging.get(), d.preprocessed.get());
     d.stagingPending = true;
+}
+
+bool DepthEnabled()
+{
+    return d.enabled;
+}
+
+void ReleaseDepthDevice()
+{
+    ReleaseResources();
 }
 
 void ShutdownDepth()

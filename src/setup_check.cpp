@@ -2,9 +2,8 @@
 #include "addon.h"
 #include "config.h"
 #include "log.h"
+#include "reshade_imgui.h"
 #include "state.h"
-
-#include <reshade.hpp>
 
 #include <filesystem>
 #include <initializer_list>
@@ -47,9 +46,9 @@ bool CheckAddon(const std::wstring& directory, const wchar_t* name, std::initial
     if (!found)
         Log(LogLevel::Info, L"%ls is not installed", name);
     else if (missing.empty())
-        Log(LogLevel::Ok, L"%ls is installed", name);
+        Report(LogLevel::Ok, L"%ls is installed", name);
     else
-        Log(LogLevel::Warning, L"%ls is missing %ls. Run RobloxShadeHost Setup again and select %ls.", name, missing.c_str(), name);
+        Log(LogLevel::Warning, L"%ls is missing %ls. Run Unishade Setup again and select %ls.", name, missing.c_str(), name);
     return found > 0;
 }
 } // namespace
@@ -60,16 +59,19 @@ void CheckSetup()
 
     const HMODULE reshade = reshade::internal::get_reshade_module_handle();
     if (reshade && AddonRegistered())
-        Log(LogLevel::Ok, L"ReShade %ls", FileVersion(reshade).c_str());
+        Report(LogLevel::Ok, L"ReShade %ls", FileVersion(reshade).c_str());
+    else if (reshade && ReShadeTooOld())
+        Log(LogLevel::Error, L"ReShade %ls is too old for the Unishade menu. Run Unishade Setup to update it.",
+            FileVersion(reshade).c_str());
     else if (reshade)
-        Log(LogLevel::Warning, L"ReShade %ls is running without the RobloxShadeHost add-on, so %ls only captures input. Open the menu with "
-                               L"ReShade's own key, or enable RobloxShadeHost in ReShade's Add-ons tab and restart.",
-            FileVersion(reshade).c_str(), g.inputHotkey.c_str());
+        Log(LogLevel::Error, L"ReShade %ls did not load the Unishade add-on, so the menu is off. Run Unishade Setup to "
+                             L"install ReShade with full add-on support, then restart Unishade.",
+            FileVersion(reshade).c_str());
     else if (Exists(directory + L"d3d9.dll") || Exists(directory + L"opengl32.dll"))
-        Log(LogLevel::Error, L"ReShade is set up for DirectX 9 or OpenGL, which RobloxShadeHost does not use, so no effects will show. "
-                             L"Run RobloxShadeHost Setup again.");
+        Log(LogLevel::Error, L"ReShade is set up for DirectX 9 or OpenGL, which Unishade does not use, so no effects will show. "
+                             L"Run Unishade Setup again.");
     else
-        Log(LogLevel::Error, L"ReShade was not found next to RobloxShadeHost.exe, so no effects will show. Run RobloxShadeHost Setup again.");
+        Log(LogLevel::Error, L"ReShade was not found next to Unishade.exe, so no effects will show. Run Unishade Setup again.");
 
     if (reshade)
     {
@@ -80,27 +82,28 @@ void CheckSetup()
             if (_wcsicmp(entry->path().extension().c_str(), L".fx") == 0)
                 ++effects;
         if (effects)
-            Log(LogLevel::Ok, L"%zu effects in reshade-shaders\\Shaders", effects);
+            Report(LogLevel::Ok, L"%zu effects installed", effects);
         else
-            Log(LogLevel::Warning, L"No effects found in reshade-shaders\\Shaders. Run RobloxShadeHost Setup again to download them.");
+            Log(LogLevel::Warning, L"No effects found in reshade-shaders\\Shaders. Run Unishade Setup again to download them.");
     }
+
+    const bool depth = CheckAddon(directory, L"Depth estimation", { L"depth-anything-v2-small.onnx", L"onnxruntime.dll", L"DirectML.dll" });
+    const bool dlss = CheckAddon(directory, L"DLSS5", { L"renodx-dlss.addon64", L"nvngx_dlssnr.dll" });
+    if (depth && dlss)
+        Log(LogLevel::Warning, L"Depth estimation and DLSS5 do not work together. Run Unishade Setup again and pick one.");
 
     DXGI_ADAPTER_DESC adapter{};
     winrt::com_ptr<IDXGIAdapter> dxgiAdapter;
     if (SUCCEEDED(g.device.as<IDXGIDevice>()->GetAdapter(dxgiAdapter.put())))
         dxgiAdapter->GetDesc(&adapter);
-    Log(LogLevel::Info, L"GPU: %ls", adapter.Description);
-
-    const bool depth = CheckAddon(directory, L"Depth estimation", { L"depth-anything-v2-small.onnx", L"onnxruntime.dll", L"DirectML.dll" });
-    const bool dlss = CheckAddon(directory, L"DLSS5", { L"renodx-dlss.addon64", L"nvngx_dlssnr.dll" });
-    if (depth && dlss)
-        Log(LogLevel::Warning, L"Depth estimation and DLSS5 do not work together. Run RobloxShadeHost Setup again and pick one.");
     constexpr UINT kNvidia = 0x10DE;
-    if (dlss && adapter.VendorId != kNvidia)
-        Log(LogLevel::Warning, L"DLSS5 needs an NVIDIA RTX GPU, but RobloxShadeHost is running on %ls. "
-                               L"See https://github.com/OMouta/RobloxShadeHost/blob/main/DLSS5-README.md",
+    const bool rtx = adapter.VendorId == kNvidia && wcsstr(adapter.Description, L"RTX");
+    Report(dlss && !rtx ? LogLevel::Error : LogLevel::Ok, L"%ls", adapter.Description);
+    if (dlss && !rtx)
+        Log(LogLevel::Warning, L"DLSS5 needs an NVIDIA RTX GPU, but Unishade is running on %ls. "
+                               L"See https://unishade.me/dlss5/",
             adapter.Description);
 
     if (Exists(directory + L"RobloxPlayerBeta.exe"))
-        Log(LogLevel::Warning, L"RobloxShadeHost is inside Roblox's folder, which Roblox replaces when it updates. Install it to its own folder.");
+        Log(LogLevel::Warning, L"Unishade is inside Roblox's folder, which Roblox replaces when it updates. Install it to its own folder.");
 }
