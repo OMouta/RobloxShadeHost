@@ -86,11 +86,11 @@ std::vector<AutoGame> DefaultAutoGames()
     return { { L"RobloxPlayerBeta.exe", L"Roblox" } };
 }
 
-bool AddInstalledStudio(std::vector<AutoGame>& games)
+fs::path InstalledStudioExecutable()
 {
     PWSTR localAppData = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppData)))
-        return false;
+        return {};
     const fs::path versions = fs::path(localAppData) / L"Roblox" / L"Versions";
     CoTaskMemFree(localAppData);
 
@@ -112,20 +112,28 @@ bool AddInstalledStudio(std::vector<AutoGame>& games)
             error.clear();
             continue;
         }
-        const auto existing = std::find_if(games.begin(), games.end(), [](const AutoGame& game) {
-            return _wcsicmp(game.executable.filename().c_str(), L"RobloxStudioBeta.exe") == 0;
-        });
-        if (existing != games.end())
-        {
-            if (existing->executable == L"RobloxStudioBeta.exe")
-                return false;
-            existing->executable = L"RobloxStudioBeta.exe";
-            return true;
-        }
-        games.push_back({ L"RobloxStudioBeta.exe", L"Roblox Studio", false });
+        return executable;
+    }
+    return {};
+}
+
+bool AddInstalledStudio(std::vector<AutoGame>& games)
+{
+    const fs::path executable = InstalledStudioExecutable();
+    if (executable.empty())
+        return false;
+    const auto existing = std::find_if(games.begin(), games.end(), [](const AutoGame& game) {
+        return _wcsicmp(game.executable.filename().c_str(), L"RobloxStudioBeta.exe") == 0;
+    });
+    if (existing != games.end())
+    {
+        if (existing->executable == L"RobloxStudioBeta.exe")
+            return false;
+        existing->executable = L"RobloxStudioBeta.exe";
         return true;
     }
-    return false;
+    games.push_back({ L"RobloxStudioBeta.exe", L"Roblox Studio", false });
+    return true;
 }
 
 std::vector<AutoGame> LoadAutoGames(const fs::path& path)

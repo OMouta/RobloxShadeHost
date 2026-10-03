@@ -180,13 +180,16 @@ int wmain(int argc, wchar_t** argv)
                 "Roblox is enabled by default");
     std::vector<AutoGame> studioGames = DefaultAutoGames();
     AddInstalledStudio(studioGames);
+    const fs::path studioExecutable = InstalledStudioExecutable();
     const auto studio = std::find_if(studioGames.begin(), studioGames.end(), [](const AutoGame& game) {
         return game.name == L"Roblox Studio";
     });
-    ok &= Check(studio == studioGames.end() ||
-                    (!studio->enabled && studio->executable == L"RobloxStudioBeta.exe" &&
-                     MatchesExecutable(*studio, L"C:\\Users\\Player\\Roblox\\Versions\\version-new\\RobloxStudioBeta.exe")),
-                "installed Roblox Studio is added disabled and follows versioned install folders");
+    ok &= Check(studioExecutable.empty()
+                    ? studio == studioGames.end()
+                    : studio != studioGames.end() && !studio->enabled && studio->executable == L"RobloxStudioBeta.exe" &&
+                          MatchesExecutable(*studio, L"C:\\Users\\Player\\Roblox\\Versions\\version-new\\RobloxStudioBeta.exe") &&
+                          fs::exists(studioExecutable),
+                "installed Roblox Studio is added disabled, follows versioned folders and exposes its installed icon path");
     std::erase_if(autoGames, [](const AutoGame& game) { return game.name == L"Roblox Studio"; });
     for (const GameWindow& game : games)
     {
