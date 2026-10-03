@@ -19,25 +19,37 @@ reshade::api::effect_runtime* runtime = nullptr;
 ULONGLONG loadingSince = 0;
 // In case the end of loading is missed, such as after a preset switch that loads nothing.
 constexpr ULONGLONG kLoadingLimit = 10000;
+// While ReShade compiles effects on its own threads.
+bool compiling = false;
 
+// A new runtime compiles its effects from its first frame.
 void OnInitRuntime(reshade::api::effect_runtime* created)
 {
     runtime = created;
     loadingSince = GetTickCount64();
+    compiling = true;
 }
 
 // ReShade compiles effects in the background, applies the preset, then makes one effect per frame and reports reloaded
 // effects once all are made. It reports reloaded effects before compiling too, which needs no frames.
 void OnSetPresetPath(reshade::api::effect_runtime* changed, const char*)
 {
-    if (changed == runtime)
-        loadingSince = GetTickCount64();
+    if (changed != runtime)
+        return;
+    loadingSince = GetTickCount64();
+    compiling = false;
 }
 
 void OnReloadedEffects(reshade::api::effect_runtime* reloaded)
 {
-    if (reloaded == runtime)
-        loadingSince = 0;
+    if (reloaded != runtime)
+        return;
+    loadingSince = 0;
+    // Before compiling, ReShade has dropped every effect. Once all are made, it lists them again.
+    bool listed = false;
+    reloaded->enumerate_techniques(
+        nullptr, [](reshade::api::effect_runtime*, reshade::api::effect_technique, void* found) { *static_cast<bool*>(found) = true; }, &listed);
+    compiling = !listed;
 }
 
 void OnDestroyRuntime(reshade::api::effect_runtime* destroyed)
@@ -48,6 +60,7 @@ void OnDestroyRuntime(reshade::api::effect_runtime* destroyed)
     // Its menu goes with it, such as when the device is lost, and the next runtime starts with it closed.
     reshadeMenuOpen = false;
     loadingSince = 0;
+    compiling = false;
 }
 
 bool OnOpenOverlay(reshade::api::effect_runtime*, bool open, reshade::api::input_source)
@@ -115,6 +128,11 @@ bool ReShadeMenuOpen()
 bool ReShadeLoadingEffects()
 {
     return loadingSince && GetTickCount64() - loadingSince < kLoadingLimit;
+}
+
+bool ReShadeCompilingEffects()
+{
+    return compiling;
 }
 
 void ShutdownAddon()

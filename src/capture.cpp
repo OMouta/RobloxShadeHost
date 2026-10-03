@@ -1,4 +1,5 @@
 #include "capture.h"
+#include "addon.h"
 #include "depth/depth.h"
 #include "log.h"
 #include "menu.h"
@@ -248,8 +249,8 @@ void PresentLatestFrame()
     D3D11_TEXTURE2D_DESC size{};
     surface->GetDesc(&size);
     // Effects run at the swapchain's size. Windows stretches a smaller swapchain over the overlay's window.
-    const UINT width = std::max(size.Width * EffectResolution() / 100, 1u);
-    const UINT height = std::max(size.Height * EffectResolution() / 100, 1u);
+    UINT width = std::max(size.Width * EffectResolution() / 100, 1u);
+    UINT height = std::max(size.Height * EffectResolution() / 100, 1u);
 
     if (!g.swapchain)
     {
@@ -275,7 +276,14 @@ void PresentLatestFrame()
     {
         DXGI_SWAP_CHAIN_DESC1 desc{};
         g.swapchain->GetDesc1(&desc);
-        if (desc.Width != width || desc.Height != height)
+        // Resizing makes ReShade wait for the effects it is compiling, which would freeze the host, so the frame is
+        // drawn at the old size until it is done.
+        if (ReShadeCompilingEffects())
+        {
+            width = desc.Width;
+            height = desc.Height;
+        }
+        else if (desc.Width != width || desc.Height != height)
             winrt::check_hresult(g.swapchain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0));
     }
 

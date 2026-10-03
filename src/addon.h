@@ -22,4 +22,8 @@ bool ReShadeMenuOpen();
 // rate meanwhile. Always false without the add-on.
 bool ReShadeLoadingEffects();
 
+// Whether ReShade compiles effects on its own threads. Anything that resets its effects, such as resizing the swapchain,
+// waits for the effects it is compiling, which can take minutes. Always false without the add-on.
+bool ReShadeCompilingEffects();
+
 void ShutdownAddon();
