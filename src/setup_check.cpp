@@ -87,18 +87,19 @@ void CheckSetup()
             Log(LogLevel::Warning, L"No effects found in reshade-shaders\\Shaders. Run Unishade Setup again to download them.");
     }
 
-    DXGI_ADAPTER_DESC adapter{};
-    winrt::com_ptr<IDXGIAdapter> dxgiAdapter;
-    if (SUCCEEDED(g.device.as<IDXGIDevice>()->GetAdapter(dxgiAdapter.put())))
-        dxgiAdapter->GetDesc(&adapter);
-    Report(LogLevel::Info, L"%ls", adapter.Description);
-
     const bool depth = CheckAddon(directory, L"Depth estimation", { L"depth-anything-v2-small.onnx", L"onnxruntime.dll", L"DirectML.dll" });
     const bool dlss = CheckAddon(directory, L"DLSS5", { L"renodx-dlss.addon64", L"nvngx_dlssnr.dll" });
     if (depth && dlss)
         Log(LogLevel::Warning, L"Depth estimation and DLSS5 do not work together. Run Unishade Setup again and pick one.");
+
+    DXGI_ADAPTER_DESC adapter{};
+    winrt::com_ptr<IDXGIAdapter> dxgiAdapter;
+    if (SUCCEEDED(g.device.as<IDXGIDevice>()->GetAdapter(dxgiAdapter.put())))
+        dxgiAdapter->GetDesc(&adapter);
     constexpr UINT kNvidia = 0x10DE;
-    if (dlss && adapter.VendorId != kNvidia)
+    const bool rtx = adapter.VendorId == kNvidia && wcsstr(adapter.Description, L"RTX");
+    Report(dlss && !rtx ? LogLevel::Error : LogLevel::Ok, L"%ls", adapter.Description);
+    if (dlss && !rtx)
         Log(LogLevel::Warning, L"DLSS5 needs an NVIDIA RTX GPU, but Unishade is running on %ls. "
                                L"See https://unishade.me/dlss5/",
             adapter.Description);
