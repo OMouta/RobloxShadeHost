@@ -87,10 +87,8 @@ void CheckSetup()
             Log(LogLevel::Warning, L"No effects found in reshade-shaders\\Shaders. Run Unishade Setup again to download them.");
     }
 
-    const bool depth = CheckAddon(directory, L"Depth estimation", { L"depth-anything-v2-small.onnx", L"onnxruntime.dll", L"DirectML.dll" });
+    CheckAddon(directory, L"Depth estimation", { L"depth-anything-v2-small.onnx", L"onnxruntime.dll", L"DirectML.dll" });
     const bool dlss = CheckAddon(directory, L"DLSS5", { L"renodx-dlss.addon64", L"nvngx_dlssnr.dll" });
-    if (depth && dlss)
-        Log(LogLevel::Warning, L"Depth estimation and DLSS5 do not work together. Run Unishade Setup again and pick one.");
 
     DXGI_ADAPTER_DESC adapter{};
     winrt::com_ptr<IDXGIAdapter> dxgiAdapter;
