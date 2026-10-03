@@ -129,9 +129,19 @@ void SetKeepEffectsVisible(bool enabled);
 bool DiscordPresenceEnabled();
 void SetDiscordPresenceEnabled(bool enabled);
 
-// The most frames a second the overlay shows, from RobloxShadeHost.ini. 0 unless changed, which shows every frame the
-// game draws. A limit is kept between kSlowestFrameRate and kFastestFrameRate. The menu is held to it too, so the
-// slowest still leaves the menu usable.
+// The frame rate limit, effect resolution and depth size below are kept for each saved game, in RobloxShadeHost.ini
+// under [Performance.<game>]. What a game has not changed comes from [Performance], which windows that are not a
+// saved game use and change.
+// The game they are for, by its presets folder's name, or empty for the defaults.
+void SetPerformanceGame(const std::wstring& game);
+const std::wstring& PerformanceGame();
+// Moves a game's values along when the game is renamed, and forgets them when it is removed.
+void RenamePerformanceGame(const std::wstring& from, const std::wstring& to);
+void RemovePerformanceGame(const std::wstring& game);
+
+// The most frames a second the overlay shows. 0 unless changed, which shows every frame the game draws. A limit is
+// kept between kSlowestFrameRate and kFastestFrameRate. The menu is held to it too, so the slowest still leaves the
+// menu usable.
 constexpr int kSlowestFrameRate = 30;
 constexpr int kFastestFrameRate = 500;
 // The limits Settings offers, besides a custom one.
@@ -139,14 +149,13 @@ inline constexpr int kFrameRates[] = { 0, 120, 60 };
 int FrameRateLimit();
 void SetFrameRateLimit(int fps);
 
-// The percentage of the game's resolution that effects run at, from RobloxShadeHost.ini. 100 unless changed, and never
-// under 25.
+// The percentage of the game's resolution that effects run at. 100 unless changed, and never under 25.
 inline constexpr int kEffectResolutions[] = { 100, 75, 50 };
 int EffectResolution();
 void SetEffectResolution(int percent);
 
-// The longest side of the picture depth is estimated from, from RobloxShadeHost.ini. Depth Anything V2 expects multiples
-// of 14 around 518, which it is unless changed, and it is never larger.
+// The longest side of the picture depth is estimated from. Depth Anything V2 expects multiples of 14 around 518, which
+// it is unless changed, and it is never larger.
 constexpr int kLargestDepthSize = 518;
 inline constexpr int kDepthSizes[] = { kLargestDepthSize, 392, 266 };
 int DepthSize();

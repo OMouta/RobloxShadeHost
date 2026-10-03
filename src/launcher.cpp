@@ -929,6 +929,12 @@ void GeneralLayout(HDC dc, int pad, int right, int& y)
 
 void PerformanceLayout(HDC dc, int pad, int right, int& y)
 {
+    const std::wstring& game = PerformanceGame();
+    const std::wstring scope = game.empty() ? L"For every game without its own settings." : L"For " + game + L" only.";
+    const int scopeHeight = TextHeight(dc, ui->note, scope, right - pad);
+    l.labels.push_back({ { pad, y, right, y + scopeHeight }, ui->note, theme::kDim, scope });
+    y += scopeHeight + P(14);
+
     y = PlaceSetting(dc, pad, right, y, L"Frame rate", L"The most frames a second Unishade shows. A lower limit leaves more of the GPU to the game.") +
         P(8);
     PlaceSegments(pad, right, y, Action::FrameRate, { L"Follow game", L"120 FPS", L"60 FPS", L"Custom" },
@@ -1929,8 +1935,8 @@ bool SaveGames(std::vector<AutoGame> games)
     return true;
 }
 
-// Once a removed game can no longer be put back, its preset is forgotten, unless a game with the same name was
-// added since.
+// Once a removed game can no longer be put back, its preset and performance settings are forgotten, unless a game
+// with the same name was added since.
 void ForgetRemoved()
 {
     if (!l.removed)
@@ -1940,7 +1946,10 @@ void ForgetRemoved()
     const std::wstring key = FolderName(l.removed->game.name);
     if (!key.empty() && std::none_of(g.autoGames.begin(), g.autoGames.end(),
                                      [&](const AutoGame& game) { return _wcsicmp(FolderName(game.name).c_str(), key.c_str()) == 0; }))
+    {
         RemoveGamePreset(key);
+        RemovePerformanceGame(key);
+    }
     // The focus stays in the list when Undo goes away.
     if (l.focus == Control{ Action::UndoRemove } && !g.autoGames.empty())
         l.focus = Control{ Action::ToggleGame, std::min(l.removed->index, g.autoGames.size() - 1) };
@@ -2008,7 +2017,8 @@ std::wstring NameProblem(const std::wstring& name, size_t index)
     return {};
 }
 
-// Renames a saved game, with its presets folder and its remembered preset. Returns why it could not, or nothing.
+// Renames a saved game, with its presets folder, its remembered preset and its performance settings. Returns why it
+// could not, or nothing.
 std::wstring RenameGame(const fs::path& executable, const std::wstring& name)
 {
     const auto game = std::find_if(g.autoGames.begin(), g.autoGames.end(), [&](const AutoGame& saved) { return saved.executable == executable; });
@@ -2050,6 +2060,7 @@ std::wstring RenameGame(const fs::path& executable, const std::wstring& name)
         SetGamePreset(name, preset);
         RemoveGamePreset(key);
     }
+    RenamePerformanceGame(key, name);
     // The game being played shows the new name. A picked window keeps its title.
     if (g.target && g.activeGame && !g.selectedGame && MatchesExecutable(g.autoGames[index], l.activeExecutable))
         g.activeGame->name = name;

@@ -22,6 +22,8 @@ std::atomic<int> frameRateLimit = -1;
 std::atomic<int> effectResolution = -1;
 std::atomic<int> depthSize = -1;
 std::atomic<unsigned> settingsVersion = 0;
+// Only used on the host's thread.
+std::wstring performanceGame;
 
 std::wstring IniPath()
 {
@@ -54,14 +56,23 @@ float ValidScale(float scale)
     return scale > 0 ? std::clamp(scale, kSmallestMenuScale, kLargestMenuScale) : 1.0f;
 }
 
-// A number under [Performance], read from the file once. valid turns what the file holds into a value the setting
-// takes, which is never negative.
+std::wstring PerformanceSection(const std::wstring& game)
+{
+    return game.empty() ? L"Performance" : L"Performance." + game;
+}
+
+// A performance setting of the game, read from the file once. valid turns what the file holds into a value the
+// setting takes, which is never negative.
 int CachedNumber(std::atomic<int>& cached, const wchar_t* name, int fallback, int (*valid)(int))
 {
     int value = cached;
     if (value < 0)
     {
-        value = valid(static_cast<int>(GetPrivateProfileIntW(L"Performance", name, fallback, IniPath().c_str())));
+        const std::wstring path = IniPath();
+        int number = static_cast<int>(GetPrivateProfileIntW(L"Performance", name, fallback, path.c_str()));
+        if (!performanceGame.empty())
+            number = static_cast<int>(GetPrivateProfileIntW(PerformanceSection(performanceGame).c_str(), name, number, path.c_str()));
+        value = valid(number);
         cached = value;
     }
     return value;
@@ -72,7 +83,7 @@ void SaveNumber(std::atomic<int>& cached, const wchar_t* name, int value)
     if (cached.exchange(value) == value)
         return;
     ++settingsVersion;
-    if (!WritePrivateProfileStringW(L"Performance", name, std::to_wstring(value).c_str(), IniPath().c_str()))
+    if (!WritePrivateProfileStringW(PerformanceSection(performanceGame).c_str(), name, std::to_wstring(value).c_str(), IniPath().c_str()))
         Log(LogLevel::Warning, L"Could not save %ls to RobloxShadeHost.ini. It applies until Unishade closes.", name);
 }
 
@@ -327,6 +338,46 @@ void SetDiscordPresenceEnabled(bool enabled)
 {
     if (!SaveFlag(discordPresence, L"DiscordPresence", enabled))
         Log(LogLevel::Warning, L"Could not save the Discord setting to RobloxShadeHost.ini. It applies until Unishade closes.");
+}
+
+void SetPerformanceGame(const std::wstring& game)
+{
+    if (game == performanceGame)
+        return;
+    performanceGame = game;
+    frameRateLimit = -1;
+    effectResolution = -1;
+    depthSize = -1;
+    ++settingsVersion;
+}
+
+const std::wstring& PerformanceGame()
+{
+    return performanceGame;
+}
+
+void RenamePerformanceGame(const std::wstring& from, const std::wstring& to)
+{
+    // Sections are found without case, so a name that only changes case already has its values.
+    if (from.empty() || to.empty() || _wcsicmp(from.c_str(), to.c_str()) == 0)
+        return;
+    const std::wstring path = IniPath();
+    std::wstring values(32768, L'\0');
+    values.resize(GetPrivateProfileSectionW(PerformanceSection(from).c_str(), values.data(), static_cast<DWORD>(values.size()), path.c_str()));
+    // The values are separated by nulls, and c_str adds the second null that ends them.
+    if (!values.empty() && !WritePrivateProfileSectionW(PerformanceSection(to).c_str(), values.c_str(), path.c_str()))
+        Log(LogLevel::Warning, L"Could not save the performance settings of %ls to RobloxShadeHost.ini.", to.c_str());
+    RemovePerformanceGame(from);
+    if (_wcsicmp(performanceGame.c_str(), from.c_str()) == 0)
+        performanceGame = to;
+}
+
+void RemovePerformanceGame(const std::wstring& game)
+{
+    // Empty is [Performance] itself.
+    if (game.empty())
+        return;
+    WritePrivateProfileStringW(PerformanceSection(game).c_str(), nullptr, nullptr, IniPath().c_str());
 }
 
 int FrameRateLimit()

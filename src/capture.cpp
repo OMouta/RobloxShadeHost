@@ -266,6 +266,7 @@ void StopCapture()
     g.pool = nullptr;
     g.target = nullptr;
     g.activeGame.reset();
+    SetPerformanceGame({});
     g.frameStatistics.Reset(FrameStatistics::Clock::now(), g.capturedFrames.load(std::memory_order_relaxed));
 }
 

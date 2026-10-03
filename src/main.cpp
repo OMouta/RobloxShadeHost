@@ -11,6 +11,7 @@
 #include "launcher.h"
 #include "log.h"
 #include "menu.h"
+#include "names.h"
 #include "overlay.h"
 #include "reshade_config.h"
 #include "game_integration.h"
@@ -167,6 +168,22 @@ bool EnsureDevice()
     }
 }
 
+// The saved game a window belongs to, by its presets folder's name, or empty for a window picked for this session only.
+std::wstring SavedGame(const GameWindow& game)
+{
+    try
+    {
+        const std::filesystem::path executable = ProcessExecutable(game.processId);
+        for (const AutoGame& saved : g.autoGames)
+            if (MatchesExecutable(saved, executable))
+                return FolderName(saved.name);
+    }
+    catch (const std::system_error&)
+    {
+    }
+    return {};
+}
+
 // A window whose capture fails to start is tried again less and less often, and the failure is logged once.
 void Attach(const GameWindow& game)
 {
@@ -179,6 +196,7 @@ void Attach(const GameWindow& game)
     try
     {
         StartCapture(game.window);
+        SetPerformanceGame(SavedGame(game));
         loop.captureRetries.erase(game.window);
     }
     catch (const winrt::hresult_error& e)

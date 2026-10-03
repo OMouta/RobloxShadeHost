@@ -2883,6 +2883,9 @@ void FrameRateRow()
 
 void PerformanceSettings()
 {
+    const std::wstring& game = PerformanceGame();
+    Text(game.empty() ? "For every game without its own settings." : "For " + Utf8(game) + " only.", kDim, 13);
+    ImGui::Dummy(ImVec2(0, S(4)));
     FrameRateRow();
 
     ImGui::Dummy(ImVec2(0, S(8)));
