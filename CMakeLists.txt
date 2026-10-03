@@ -129,7 +129,19 @@ add_executable(installer WIN32 EXCLUDE_FROM_ALL
     installer/install.cpp
     src/net.cpp
     installer/setup.rc)
-# setup.rc embeds Unishade.exe, found through the include path.
+# Copy the built host into a dedicated resource directory. The RC compiler does not report its RCDATA files as
+# dependencies, so OBJECT_DEPENDS makes a host update rebuild the embedded payload.
+set(INSTALLER_PAYLOAD_DIR "${CMAKE_CURRENT_BINARY_DIR}/installer-payload")
+set(INSTALLER_PAYLOAD_EXE "${INSTALLER_PAYLOAD_DIR}/Unishade.exe")
+add_custom_command(OUTPUT "${INSTALLER_PAYLOAD_EXE}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${INSTALLER_PAYLOAD_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:Unishade>" "${INSTALLER_PAYLOAD_EXE}"
+    DEPENDS Unishade
+    VERBATIM)
+add_custom_target(installer_host_payload DEPENDS "${INSTALLER_PAYLOAD_EXE}")
+add_dependencies(installer installer_host_payload)
+set_property(SOURCE installer/setup.rc APPEND PROPERTY OBJECT_DEPENDS "${INSTALLER_PAYLOAD_EXE}")
+target_include_directories(installer BEFORE PRIVATE "${INSTALLER_PAYLOAD_DIR}")
 target_include_directories(installer PRIVATE "$<TARGET_FILE_DIR:Unishade>")
 target_compile_definitions(installer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(installer PRIVATE UNISHADE_VERSION="${PROJECT_VERSION}")

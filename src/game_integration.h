@@ -16,6 +16,8 @@ struct AutoGame
 
 // Roblox, which is detected until the user turns it off.
 std::vector<AutoGame> DefaultAutoGames();
+// Adds the installed Roblox Studio executable, when found, as an opt-in game.
+bool AddInstalledStudio(std::vector<AutoGame>& games);
 // The defaults when the file does not exist. Throws when it cannot be read or is damaged.
 std::vector<AutoGame> LoadAutoGames(const std::filesystem::path& path);
 void SaveAutoGames(const std::filesystem::path& path, std::span<const AutoGame> games);

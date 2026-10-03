@@ -173,8 +173,21 @@ int wmain(int argc, wchar_t** argv)
     bool ok = true;
     fixture.config = fixture.executable.parent_path() / L"games.ini";
     auto autoGames = LoadAutoGames(fixture.config);
-    ok &= Check(autoGames.size() == 1 && autoGames[0].enabled && autoGames[0].name == L"Roblox" &&
-                    autoGames[0].executable == L"RobloxPlayerBeta.exe", "Roblox is enabled by default");
+    const auto roblox = std::find_if(autoGames.begin(), autoGames.end(), [](const AutoGame& game) {
+        return game.name == L"Roblox";
+    });
+    ok &= Check(roblox != autoGames.end() && roblox->enabled && roblox->executable == L"RobloxPlayerBeta.exe",
+                "Roblox is enabled by default");
+    std::vector<AutoGame> studioGames = DefaultAutoGames();
+    AddInstalledStudio(studioGames);
+    const auto studio = std::find_if(studioGames.begin(), studioGames.end(), [](const AutoGame& game) {
+        return game.name == L"Roblox Studio";
+    });
+    ok &= Check(studio == studioGames.end() ||
+                    (!studio->enabled && studio->executable == L"RobloxStudioBeta.exe" &&
+                     MatchesExecutable(*studio, L"C:\\Users\\Player\\Roblox\\Versions\\version-new\\RobloxStudioBeta.exe")),
+                "installed Roblox Studio is added disabled and follows versioned install folders");
+    std::erase_if(autoGames, [](const AutoGame& game) { return game.name == L"Roblox Studio"; });
     for (const GameWindow& game : games)
     {
         const auto selected = FindGameTarget(game, autoGames);
