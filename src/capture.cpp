@@ -228,11 +228,30 @@ void StartCapture(HWND target)
 
     g.hdrWhiteLevel = HdrWhiteLevel(target);
     g.poolSize = item.Size();
-    g.pool = Direct3D11CaptureFramePool::CreateFreeThreaded(g.captureDevice, g.hdrWhiteLevel ? kHdrPixelFormat : kPixelFormat, 2, g.poolSize);
+    g.pool = Direct3D11CaptureFramePool::CreateFreeThreaded(g.captureDevice, g.hdrWhiteLevel ? kHdrPixelFormat : kPixelFormat, kFrameBuffers,
+                                                            g.poolSize);
     g.capturedFrames.store(0, std::memory_order_relaxed);
     g.frameStatistics.Reset(FrameStatistics::Clock::now(), 0);
-    g.frameArrived = g.pool.FrameArrived(winrt::auto_revoke, [](auto&&, auto&&) {
-        g.capturedFrames.fetch_add(1, std::memory_order_relaxed);
+    {
+        const std::lock_guard lock(g.frameMutex);
+        g.takingFrames = true;
+    }
+    g.frameArrived = g.pool.FrameArrived(winrt::auto_revoke, [](const Direct3D11CaptureFramePool& pool, auto&&) {
+        try
+        {
+            while (Direct3D11CaptureFrame frame = pool.TryGetNextFrame())
+            {
+                g.capturedFrames.fetch_add(1, std::memory_order_relaxed);
+                // The frame it replaces goes back to the pool.
+                const std::lock_guard lock(g.frameMutex);
+                if (g.takingFrames)
+                    g.arrivedFrame = std::move(frame);
+            }
+        }
+        catch (const winrt::hresult_error&)
+        {
+            // The pool was closed while this ran.
+        }
         SetEvent(g.frameEvent);
     });
     g.session = g.pool.CreateCaptureSession(item);
@@ -257,6 +276,11 @@ void StopCapture()
 {
     SetEditMode(false);
     g.frameArrived.revoke();
+    {
+        const std::lock_guard lock(g.frameMutex);
+        g.takingFrames = false;
+        g.arrivedFrame = nullptr;
+    }
     g.latestFrame = nullptr;
     if (g.session)
         g.session.Close();

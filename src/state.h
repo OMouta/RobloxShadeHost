@@ -15,6 +15,7 @@
 
 #include <string>
 #include <atomic>
+#include <mutex>
 
 using namespace winrt::Windows::Graphics::Capture;
 using winrt::Windows::Graphics::SizeInt32;
@@ -24,6 +25,8 @@ using winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 constexpr auto kPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 // What frames are captured in while HDR is on, since 8 bits would clip them.
 constexpr auto kHdrPixelFormat = DirectXPixelFormat::R16G16B16A16Float;
+// The frame being shown, the newest one waiting for the host and the one Windows captures into.
+constexpr int32_t kFrameBuffers = 3;
 // Posted by the menu to give input back to the game. The menu runs inside ReShade's present, so window
 // changes wait for the message loop.
 constexpr UINT kLeaveMenuMessage = WM_APP + 1;
@@ -60,12 +63,18 @@ struct State
     GraphicsCaptureSession session{ nullptr };
     Direct3D11CaptureFramePool::FrameArrived_revoker frameArrived;
     Direct3D11CaptureFrame latestFrame{ nullptr };
+    // The capture worker takes every frame from the pool as it arrives and keeps the newest here, so the pool always
+    // has a buffer to capture into and runs at the game's rate, however slow the host is.
+    std::mutex frameMutex;
+    Direct3D11CaptureFrame arrivedFrame{ nullptr };
+    // Cleared while the capture stops, so a frame the worker was still taking is dropped.
+    bool takingFrames = false;
     SizeInt32 poolSize{};
     // HdrWhiteLevel of the game's display when capture started. While HDR is on, frames are captured in kHdrPixelFormat
     // and turned back into SDR before effects and depth estimation see them.
     std::optional<float> hdrWhiteLevel;
     HANDLE frameEvent = nullptr;
-    // FrameArrived runs on the capture worker; statistics are sampled on the host thread.
+    // Every frame captured from the game, counted on the capture worker. Statistics are sampled on the host thread.
     std::atomic<uint64_t> capturedFrames = 0;
     FrameStatistics frameStatistics;
 };

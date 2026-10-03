@@ -261,12 +261,15 @@ void SearchForGame()
 // used. Otherwise the last frame is shown again every kRepeatInterval.
 void ShowFrames()
 {
-    // Only the newest frame matters. Rendering every queued frame would add latency.
+    // Only the newest frame matters. The capture worker keeps it, and the one shown before goes back to the pool.
     bool fresh = false;
-    while (auto frame = g.pool.TryGetNextFrame())
     {
-        g.latestFrame = frame;
-        fresh = true;
+        const std::lock_guard lock(g.frameMutex);
+        if (g.arrivedFrame)
+        {
+            g.latestFrame = std::move(g.arrivedFrame);
+            fresh = true;
+        }
     }
 
     if (g.latestFrame)
@@ -275,8 +278,12 @@ void ShowFrames()
         if ((size.Width != g.poolSize.Width || size.Height != g.poolSize.Height) && size.Width > 0 && size.Height > 0)
         {
             g.latestFrame = nullptr;
+            {
+                const std::lock_guard lock(g.frameMutex);
+                g.arrivedFrame = nullptr;
+            }
             g.poolSize = size;
-            g.pool.Recreate(g.captureDevice, g.hdrWhiteLevel ? kHdrPixelFormat : kPixelFormat, 2, size);
+            g.pool.Recreate(g.captureDevice, g.hdrWhiteLevel ? kHdrPixelFormat : kPixelFormat, kFrameBuffers, size);
             Log(LogLevel::Info, L"%ls resized to %dx%d", g.activeGame->name.c_str(), size.Width, size.Height);
         }
     }
