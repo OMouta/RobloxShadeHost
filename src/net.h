@@ -19,8 +19,9 @@ constexpr uint64_t kListLimit = 16ull << 20;     // download lists, presets, lic
 constexpr uint64_t kPackageLimit = 256ull << 20; // effect packages and ReShade's installer
 constexpr uint64_t kAddonLimit = 1ull << 30;     // add-on files, such as the depth estimation model
 
-// Downloads an HTTPS url into memory. Throws std::runtime_error with a readable message, or Cancelled, which also
-// interrupts a download that is still connecting or waiting for the server.
+// Downloads an HTTPS url into memory, compressed when the server can, in which case maxSize applies to the
+// decompressed data and progress gets no total. Throws std::runtime_error with a readable message, or Cancelled, which
+// also interrupts a download that is still connecting or waiting for the server.
 std::string Fetch(const std::wstring& url, const std::atomic<bool>& cancel, uint64_t maxSize = kListLimit, const DownloadProgress& progress = {});
 
 // Downloads an HTTPS url to a file. A non-empty sha256 (lowercase hex) must match the downloaded data. Returns the

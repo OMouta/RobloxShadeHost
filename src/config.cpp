@@ -16,6 +16,7 @@ std::atomic<int> autoSavePresets = -1;
 std::atomic<int> debugInfo = -1;
 std::atomic<int> updateChecks = -1;
 std::atomic<int> keepEffectsVisible = -1;
+std::atomic<int> discordPresence = -1;
 std::atomic<float> menuScale = 0.0f;
 std::atomic<int> frameRateLimit = -1;
 std::atomic<int> effectResolution = -1;
@@ -315,6 +316,17 @@ void SetKeepEffectsVisible(bool enabled)
 {
     if (!SaveFlag(keepEffectsVisible, L"KeepEffectsVisible", enabled))
         Log(LogLevel::Warning, L"Could not save the effects visibility setting to RobloxShadeHost.ini. It applies until Unishade closes.");
+}
+
+bool DiscordPresenceEnabled()
+{
+    return CachedFlag(discordPresence, L"DiscordPresence", true);
+}
+
+void SetDiscordPresenceEnabled(bool enabled)
+{
+    if (!SaveFlag(discordPresence, L"DiscordPresence", enabled))
+        Log(LogLevel::Warning, L"Could not save the Discord setting to RobloxShadeHost.ini. It applies until Unishade closes.");
 }
 
 int FrameRateLimit()

@@ -125,6 +125,10 @@ void SetUpdateChecksEnabled(bool enabled);
 bool KeepEffectsVisible();
 void SetKeepEffectsVisible(bool enabled);
 
+// Whether Discord shows the game Unishade runs on, from RobloxShadeHost.ini. On unless turned off.
+bool DiscordPresenceEnabled();
+void SetDiscordPresenceEnabled(bool enabled);
+
 // The most frames a second the overlay shows, from RobloxShadeHost.ini. 0 unless changed, which shows every frame the
 // game draws. A limit is kept between kSlowestFrameRate and kFastestFrameRate. The menu is held to it too, so the
 // slowest still leaves the menu usable.

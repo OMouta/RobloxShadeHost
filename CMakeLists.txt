@@ -82,6 +82,7 @@ add_executable(Unishade WIN32
     src/addon.cpp
     src/capture.cpp
     src/config.cpp
+    src/discord.cpp
     src/game_integration.cpp
     src/launcher.cpp
     src/log.cpp
@@ -172,6 +173,10 @@ if(BUILD_TESTING)
     add_executable(names_tests tests/names_tests.cpp)
     target_compile_options(names_tests PRIVATE /W4 /permissive- /EHsc)
     add_test(NAME names_tests COMMAND names_tests)
+
+    add_executable(discord_rpc_tests tests/discord_rpc_tests.cpp)
+    target_compile_options(discord_rpc_tests PRIVATE /W4 /permissive- /EHsc)
+    add_test(NAME discord_rpc_tests COMMAND discord_rpc_tests)
 
     # miniz comes with Setup's other libraries.
     add_executable(package_files_tests tests/package_files_tests.cpp)

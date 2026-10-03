@@ -36,12 +36,13 @@ constexpr wchar_t kStartupApprovedKey[] = L"Software\\Microsoft\\Windows\\Curren
 constexpr wchar_t kManifest[] = L"RobloxShadeHost-Setup.files";
 constexpr wchar_t kSetupExe[] = L"Unishade-Setup.exe";
 
-// Logs the host and ReShade write next to Unishade.exe, deleted on every uninstall. ReShade numbers its log when
-// another copy has it open.
+// Logs the host and ReShade write next to Unishade.exe, and the host's copy of Discord's game icons, deleted on every
+// uninstall. ReShade numbers its log when another copy has it open.
 constexpr const wchar_t* kLogs[] = { L"Unishade.log", L"Unishade.old.log", L"RobloxShadeHost.log", L"RobloxShadeHost.old.log",
                                      L"ReShade.log",  L"ReShade.log1",     L"ReShade.log2",        L"ReShade.log3",
                                      L"ReShade.log4", L"ReShade.log5",     L"ReShade.log6",        L"ReShade.log7",
-                                     L"ReShade.log8", L"ReShade.log9",     L"ReShade.log10" };
+                                     L"ReShade.log8", L"ReShade.log9",     L"ReShade.log10",       L"DiscordIcons.txt",
+                                     L"DiscordIcons.txt.tmp" };
 // The user's settings, saved games and presets, deleted only when the user asks. The folders go with everything in
 // them, including effects the user added to reshade-shaders.
 constexpr const wchar_t* kUserFiles[] = { L"ReShade.ini", L"ReShadePreset.ini", L"RobloxShadeHost.ini", L"games.ini", L"games.ini.tmp" };

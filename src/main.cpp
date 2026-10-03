@@ -6,6 +6,7 @@
 #include "capture.h"
 #include "config.h"
 #include "depth/depth.h"
+#include "discord.h"
 #include "frame_limit.h"
 #include "launcher.h"
 #include "log.h"
@@ -366,6 +367,7 @@ int Run()
         }
         UpdateInputHotkey();
         UpdateHeldCompare();
+        UpdateDiscord();
         UpdateLauncher();
 
         if (g.target)

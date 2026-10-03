@@ -163,8 +163,10 @@ bool UseWindowsCredentialsForProxy(HINTERNET request)
            WinHttpSetCredentials(request, WINHTTP_AUTH_TARGET_PROXY, scheme, nullptr, nullptr, nullptr);
 }
 
+// With decompress, WinHTTP asks the server to compress the data and hands it over decompressed. It then drops the
+// Content-Length header, so maxSize applies to the decompressed data and the total is unknown.
 void Get(const std::wstring& url, const std::function<void(const char*, size_t)>& sink, const std::atomic<bool>& cancel, uint64_t maxSize,
-         const DownloadProgress& progress)
+         const DownloadProgress& progress, bool decompress)
 {
     const auto fail = [&](const std::string& reason) { throw std::runtime_error("Could not download " + Utf8(url) + ": " + reason + "."); };
     if (cancel)
@@ -198,6 +200,11 @@ void Get(const std::wstring& url, const std::function<void(const char*, size_t)>
         if (!handle)
             fail(ErrorText(GetLastError()));
         RequestWatch watch(handle, cancel);
+        if (decompress)
+        {
+            DWORD formats = WINHTTP_DECOMPRESSION_FLAG_ALL;
+            WinHttpSetOption(handle, WINHTTP_OPTION_DECOMPRESSION, &formats, sizeof(formats));
+        }
         if (checkRevocation)
         {
             DWORD feature = WINHTTP_ENABLE_SSL_REVOCATION;
@@ -271,7 +278,7 @@ void Get(const std::wstring& url, const std::function<void(const char*, size_t)>
 std::string Fetch(const std::wstring& url, const std::atomic<bool>& cancel, uint64_t maxSize, const DownloadProgress& progress)
 {
     std::string data;
-    Get(url, [&](const char* chunk, size_t size) { data.append(chunk, size); }, cancel, maxSize, progress);
+    Get(url, [&](const char* chunk, size_t size) { data.append(chunk, size); }, cancel, maxSize, progress, true);
     return data;
 }
 
@@ -290,7 +297,7 @@ std::string Download(const std::wstring& url, const std::filesystem::path& path,
                 file.write(chunk, size);
                 hasher.Add(chunk, size);
             },
-            cancel, maxSize, progress);
+            cancel, maxSize, progress, false);
         file.close();
         if (!file)
             throw std::runtime_error("Could not write " + Utf8(path.wstring()) + ".");

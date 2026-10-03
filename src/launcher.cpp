@@ -15,6 +15,7 @@ using std::min;
 #include "capture.h"
 #include "config.h"
 #include "depth/depth.h"
+#include "discord.h"
 #include "log.h"
 #include "menu.h"
 #include "names.h"
@@ -86,6 +87,7 @@ enum class Tab
 {
     Games,
     Settings,
+    Discord,
 };
 
 // The pages of Settings, which are the menu's.
@@ -144,6 +146,7 @@ enum class Action
     SetShortcut,
     ClearShortcut,
     ResetShortcuts,
+    DiscordPresence,
 };
 
 enum class Look
@@ -236,6 +239,7 @@ struct Shown
     UINT overlayKey = 0;
     UINT overlayModifiers = 0;
     unsigned settings = 0;
+    unsigned discord = 0;
 
     bool operator==(const Shown&) const = default;
 };
@@ -1014,6 +1018,41 @@ int SettingsLayout(HDC dc, int pad, int right, int y)
     return y;
 }
 
+// The Discord tab between pad and right, from y down. Returns where it ends.
+int DiscordLayout(HDC dc, int pad, int right, int y)
+{
+    const bool on = DiscordPresenceEnabled();
+    PlaceSwitch(dc, pad, right, y, Action::DiscordPresence, on, L"Show on Discord",
+                L"Your Discord profile shows the game Unishade is running on, with its icon and your preset.");
+    if (!on)
+        return y;
+    std::wstring status;
+    unsigned color = theme::kDim;
+    const DiscordStatus discord = CurrentDiscordStatus();
+    if (!g.target)
+        status = L"Shows up once Unishade is running on a game.";
+    else
+        switch (discord.state)
+        {
+        case DiscordState::Idle:
+        case DiscordState::Connecting: status = L"Connecting to Discord..."; break;
+        case DiscordState::Closed: status = L"Waiting for Discord to open."; break;
+        case DiscordState::Showing:
+            status = L"Showing " + g.activeGame->name + L" on Discord.";
+            color = theme::kSuccess;
+            break;
+        case DiscordState::Refused:
+            status = L"Discord refused it: " + discord.error;
+            color = theme::kWarning;
+            break;
+        }
+    // Under the switch's title.
+    const int left = pad + P(36) + P(12);
+    const int height = TextHeight(dc, ui->body, status, right - left);
+    l.labels.push_back({ { left, y, right, y + height }, ui->body, color, status });
+    return y + height + P(18);
+}
+
 void Layout(HDC dc)
 {
     const int width = P(kWidth);
@@ -1029,7 +1068,7 @@ void Layout(HDC dc)
 
     // The tabs' names line up with the logo, and each is clicked a little past its name.
     int x = pad - P(8);
-    for (const auto& [tab, name] : { std::pair{ Tab::Games, L"Games" }, std::pair{ Tab::Settings, L"Settings" } })
+    for (const auto& [tab, name] : { std::pair{ Tab::Games, L"Games" }, std::pair{ Tab::Settings, L"Settings" }, std::pair{ Tab::Discord, L"Discord" } })
     {
         const int tabWidth = TextWidth(dc, ui->strong, name) + P(16);
         l.targets.push_back({ { x, y, x + tabWidth, y + P(36) }, Action::ShowTab, Look::Tab, static_cast<size_t>(tab), name, l.tab == tab });
@@ -1038,7 +1077,12 @@ void Layout(HDC dc)
     l.tabLine = y + P(36);
     y = l.tabLine + P(20);
 
-    y = l.tab == Tab::Games ? GamesLayout(dc, pad, right, y) : SettingsLayout(dc, pad, right, y);
+    switch (l.tab)
+    {
+    case Tab::Games: y = GamesLayout(dc, pad, right, y); break;
+    case Tab::Settings: y = SettingsLayout(dc, pad, right, y); break;
+    case Tab::Discord: y = DiscordLayout(dc, pad, right, y); break;
+    }
 
     // The footer stays at the bottom of the window when the content is shorter.
     const int noteHeight = TextHeight(dc, ui->note, kTrayNote, right - pad);
@@ -1150,7 +1194,8 @@ Shown CurrentShown()
                  .inputModifiers = g.hotkeys.input.modifiers,
                  .overlayKey = g.hotkeys.overlay.key,
                  .overlayModifiers = g.hotkeys.overlay.modifiers,
-                 .settings = SettingsVersion() };
+                 .settings = SettingsVersion(),
+                 .discord = DiscordStatusVersion() };
     // Only shown while waiting for the picked window. The main loop notices the game's window closing.
     if (g.captureEnabled && !g.target && g.selectedGame)
         shown.selectedOpen = GameWindowExists(*g.selectedGame);
@@ -2250,6 +2295,9 @@ void Run(const Target& target)
         if (MessageBoxW(g.launcher, L"Reset every shortcut?\n\nThey go back to the keys Unishade starts with.", L"Unishade",
                         MB_OKCANCEL | MB_ICONWARNING) == IDOK)
             l.shortcutError = ChangeHotkeys(DefaultHotkeys());
+        break;
+    case Action::DiscordPresence:
+        SetDiscordPresenceEnabled(!DiscordPresenceEnabled());
         break;
     }
     Refresh();
