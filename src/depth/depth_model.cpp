@@ -1,11 +1,13 @@
 #include "depth_model.h"
 
 #include <windows.h>
-#include <DirectXPackedVector.h>
+#include <d3d12.h>
 #include <onnxruntime_c_api.h>
 #include <dml_provider_factory.h>
 
+#include <initializer_list>
 #include <stdexcept>
+#include <utility>
 
 namespace
 {
@@ -22,14 +24,25 @@ struct OrtError
     }
 };
 
-ONNXTensorElementDataType ElementType(const OrtApi* api, OrtTypeInfo* info)
+struct TensorInfo
 {
-    const OrtTensorTypeAndShapeInfo* tensor = nullptr;
-    OrtError{ api }(api->CastTypeInfoToTensorInfo(info, &tensor));
     ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-    OrtError{ api }(api->GetTensorElementType(tensor, &type));
+    size_t rank = 0;
+};
+
+// Takes the type info, which it releases.
+TensorInfo ReadTensorInfo(const OrtApi* api, OrtTypeInfo* info)
+{
+    TensorInfo tensor;
+    const OrtTensorTypeAndShapeInfo* shape = nullptr;
+    OrtStatus* status = api->CastTypeInfoToTensorInfo(info, &shape);
+    if (!status)
+        status = api->GetTensorElementType(shape, &tensor.type);
+    if (!status)
+        status = api->GetDimensionsCount(shape, &tensor.rank);
     api->ReleaseTypeInfo(info);
-    return type;
+    OrtError{ api }(status);
+    return tensor;
 }
 
 bool IsHalf(ONNXTensorElementDataType type, const char* what)
@@ -46,8 +59,10 @@ DepthModel::~DepthModel()
 {
     if (api)
     {
+        // Waits for the GPU to finish the model, which may still use the buffers.
         if (session)
             api->ReleaseSession(session);
+        Unbind();
         if (options)
             api->ReleaseSessionOptions(options);
         if (memory)
@@ -83,7 +98,6 @@ void DepthModel::Load(const std::wstring& directory, const std::wstring& modelFi
     if (!api)
         throw std::runtime_error("onnxruntime.dll is older than the version this host was built for.");
     const OrtError check{ api };
-    const OrtDmlApi* dmlApi = nullptr;
     check(api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&dmlApi)));
 
     // Letting ONNX Runtime pick the GPU would have it call D3D12CreateDevice and get ReShade's proxy,
@@ -109,7 +123,7 @@ void DepthModel::Load(const std::wstring& directory, const std::wstring& modelFi
     check(api->AddFreeDimensionOverrideByName(options, "width", width));
     check(dmlApi->SessionOptionsAppendExecutionProvider_DML1(options, dml, queue));
     check(api->CreateSession(env, (directory + modelFile).c_str(), options, &session));
-    check(api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory));
+    check(api->CreateMemoryInfo("DML", OrtDeviceAllocator, 0, OrtMemTypeDefault, &memory));
 
     OrtAllocator* allocator = nullptr;
     check(api->GetAllocatorWithDefaultOptions(&allocator));
@@ -128,66 +142,58 @@ void DepthModel::Load(const std::wstring& directory, const std::wstring& modelFi
 
     OrtTypeInfo* info = nullptr;
     check(api->SessionGetInputTypeInfo(session, 0, &info));
-    halfInput = IsHalf(ElementType(api, info), "input");
+    halfInput = IsHalf(ReadTensorInfo(api, info).type, "input");
     check(api->SessionGetOutputTypeInfo(session, 0, &info));
-    halfOutput = IsHalf(ElementType(api, info), "output");
+    const TensorInfo output = ReadTensorInfo(api, info);
+    halfOutput = IsHalf(output.type, "output");
+    // A depth map with or without a channel dimension.
+    inputShape = { 1, 3, height, width };
+    if (output.rank == 3)
+        outputShape = { 1, height, width };
+    else if (output.rank == 4)
+        outputShape = { 1, 1, height, width };
+    else
+        throw std::runtime_error("The model returns a depth map of an unexpected shape.");
 }
 
-void DepthModel::Run(const std::vector<float>& input, int width, int height, std::vector<float>& output)
+void DepthModel::Unbind()
 {
-    using namespace DirectX::PackedVector;
+    for (OrtValue** value : { &inputValue, &outputValue })
+        if (*value)
+            api->ReleaseValue(std::exchange(*value, nullptr));
+    for (void** allocation : { &inputAllocation, &outputAllocation })
+        if (*allocation)
+            dmlApi->FreeGPUAllocation(std::exchange(*allocation, nullptr));
+    for (ID3D12Resource** buffer : { &inputBuffer, &outputBuffer })
+        if (*buffer)
+            std::exchange(*buffer, nullptr)->Release();
+}
+
+void DepthModel::Bind(ID3D12Resource* input, ID3D12Resource* output)
+{
+    Unbind();
+    inputBuffer = input;
+    outputBuffer = output;
+    input->AddRef();
+    output->AddRef();
     const OrtError check{ api };
-    const size_t count = static_cast<size_t>(width) * height;
-    if (input.size() != 3 * count)
-        throw std::logic_error("Depth input size mismatch.");
+    const auto value = [&](ID3D12Resource* buffer, void*& allocation, const std::vector<int64_t>& shape, bool half, OrtValue*& tensor) {
+        check(dmlApi->CreateGPUAllocationFromD3DResource(buffer, &allocation));
+        size_t count = 1;
+        for (int64_t dimension : shape)
+            count *= static_cast<size_t>(dimension);
+        check(api->CreateTensorWithDataAsOrtValue(memory, allocation, count * (half ? 2 : 4), shape.data(), shape.size(),
+                                                  half ? ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 : ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &tensor));
+    };
+    value(input, inputAllocation, inputShape, halfInput, inputValue);
+    value(output, outputAllocation, outputShape, halfOutput, outputValue);
+}
 
-    const int64_t shape[4] = { 1, 3, height, width };
-    const void* data = input.data();
-    size_t bytes = input.size() * sizeof(float);
-    if (halfInput)
-    {
-        halfBuffer.resize(input.size());
-        XMConvertFloatToHalfStream(halfBuffer.data(), sizeof(HALF), input.data(), sizeof(float), input.size());
-        data = halfBuffer.data();
-        bytes = halfBuffer.size() * sizeof(HALF);
-    }
-
-    OrtValue* in = nullptr;
-    check(api->CreateTensorWithDataAsOrtValue(memory, const_cast<void*>(data), bytes, shape, 4,
-                                              halfInput ? ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 : ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in));
-    OrtValue* out = nullptr;
+void DepthModel::Run()
+{
+    if (!inputValue || !outputValue)
+        throw std::logic_error("The depth model has no buffers to run on.");
     const char* inNames[] = { inputName.c_str() };
     const char* outNames[] = { outputName.c_str() };
-    OrtStatus* status = api->Run(session, nullptr, inNames, &in, 1, outNames, 1, &out);
-    api->ReleaseValue(in);
-    if (status)
-    {
-        if (out)
-            api->ReleaseValue(out);
-        check(status);
-    }
-
-    OrtTensorTypeAndShapeInfo* shapeInfo = nullptr;
-    size_t elements = 0;
-    void* result = nullptr;
-    OrtStatus* failure = api->GetTensorTypeAndShape(out, &shapeInfo);
-    if (!failure)
-    {
-        failure = api->GetTensorShapeElementCount(shapeInfo, &elements);
-        api->ReleaseTensorTypeAndShapeInfo(shapeInfo);
-    }
-    if (!failure)
-        failure = api->GetTensorMutableData(out, &result);
-    if (!failure && elements == count)
-    {
-        output.resize(count);
-        if (halfOutput)
-            XMConvertHalfToFloatStream(output.data(), sizeof(float), static_cast<const HALF*>(result), sizeof(HALF), count);
-        else
-            memcpy(output.data(), result, count * sizeof(float));
-    }
-    api->ReleaseValue(out);
-    check(failure);
-    if (elements != count)
-        throw std::runtime_error("The model returned a depth map of unexpected size.");
+    OrtError{ api }(api->Run(session, nullptr, inNames, &inputValue, 1, outNames, 1, &outputValue));
 }
