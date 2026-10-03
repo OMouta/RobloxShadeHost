@@ -2,7 +2,7 @@
 // The docs in src/content/docs say it in their own words; keep them in line when this changes.
 
 export const requirements = {
-  windows: '64-bit Windows 10 version 1903 or newer, or Windows 11',
+  windows: '64-bit Windows 10 version 2004 or newer, or Windows 11',
   windowsShort: 'Windows 10 and 11',
   macos: 'a Mac with Apple Silicon (M1 or newer) and macOS 13 or newer',
   macosShort: 'Apple Silicon, macOS 13 or newer',

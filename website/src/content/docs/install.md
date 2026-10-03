@@ -4,7 +4,7 @@ description: Download Setup, pick add-ons and start Unishade.
 order: 1
 ---
 
-You need 64-bit Windows 10 version 1903 or newer, or Windows 11. For a Mac or Linux, see [macOS and Linux](/docs/macos-linux/).
+You need 64-bit Windows 10 version 2004 or newer, or Windows 11. For a Mac or Linux, see [macOS and Linux](/docs/macos-linux/).
 
 ## Run Setup
 
